@@ -35,9 +35,9 @@ node tools/standalone-migrate.mjs verify --space-root E:\new-service\spaces\qq-a
 node tools/standalone-import.mjs --space-root E:\new-service\spaces\qq-a
 ```
 
-导入工具只读该空间的 `imported-source` 快照，不连接 QQ 或模型。优先读取原始证据账本并保留原消息 ID；快照没有证据账本时才读取热、冷消息存档。缺少稳定 ID、发言人或时间的记录会明确拒绝，不生成替代证据。重复执行按相同消息 ID 去重，冲突内容拒绝。
+导入工具只读该空间的 `imported-source` 快照，不连接 QQ 或模型，同时读取原始证据账本和热、冷消息存档。归档消息使用与 QQ 协议适配层相同的 `${chatKey}:${entry.id}`，并按相同规则处理时间、角色、CQ 文本、提及和回复；切换后重投同一记录为 duplicate。证据账本记录只有在会话、平台消息 ID、发言人、角色、时间、正文全部精确一致且唯一时才关联到归档消息，旧证据 ID 保留在 `input/evidence-aliases.json`。不能精确关联的旧证据独立保留，不猜测合并。缺少稳定 ID、发言人或时间的记录会明确拒绝；重复执行按相同消息 ID 去重，冲突内容拒绝。
 
-身份词表转换为 `input/entities.json`，原小时块转换为 `input/corpus.json`，消息持久化到 `input/messages.jsonl`。既有 normalizer 密钥和标签、事实键、人工覆盖与向量数据仍由迁移副本保留；裸数字 QQ 身份作为已有 `qq:` 身份的别名。运行期只读规范原料，无需旧宿主路径和 QQ 文件布局，`imported-source` 只作备份。
+身份词表转换为 `input/entities.json`，原小时块转换为 `input/corpus.json`，消息持久化到 `input/messages.jsonl`。离线批量导入先完整写入同格式 hash 链临时文件，fsync 后原子发布；接收结果不会早于持久化。既有 normalizer 密钥和标签、事实键、人工覆盖与向量数据仍由迁移副本保留；裸数字 QQ 身份作为已有 `qq:` 身份的别名。运行期只读规范原料，无需旧宿主路径和 QQ 文件布局，`imported-source` 只作备份。
 
 `import-result.json` 记录转换结果，仍为 `activated:false`。转换不是切换验收：启动后还需核对代表人物、人工修订、事件、文档与来源引用。没有精确来源的旧事实保持原状，不补造消息引用。合成验收入口：`node --test test/standalone-import.mjs`，涵盖移走旧宿主及快照后仍能读取旧事实、文档和身份。
 

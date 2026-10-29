@@ -66,3 +66,5 @@ npm run serve:standalone -- --root E:\vec-standalone-data
 常见错误包括 UNAUTHENTICATED、FORBIDDEN、NOT_FOUND、INVALID_ARGUMENT、INVALID_RECEIPT、OPERATION_CONFLICT 与模型/存储失败码。跨空间撤销授权后后续读取和采用都会重新校验。接入方必须检查 HTTP 状态、ok、逐条接收结果和任务最终状态，允许响应增加新字段。
 
 Node.js 与 Python 完整示例位于 [examples/standalone](../examples/standalone)。历史库迁移、语义验收及回退导出见 [迁移操作说明](operations/standalone-migration.md)。
+
+非人工事实的 evidenceIds 必须指向已接收、同场合的 user 消息；assistant/system/tool 机器输出不能作为非人工事实证据。自动整理与派生语料也仅消费 user 消息，原始上下文仍保留全部角色。

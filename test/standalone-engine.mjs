@@ -5,6 +5,8 @@ import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
 import {createSpaceEngine} from '../src/standalone/engine.mjs';
+import {canonicalMessages,canonicalEvidence,canonicalSources} from '../src/core/input-source.mjs';
+import {readEvidenceRows} from '../src/core/consolidate.mjs';
 const scope={kind:'group',id:'team-dev'};
 const sample=(id='m1',patch={})=>({messageId:id,conversationId:'conversation-A',actorId:'user:alice@example',role:'user',timestamp:Date.now()-600000,text:'周末去露营，记得带绿茶',scope,...patch});
 async function temporary(fn){const root=fs.mkdtempSync(path.join(os.tmpdir(),'vec-space-engine-'));try{await fn(root);}finally{fs.rmSync(root,{recursive:true,force:true});}}
@@ -39,4 +41,32 @@ test('standalone engine: existing consolidation, indexing, promotion and adoptio
  recall=await e.call('recall',{query:'露营',scope});assert.equal(recall.actualMode,'vector');assert(recall.items.some(i=>i.layer==='long-term'));
  await e.close();e=createSpaceEngine({root});await e.call('job',{type:'consolidate'});assert.equal(calls,1);assert((await e.call('recall',{query:'露营',scope})).items.some(i=>i.layer==='long-term'));
  }finally{await e.close();await new Promise(resolve=>model.close(resolve));}
+}));
+
+
+test('standalone evidence: machine messages remain raw context but cannot support facts or automatic consolidation',async()=>temporary(async root=>{
+ const e=createSpaceEngine({root});
+ try {
+  const messages=[sample('human-source',{text:'本人确认喜欢绿茶'}),...['assistant','system','tool'].map(role=>sample(`${role}-source`,{role,text:`MACHINE_ONLY_${role}:模型生成的断言不是人类证据`}))];
+  assert.equal((await e.call('ingest',{messages})).accepted,4);
+  const actorId=messages[0].actorId;
+  for(const role of ['assistant','system','tool']) {
+   const request={operationId:`reject-${role}`,actorId,scope,text:'模型生成的断言不应成为事实',kind:'preference',source:'assistant',evidenceIds:[`${role}-source`]};
+   await assert.rejects(e.call('remember',request),error=>error.code==='INVALID_EVIDENCE',`${role} alone must not support an assistant fact`);
+   await assert.rejects(e.call('remember',{...request,operationId:`reject-evidence-${role}`,source:'evidence'}),error=>error.code==='INVALID_EVIDENCE',`${role} alone must not support an evidence fact`);
+   await assert.rejects(e.call('remember',{...request,operationId:`reject-mixed-${role}`,evidenceIds:['human-source',`${role}-source`]}),error=>error.code==='INVALID_EVIDENCE','adding a human source must not hide an invalid machine reference');
+  }
+  await assert.rejects(e.call('remember',{operationId:'no-source',actorId,scope,text:'没有来源的断言',source:'assistant',evidenceIds:[]}),error=>error.code==='EVIDENCE_REQUIRED');
+  assert.equal((await e.call('remember',{operationId:'human-fact',actorId,scope,text:'喜欢绿茶',kind:'preference',source:'evidence',evidenceIds:['human-source']})).saved,true);
+  assert.equal((await e.call('remember',{operationId:'manual-fact',actorId,scope,text:'人工记录下周提醒买茶',kind:'promise',source:'manual',evidenceIds:[]})).saved,true);
+  const recall=await e.call('recall',{scope});
+  assert(recall.items.some(item=>item.layer==='semantic'&&item.sourceRefs.some(ref=>ref.id==='human-source')));
+  assert(recall.items.some(item=>item.layer==='semantic'&&item.sourceRefs.some(ref=>ref.type==='manual'&&ref.id==='manual-fact')));
+  assert.equal(recall.items.filter(item=>item.layer==='working').length,4,'all roles remain available as explicitly contextual raw messages');
+  const input=path.join(root,'input');
+  assert.equal(canonicalMessages(input).length,4,'machine raw messages must not be deleted');
+  assert.deepEqual(canonicalEvidence(input).map(row=>row.id),['human-source']);
+  assert.deepEqual(canonicalSources(input).flatMap(source=>source.messages.map(row=>row.id)),['human-source'],'derived corpus ingestion uses only human evidence');
+  assert.deepEqual(readEvidenceRows({sourceRoot:input}).rows.map(row=>row.id),['human-source'],'automatic consolidation cannot read machine output by another input route');
+ }finally{await e.close();}
 }));

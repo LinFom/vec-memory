@@ -12,7 +12,8 @@ export function createProtocolBridge({config,dataDir,fetcher=(...args)=>fetch(..
   try {state=JSON.parse(fs.readFileSync(file,'utf8'));} catch(e){if(e.code!=='ENOENT')throw e;}
   if(state.target?.base!==target.base||state.target?.space!==target.space) throw Error('协议队列目标已改变，请先完成原目标迁移');
   const save=()=>{fs.mkdirSync(path.dirname(file),{recursive:true});fs.writeFileSync(file+'.tmp',JSON.stringify(state));fs.renameSync(file+'.tmp',file);};
-  let running=null, stopped=false; const controllers=new Set();
+  let running=null, syncing=null, stopped=false;
+  const queuedIds=new Set(state.queue.map(m=>m.messageId)); const controllers=new Set();
   async function request(route,body,method='POST') {
     if(stopped)throw Error('适配层已停用');
     const ac=new AbortController();controllers.add(ac);const timer=setTimeout(()=>ac.abort(),2500);
@@ -20,17 +21,63 @@ export function createProtocolBridge({config,dataDir,fetcher=(...args)=>fetch(..
       const r=await fetcher(`${target.base}/api/v1/spaces/${encodeURIComponent(target.space)}/${route}`,{method,headers:{'Content-Type':'application/json',Authorization:`Bearer ${token}`},body:JSON.stringify(body),signal:ac.signal});const p=await r.json();if(!r.ok||p.ok===false)throw Error(p.error?.message||p.error||`HTTP ${r.status}`);return p;
     }finally{clearTimeout(timer);controllers.delete(ac);}
   }
-  function enqueue(messages){for(const m of messages)if(!state.queue.some(x=>x.messageId===m.messageId))state.queue.push(m);save();}
-  async function flush(){if(running)return running;running=(async()=>{try{
-    const pending=[...state.queue];
-    for(let n=0;n<pending.length&&!stopped;n+=100){const batch=pending.slice(n,n+100);const p=await request('messages',{messages:batch});if(stopped)return;
-      if(!Array.isArray(p.results))throw Error('消息接口缺少逐条接收结果');
-      const accepted=new Set(p.results.filter(r=>['accepted','duplicate'].includes(r.status)).map(r=>r.messageId));
-      const failed=p.results.filter(r=>!['accepted','duplicate'].includes(r.status));
-      state.queue=state.queue.filter(m=>!accepted.has(m.messageId));state.lastError=failed.length?`投递失败：${failed.map(r=>r.code||r.status).join(', ')}`:null;save();
-    }
-  }catch(e){if(!stopped){state.lastError=String(e.message);save();}}finally{running=null;}})();return running;}
-  async function sync(){try{if(store?.listChats&&store?.recent)for(const chat of store.listChats()){const cursor=Number(state.cursors[chat]||0);let offset=0,entries=[];for(;;){const page=store.recent(chat,{limit:500,offset,includeSelf:true});entries.push(...page.filter(e=>Number(e.id)>cursor));if(page.length<500||page.some(e=>Number(e.id)<=cursor))break;offset+=page.length;}
-    entries.sort((a,b)=>a.id-b.id);if(entries.length){enqueue(entries.map(e=>messageOf(e,chat)));state.cursors[chat]=Math.max(...entries.map(e=>Number(e.id)));save();}}await flush();}catch(e){state.lastError=String(e.message);save();}}
+  function enqueue(messages, cursor = null) {
+    for(const m of messages) if(!queuedIds.has(m.messageId)) { state.queue.push(m); queuedIds.add(m.messageId); }
+    if(cursor)state.cursors[cursor.chat]=cursor.id;
+    save();
+  }
+  function flush() {
+    if(running)return running;
+    running=Promise.resolve().then(async()=>{
+      const pending=[...state.queue];
+      if(!pending.length&&state.lastError){state.lastError=null;save();}
+      try {
+        for(let n=0;n<pending.length&&!stopped;n+=100) {
+          const batch=pending.slice(n,n+100), result=await request('messages',{messages:batch});
+          if(stopped)return;
+          if(!Array.isArray(result.results))throw Error('消息接口缺少逐条接收结果');
+          const batchIds=new Set(batch.map(m=>m.messageId));
+          const accepted=new Set(result.results.filter(r=>batchIds.has(r.messageId)&&['accepted','duplicate'].includes(r.status)).map(r=>r.messageId));
+          state.queue=state.queue.filter(m=>!accepted.has(m.messageId));
+          for(const id of accepted)queuedIds.delete(id);
+          if(accepted.size<batch.length)state.lastError=`投递失败：${result.results.filter(r=>!['accepted','duplicate'].includes(r.status)).map(r=>r.code||r.status).join(', ')||'未收到完整回执'}`;
+          if(!state.queue.length)state.lastError=null;
+          save();
+        }
+      }catch(e){if(!stopped){state.lastError=String(e.message);save();}}
+    }).finally(()=>{running=null;});
+    return running;
+  }
+  function sync() {
+    if(syncing)return syncing;
+    syncing=Promise.resolve().then(async()=>{
+      try {
+        await flush();
+        if(stopped||state.queue.length||state.lastError)return;
+        if(!store?.listChats||!store?.recent)return;
+        for(const chat of store.listChats()) {
+          if(stopped)return;
+          const cursor=Number(state.cursors[chat]||0);
+          let offset=0;const entries=[];
+          for(;;) {
+            const page=store.recent(chat,{limit:500,offset,includeSelf:true});
+            for(const e of page)if(Number(e.id)>cursor)entries.push(e);
+            if(page.length<500||page.some(e=>Number(e.id)<=cursor))break;
+            offset+=page.length;
+          }
+          entries.sort((a,b)=>Number(a.id)-Number(b.id));
+          for(let n=0;n<entries.length;n+=500) {
+            if(stopped)return;
+            const batch=entries.slice(n,n+500);let highest=Number(state.cursors[chat]||0);
+            for(const e of batch)highest=Math.max(highest,Number(e.id));
+            enqueue(batch.map(e=>messageOf(e,chat)),{chat,id:highest});
+            await flush();
+            if(stopped||state.queue.length||state.lastError)return;
+          }
+        }
+      }catch(e){if(!stopped){state.lastError=String(e.message);save();}}
+    }).finally(()=>{syncing=null;});
+    return syncing;
+  }
   return {request,enqueue,flush,sync,status:()=>({pending:state.queue.length,lastError:state.lastError,cursors:{...state.cursors}}),stop(){stopped=true;for(const ac of controllers)ac.abort();}};
 }

@@ -3,7 +3,7 @@ import path from 'node:path';
 import {parentPort,workerData} from 'node:worker_threads';
 import {randomUUID} from 'node:crypto';
 import {DurableLog,MemoryError,requireText,digest} from '../core/durable-log.mjs';
-import {canonicalMessages,canonicalEntities,canonicalChatKey} from '../core/input-source.mjs';
+import {canonicalMessages,canonicalEntities,canonicalChatKey,bindCanonicalMessages} from '../core/input-source.mjs';
 import {createRouter} from '../transport/inproc.mjs';
 import {bindHost} from '../core/host.mjs';
 import {getRuntime,ensureIdentity,DEFAULT_SETTINGS,factStoreOf,endpointOf,runConsolidateNow,runIndex} from '../core/backend.mjs';
@@ -18,6 +18,7 @@ const root=path.resolve(workerData.root),input=path.join(root,'input'),legacy=pa
 fs.mkdirSync(input,{recursive:true});fs.mkdirSync(legacy,{recursive:true});
 if(!fs.existsSync(path.join(input,'source.json'))) fs.writeFileSync(path.join(input,'source.json'),JSON.stringify({version:1,kind:'canonical'}));
 const log=new DurableLog(path.join(input,'messages.jsonl'),()=>{});
+bindCanonicalMessages(input,()=>{log.assertReadable();return log.rows.map(r=>r.data.message);});
 const memoryOperations=new DurableLog(path.join(input,'memory-operations.jsonl'),()=>{});
 function configuredSettings(){const file=path.join(root,'settings.json');return {...DEFAULT_SETTINGS,...workerData.settings,...(fs.existsSync(file)?JSON.parse(fs.readFileSync(file,'utf8')):{})};}
 // Background work is serialized by this worker rather than by legacy global timers.
@@ -61,9 +62,10 @@ async function remember(p){
  const source=p.source||'assistant';if(!Array.isArray(p.evidenceIds||[]))throw new MemoryError('INVALID_EVIDENCE','evidenceIds must be an array');
  const ids=[...new Set(p.evidenceIds||[])];if(ids.some(x=>typeof x!=='string'))throw new MemoryError('INVALID_EVIDENCE','evidenceIds must be strings');
  const messages=new Map(canonicalMessages(input).map(m=>[m.messageId,m]));
+ const aliasesFile=path.join(input,'evidence-aliases.json');if(fs.existsSync(aliasesFile)){for(const [alias,target]of Object.entries(JSON.parse(fs.readFileSync(aliasesFile,'utf8')))){if(messages.has(target)&&!messages.has(alias))messages.set(alias,messages.get(target));}}
  if(!['manual','assistant','evidence'].includes(source))throw new MemoryError('INVALID_SOURCE','source must be manual, assistant or evidence');
  if(source!=='manual'&&!ids.length)throw new MemoryError('EVIDENCE_REQUIRED','Non-manual memories require accepted source messages');
- const refs=ids.map(id=>{const m=messages.get(id);if(!m||canonicalChatKey(m.scope)!==chatKey)throw new MemoryError('INVALID_EVIDENCE','Evidence must exist in the requested scope');return {type:'message',id,chatKey,fromTs:m.timestamp,toTs:m.timestamp};});
+ const refs=ids.map(id=>{const m=messages.get(id);if(!m||canonicalChatKey(m.scope)!==chatKey||source!=='manual'&&m.role!=='user')throw new MemoryError('INVALID_EVIDENCE','Evidence must be an accepted user message in the requested scope');return {type:'message',id,chatKey,fromTs:m.timestamp,toTs:m.timestamp};});
  if(source==='manual')refs.push({type:'manual',id:operationId,chatKey});
  const scope=rt.normalizer.scopeLabel(chatKey),store=factStoreOf(rt),previous=store.getSlot({speaker:hit.label,target:'',fact_kind:kind,scope}),normalized=rt.normalizer.normalize(text,{register:false}).text;
  const itemKey=itemKeyOf(kind,{attr:p.attr||p.itemKey,aspect:p.aspect||p.itemKey});if(kind==='trait'&&!itemKey)throw new MemoryError('INVALID_ARGUMENT','trait requires attr or itemKey');
