@@ -2904,7 +2904,7 @@ export async function handleMemoryVec(req, res, pathname, helpers) {
       const r = readNotes(root);
       // ── 沿标签沿革表折叠（ADR-0019）──────────────────────────────────────
       // `notes.json` 的键是**占位符**，而占位符会变（重建词表 / 身份合并）。
-      // 文件里的旧键不作废、也不改写，读取时沿沿革折到当前标签 —— 
+      // 文件里的旧键不作废、也不改写，读取时沿沿革折到当前标签 ——
       // 否则那些备注**还在文件里、界面上再也显示不出来**（静默失联）。
       const lin = readLineage(root);
       const folded = r.ok ? foldNotes(r.notes, lin.entries) : { notes: r.notes, shadowed: [] };

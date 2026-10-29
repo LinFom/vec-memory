@@ -41,7 +41,7 @@ export function createService({ root, engineFactory = createSpaceEngine } = {}) 
   const lock = fs.openSync(lockFile, 'wx', 0o600);
   fs.writeFileSync(lock, JSON.stringify({ pid: process.pid })); fs.closeSync(lock);
   const engines = new Map(), queues = new Map();
-  let closed = false;
+  let closed = false, closePromise;
   const engine = spaceId => {
     if (!engines.has(spaceId)) engines.set(spaceId, engineFactory({ root: path.join(root, 'spaces', spaceId) }));
     return engines.get(spaceId);
@@ -203,8 +203,6 @@ export function createService({ root, engineFactory = createSpaceEngine } = {}) 
         throw new MemoryError('NOT_FOUND', 'Unknown route', 404);
       } catch (error) { return { status: error.status || 500, body: { ok: false, code: error.code || 'INTERNAL_ERROR', error: error.status ? error.message : 'Internal service error' } }; }
     },
-    async close() { closed = true; await Promise.allSettled([...queues.values()]); await Promise.allSettled([...engines.values()].map(e => e.close())); if (fs.existsSync(lockFile)) fs.unlinkSync(lockFile); }
+    close() { return closePromise ??= (async () => { closed = true; await Promise.allSettled([...queues.values()]); await Promise.allSettled([...engines.values()].map(e => e.close())); if (fs.existsSync(lockFile)) fs.unlinkSync(lockFile); })(); }
   };
 }
-
-

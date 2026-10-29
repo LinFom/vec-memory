@@ -13,4 +13,3 @@ else {
   const stop = async () => { await runtime.close(); process.exitCode = 0; };
   process.once('SIGINT', stop); process.once('SIGTERM', stop);
 }
-
