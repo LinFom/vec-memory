@@ -1,0 +1,398 @@
+{
+  "id": "memory-vec",
+  "name": "向量记忆库",
+  "version": "0.31.0",
+  "apiVersion": 1,
+  "category": "utility",
+  "description": "给机器人一套长期记忆。它把聊天压缩成的小时块向量化存进本地库，回复前自动挑出与当前话题相关的「人格属性」悄悄参考（不主动提及）；还会定期让 LLM 读聊天，判断哪些反复出现的话是梗、哪些是真心话。所有真名和 QQ 号在离开本机前都会被替换成占位符。库里的一切都能在面板里翻看、搜索和体检。默认什么都不做 —— 装上但不配置时，宿主行为与没装完全一样。",
+  "author": "WorkBuddy",
+  "enabledByDefault": false,
+  "entry": "index.js",
+  "capabilities": [
+    "memory.vec"
+  ],
+  "prompt": {
+    "sections": [
+      {
+        "id": "memory-vec-remember",
+        "title": "记事实",
+        "priority": 40,
+        "content": "记**对人**的长期事实印象用 `memory-vec__remember` —— 写进向量记忆库，相关话题出现时自动参考（不主动提及），也能被语义检索。\n该记：对方自述的固定信息、喜好口味、雷点禁忌、风格性格、身份关系、长期约定、反复玩的梗 —— 一个方面记一条。\n**userId 必填**：对方 QQ 号（聊天行「名字(QQ数字)」里的数字），只给昵称以后会对不上人。"
+      },
+      {
+        "id": "memory-vec-search",
+        "title": "搜旧事",
+        "priority": 40,
+        "content": "想不起来很久以前的事时用 `memory-vec__search` —— **语义**检索，直接用自然语言描述那件事就行、不必抠关键词。返回的是压缩片段不是完整录像；搜不到就如实说想不起来，**不要编**。要抠准词、按天翻或查原文，用内置的 `memory_search`。"
+      }
+    ]
+  },
+  "requires": [],
+  "settingsUi": {
+    "id": "main",
+    "label": "向量记忆库",
+    "file": "settings-ui.js"
+  },
+  "settings": {
+    "autoIndexEnabled": false,
+    "autoIndexIntervalMin": 0,
+    "shadowMode": true,
+    "injectEnabled": true,
+    "serviceBaseURL": "http://127.0.0.1:8088",
+    "autoStartService": true,
+    "serviceRoot": "",
+    "embedBaseURL": "",
+    "embedApiKey": "",
+    "embedModel": "",
+    "embedBatchSize": 10,
+    "embedTimeoutMs": 30000,
+    "embedDimensions": "",
+    "maxChars": 1200,
+    "withKeywords": true,
+    "withSummary": true,
+    "topK": 8,
+    "queryInstruction": "",
+    "suspectMinCount": 8,
+    "suspectMaxSpread": 0.35,
+    "selfAliases": "",
+    "groupNamesBaseURL": "",
+    "llmEndpointKind": "",
+    "llmBaseURL": "",
+    "llmApiKey": "",
+    "llmModel": "",
+    "judgeDryRun": false,
+    "judgePerMinute": 10,
+    "keywordsSource": "filtered",
+    "injectThreshold": 0.5,
+    "injectMode": "boost",
+    "injectPerPerson": 2,
+    "injectTotal": 8,
+    "profileCrossScope": true,
+    "crossChatEnabled": true,
+    "crossChatInPrivate": true,
+    "crossChatInGroup": true,
+    "crossChatIncludePrivate": false,
+    "crossChatMinutes": 10,
+    "crossChatMaxChats": 2,
+    "crossChatMaxChars": 120,
+    "rememberCheckpointEnabled": true,
+    "rememberCheckpointEvery": 0,
+    "status": {},
+    "ops": [],
+    "protocolV1": false,
+    "spaceId": "",
+    "serviceToken": ""
+  },
+  "configSchema": {
+    "llmEndpointKind": {
+      "type": "string",
+      "enum": [
+        "",
+        "local",
+        "external"
+      ],
+      "label": "LLM 端点类型（M4 判定用，必填）",
+      "description": "模式判定（M4 第二段）会把归一化后的聊天文本送给 LLM —— 这是出境，去哪必须显式声明：local = 本机推理（如 llama.cpp），external = 外部 API。**留空则拒绝启动判定**（fail-closed）：不会因为默认配置悄悄把文本送到外部。"
+    },
+    "llmBaseURL": {
+      "type": "string",
+      "label": "LLM 端点地址（判定用）",
+      "description": "OpenAI 兼容 /chat/completions 服务，例如本机 llama-server 的 http://127.0.0.1:8080。独立于嵌入端点与聊天模型。"
+    },
+    "llmApiKey": {
+      "type": "string",
+      "secret": true,
+      "label": "LLM 端点 Key",
+      "description": "本机推理通常留空。"
+    },
+    "llmModel": {
+      "type": "string",
+      "label": "LLM 模型名（判定用）",
+      "description": "例如 qwen3-8b。判定走温度 0。"
+    },
+    "judgeDryRun": {
+      "type": "boolean",
+      "label": "判定 dry-run（默认关）",
+      "description": "打开后：判定跑通全链路（读档 → 成簇 → 组 prompt → 解析）但用固定桩返回、**不调 LLM、不落库**，并在 /judge 响应里回传完整出境内容 —— 真开 LLM 前先看清会送什么出去。"
+    },
+    "judgePerMinute": {
+      "type": "number",
+      "min": 1,
+      "max": 120,
+      "step": 1,
+      "label": "判定频率上限（次/分钟）",
+      "description": "全局每分钟 LLM 调用上限。连续失败会指数退避（批间间隔翻倍）—— 退避拉长的是间隔，不是重试队列：抽不到就跳过，不存在积压。"
+    },
+    "queryInstruction": {
+      "type": "string",
+      "label": "查询侧指令前缀（可选）",
+      "description": "Qwen3-Embedding 这类模型要求查询侧带 `Instruct: {任务}\\nQuery:{问句}`、文档侧不带 —— 这叫非对称编码。留空用官方默认任务描述。两侧写反不会报错，只会静默降分，所以前缀由代码强制加上，这里只决定任务描述。"
+    },
+    "suspectMinCount": {
+      "type": "number",
+      "min": 2,
+      "max": 500,
+      "step": 1,
+      "label": "兜底层：最小出现次数",
+      "description": "扫描「疑似专名」时的总次数下限，默认 8。太小会把噪声也当成名字。"
+    },
+    "suspectMaxSpread": {
+      "type": "number",
+      "min": 0.02,
+      "max": 1,
+      "step": 0.01,
+      "label": "兜底层：最大分散度",
+      "description": "判据是「命中的会话数 ÷ 总会话数」。真名集中在少数群（分散度低），普通词在所有群近似均匀（分散度高）。默认 0.35。这条来自 ADR-0003：用分布形态而不是频率，因为「天天喊的人名」和「哈哈」都是高频词。"
+    },
+    "selfAliases": {
+      "type": "string",
+      "label": "自我别称（逗号分隔）",
+      "description": "词表里的「我是谁」来自三处：config.json 的 botName、per-chat-persona 的人设名、以及从存档里挖「主人怎么叫我」（如「小萨」）。这三处都挖不出**残缺形态** —— 多词名字被拆开的单块（`Single Samara` 里的 `samara`）没有独立来源。与其让代码去猜「多词名字的每一块都算不算我」，不如你显式声明。逗号/顿号/换行分隔；每项都会被替换成 〔SELF〕。**留空＝不额外声明，不做任何猜测**（缺省不降级）。"
+    },
+    "serviceBaseURL": {
+      "type": "string",
+      "label": "数据面服务地址",
+      "description": "向量库的数据接口跑在独立服务里（默认 http://127.0.0.1:8088）。宿主核心不再被本插件改动。改端口要同步改服务的启动参数；只改这里不需要重启 QQ-Agent。"
+    },
+    "autoStartService": {
+      "type": "boolean",
+      "default": true,
+      "label": "随 QQ-Agent 自动启动服务",
+      "description": "开启（默认）：QQ-Agent 启动时，如果这个号对应的数据面服务没在跑，就**静默地**把它带起来（不开窗口，日志写 `<仓>/models/vec-autostart.log`），省掉每次手动双击启动器。已在跑则跳过。宿主退出时它自己跟着退。关掉它 = 回到手动启动。**找不到仓时静默跳过**（便携包拷到别的机器上就是这个形态）。"
+    },
+    "serviceRoot": {
+      "type": "string",
+      "label": "vec-memory 仓路径",
+      "description": "自动拉起服务要用的仓根目录（里面应有 `tools/instances.mjs` 与 `instances.json`），例如 `E:\\\\WorkSpace\\\\vec-memory`。**留空 = 不自动启动**（服务缺席时注入照旧静默跳过）。换机器/挪过目录时改这里。"
+    },
+    "groupNamesBaseURL": {
+      "type": "string",
+      "label": "群名来源（宿主 HTTP 面，可留空）",
+      "description": "星图上的**星系标签**要显示群昵称，而群名只有宿主知道（协议端的 get_group_list）—— 存档里只有群号。服务会去读宿主的 `GET /api/onebot/groups`。**留空 = 自动**：从宿主 config.json 的 `server.port` 推（实测 3210）。宿主换端口/换机器时才需要填，例 `http://127.0.0.1:3210`。填一个连不上的地址 ⇔ 关掉这一路：星系标签退回显示占位符代号「群 C9814」（星图页脚会写清原因）。"
+    },
+    "embedBaseURL": {
+      "type": "string",
+      "label": "嵌入端点地址",
+      "description": "OpenAI 兼容的 /embeddings 服务地址，例如 https://api.deepseek.com 或 https://api.openai.com/v1。独立于聊天模型 —— 换嵌入模型不影响聊天。面板上有「用宿主端点」按钮可以一键预填。"
+    },
+    "embedApiKey": {
+      "type": "string",
+      "secret": true,
+      "label": "嵌入端点 Key",
+      "description": "只给嵌入用。**本机推理端点（llama.cpp 等）留空即可** —— 留空就不发送 Authorization 头。线上端点必填，漏填会由端点返回 401。"
+    },
+    "embedModel": {
+      "type": "string",
+      "label": "嵌入模型名",
+      "description": "例如 text-embedding-3-small。**换模型必须重建库**：同一库里混两个模型的向量，相似度不可比，插件会拒绝写入而不是让你算出垃圾分数。"
+    },
+    "embedDimensions": {
+      "type": "string",
+      "label": "显式维度（可选）",
+      "description": "部分端点支持 dimensions 参数（OpenAI text-embedding-3 系列）。留空用端点默认。改这个等于换维度，同样需要重建库。"
+    },
+    "embedBatchSize": {
+      "type": "number",
+      "min": 1,
+      "max": 64,
+      "step": 1,
+      "label": "单批条数",
+      "description": "一次请求塞几条文本。默认 10（最严的已知云端上限，如阿里云 text-embedding-v3）。端点嫌多时会在报错里说「最多收几条」，服务会自动按它说的改小重发，不改这个值也能跑通；这里是让它一次就发对、少一次试错。"
+    },
+    "embedTimeoutMs": {
+      "type": "number",
+      "min": 1000,
+      "max": 120000,
+      "step": 1000,
+      "label": "单次超时（毫秒）",
+      "description": "默认 30000。超时会重试（共 3 次），最终失败会原样报出来，不吞。"
+    },
+    "maxChars": {
+      "type": "number",
+      "min": 120,
+      "max": 6000,
+      "step": 20,
+      "label": "单条向量化文本上限（字）",
+      "description": "小时块的 summary 是原始消息拼接（实测单块可达 1 万多字），必须截断。默认 1200 字（约 600–900 token）。面板会显示每条实际用了多少字、截掉了多少。"
+    },
+    "withKeywords": {
+      "type": "boolean",
+      "label": "向量化时带上关键词",
+      "description": "核心已经提炼好的关键词，信号质量高于原始 summary。建议开。"
+    },
+    "withSummary": {
+      "type": "boolean",
+      "label": "向量化时带上摘要正文",
+      "description": "关掉就只用标题+关键词（更省 token，但语义粒度变粗）。"
+    },
+    "topK": {
+      "type": "number",
+      "min": 1,
+      "max": 50,
+      "step": 1,
+      "label": "默认召回条数",
+      "description": "搜索与（未来的）注入默认取前几条。默认 8。"
+    },
+    "autoIndexEnabled": {
+      "type": "boolean",
+      "label": "定时自动索引",
+      "description": "关闭（默认）：只有你在面板上点「索引」才会跑。开启后按下面的间隔自动跑一轮增量索引（源内容没变的块会被跳过，不重复烧 token）。"
+    },
+    "autoIndexIntervalMin": {
+      "type": "number",
+      "min": 0,
+      "max": 1440,
+      "step": 5,
+      "label": "自动索引间隔（分钟）",
+      "description": "0 = 不自动（默认）。开启定时后最小 1 分钟。"
+    },
+    "shadowMode": {
+      "type": "boolean",
+      "label": "影子模式（不出现在提示词里）",
+      "description": "默认开启。M0 本来也不注入，这个开关是给 M1/M2 用的：开启时六维打分「只算不用」，攒几天看分布，符合判据（档数≥3 且极差>0.01）再关掉。"
+    },
+    "injectEnabled": {
+      "type": "boolean",
+      "default": true,
+      "label": "人格属性注入（M2）",
+      "description": "每轮回复前，把长期记忆里的事实槽渲染成「人格属性句」（如『某人表达真诚、说到做到（例：……）』）追加进提示词末尾，悄悄参考、不主动提及（2026-10-10 拍板：人格属性句 · 全群开）。服务没起/超时一律静默跳过，绝不影响回复。"
+    },
+    "rememberCheckpointEnabled": {
+      "type": "boolean",
+      "default": true,
+      "label": "记忆检查点",
+      "description": "每隔若干轮，在本轮提示词末尾追加一条【记忆检查点】系统维护消息，提醒模型把**稳定事实**用「记事实」工具入库（近因位置注意力必达）。关掉 = 完全靠模型自觉，实测几乎不会主动记。"
+    },
+    "rememberCheckpointEvery": {
+      "type": "number",
+      "default": 0,
+      "min": 0,
+      "max": 200,
+      "step": 1,
+      "label": "检查点间隔（轮）",
+      "description": "0 = 用默认 4 轮。每个会话（群/私聊）单独计数；模型真调过「记事实」后计数清零重新起算。**按轮计数，不按模型往返次数**。"
+    },
+    "keywordsSource": {
+      "type": "string",
+      "enum": [
+        "core",
+        "filtered",
+        "redacted"
+      ],
+      "label": "关键词来源（脱敏后重抽）",
+      "description": "核心关键词是未脱敏文本上的分词 ⇒ single/samara、cq/qq、kid1411 这类碎片会出境。filtered=默认：保留核心分词并按词表剔碎片；core=旧口径（碎片出境）；redacted=从已脱敏文本重抽（宽口径 snippets+summary，实测空表 0/502）。改它会改变出境文本 ⇒ 全库重哈希并重嵌入，请先用 tools/keyword-audit.mjs 量过再切。"
+    },
+    "injectThreshold": {
+      "type": "number",
+      "default": 0.5,
+      "min": 0,
+      "max": 1,
+      "label": "注入相似度阈值",
+      "description": "属性与当前话题的向量相似度 ≥ 此值的行是「现在就用得上」（hot，排最前）。默认 0.5（2026-10-13 由 0.85 下调，依据真库实测：0.85 下 hot 恒 0、首次生效阈值 0.45~0.5）。换嵌入模型后分布会变，需按实测重新校准。"
+    },
+    "injectMode": {
+      "type": "string",
+      "enum": [
+        "boost",
+        "hard"
+      ],
+      "default": "boost",
+      "label": "阈值用法",
+      "description": "boost（默认，与宿主印象机制同构）：hot 只是排序加成，其余属性照常注入；hard：只有 ≥ 阈值的属性才注入。嵌入服务缺席时 hard 自动降级为 boost（缺依赖不能变成什么都不注入）。"
+    },
+    "injectPerPerson": {
+      "type": "number",
+      "default": 2,
+      "min": 1,
+      "max": 6,
+      "label": "每人注入条数",
+      "description": "对齐宿主「群友印象」机制的每人 2 条（2026-10-10 拍板）。"
+    },
+    "injectTotal": {
+      "type": "number",
+      "default": 8,
+      "min": 1,
+      "max": 24,
+      "label": "单轮注入总上限",
+      "description": "兜住 prompt 预算：多人同时在场时按可信度从高到低截断。"
+    },
+    "profileCrossScope": {
+      "type": "boolean",
+      "default": true,
+      "label": "档案跨场合",
+      "description": "档案段（= 长期固定特征，如「年龄=21岁」）要不要在**所有**会话里复用。默认开：私聊说过的固定特征，群里也认得（2026-10-18 拍板 —— 人对自己的年龄没有场合预期）。关掉 = 只在本场合注入（旧行为）：私聊记的档案不进群、群 A 记的不进群 B，防的是住址/真名/性取向这类一句话就社死的信息。开关打开时 `profileBlockedByScope` 恒为 0，别再拿它判断「有没有被挡」。"
+    },
+    "crossChatEnabled": {
+      "type": "boolean",
+      "default": true,
+      "label": "跨会话近况",
+      "description": "把**别的会话**最近几分钟的原话摘一节注进提示词，解决「群里刚说的话私聊里完全不知道」。宿主短期历史按 chatKey 物理隔离（compose.js:1009/1366），不注入就真的没有。只读宿主 messages/ 存档，零宿改；按 mtime 缓存，文件没变不重解析。宿主那批 `api.architecture.crossChatAwareness` 键在新树没有消费方，打开无效，能力落在这里。"
+    },
+    "crossChatInPrivate": {
+      "type": "boolean",
+      "default": true,
+      "label": "私聊也收别处动静",
+      "description": "目标侧：私聊里要不要注入别的群最近说的话。默认开（2026-10-19 拍板）。关掉 = 私聊只认自己的历史与长期事实（宿主 2026-09-23 的旧口径）。"
+    },
+    "crossChatInGroup": {
+      "type": "boolean",
+      "default": true,
+      "label": "群聊也收别处动静",
+      "description": "目标侧：群聊里要不要注入**其它**群最近说的话（当前群永远排除）。默认开（宿主 2026-09-23 的口径是「跨群只该在群与群之间发生」）。觉得群聊里串味就关掉这条，只保留私聊那份 —— 别为了关群侧把整个功能关掉。"
+    },
+    "crossChatIncludePrivate": {
+      "type": "boolean",
+      "default": false,
+      "label": "私聊内容可作来源",
+      "description": "来源侧：私聊里说的话能不能出现在**别的群**里。默认关 —— 打开等于把私聊逐字原话漏进群，风险比「档案跨场合」（固定特征）大得多。"
+    },
+    "crossChatMinutes": {
+      "type": "number",
+      "default": 10,
+      "min": 1,
+      "max": 240,
+      "label": "近况时间窗（分钟）",
+      "description": "只摘最近这么多分钟的原话。越短越像「刚刚」，越长越像翻旧账。"
+    },
+    "crossChatMaxChats": {
+      "type": "number",
+      "default": 2,
+      "min": 1,
+      "max": 8,
+      "label": "最多几个会话",
+      "description": "按最近活跃排序取前 N 个来源会话，兜住提示词预算。"
+    },
+    "crossChatMaxChars": {
+      "type": "number",
+      "default": 120,
+      "min": 40,
+      "max": 600,
+      "label": "每个会话的字符上限",
+      "description": "单个来源会话最多摘多少字；超了在句子边界截断。"
+    },
+    "status": {
+      "type": "internal",
+      "label": "运行状态快照",
+      "description": "插件写、面板读：面板刷新时靠它渲染概览卡与最后一次索引结果。不要手改。"
+    },
+    "ops": {
+      "type": "internal",
+      "label": "面板提交的操作",
+      "description": "由「设置 → 向量记忆库」面板写入，插件取走执行。不要手改（手改会在下一次刷新时被清掉）。"
+    },
+    "protocolV1": {
+      "type": "boolean",
+      "label": "使用独立记忆协议 v1",
+      "description": "迁移核对后启用，重启插件生效。"
+    },
+    "spaceId": {
+      "type": "string",
+      "label": "记忆空间 ID"
+    },
+    "serviceToken": {
+      "type": "string",
+      "label": "项目访问令牌",
+      "secret": true
+    }
+  }
+}

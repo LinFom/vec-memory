@@ -1,0 +1,17 @@
+node_modules/
+__pycache__/
+*.pyc
+.env
+.env.*
+data*/
+state/
+models/
+*.log
+*.bak
+*.tmp
+access.json
+settings.json
+.service.lock
+.scratch/
+_scratch/
+_rollback/

@@ -1,0 +1,21 @@
+<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>独立记忆库</title>
+<style>body{font:16px system-ui;background:#f5f6f8;color:#243047;max-width:960px;margin:32px auto;padding:0 20px}section{background:white;border:1px solid #dbe0e8;border-radius:12px;padding:20px;margin:18px 0}input,textarea,select,button{font:inherit;padding:9px;margin:5px;border:1px solid #aab5c7;border-radius:6px}textarea{display:block;width:90%;height:140px}button{background:#203f78;color:white;cursor:pointer}pre{white-space:pre-wrap;overflow-wrap:anywhere}label{display:block}h1{font-size:26px}</style>
+<h1>独立混合记忆库</h1><p>管理项目、记忆空间和授权。凭据仅保留在本页内存，关闭页面后清除。</p>
+<section><label>管理员凭据 <input id="token" type="password" autocomplete="off"></label><button id="load">连接并刷新</button><pre id="spaces"></pre></section>
+<section><h2>项目与空间</h2><input id="project" placeholder="项目 ID"><button id="projectCreate">创建项目</button><pre id="credential"></pre><input id="space" placeholder="空间 ID"><input id="owner" placeholder="所属项目 ID"><button id="spaceCreate">创建空间</button><label>允许读取此空间的项目（逗号分隔，留空撤销全部）<input id="readers"></label><button id="grant">保存共享授权</button></section>
+<section><h2>模型与记忆</h2><p>以下操作使用上方空间 ID。模型密钥不会通过读取接口返回。</p><button id="settingsLoad">读取设置</button><textarea id="settings" aria-label="模型设置 JSON" placeholder='{"embedBaseURL":"http://localhost:8081/v1","embedModel":"your-model"}'></textarea><button id="settingsSave">保存设置</button><button id="status">记忆状态</button><button id="consolidate">整理记忆</button><button id="index">构建索引</button><button id="jobs">任务进度</button><input id="query" placeholder="搜索记忆"><button id="recall">检索</button></section><pre id="result" role="status"></pre>
+<script>
+const $=id=>document.getElementById(id);let adminToken='';
+async function api(route,method='GET',body){const r=await fetch('/api/v1/'+route,{method,headers:{Authorization:'Bearer '+adminToken,...(body?{'Content-Type':'application/json'}:{})},...(body?{body:JSON.stringify(body)}:{})});const data=await r.json();if(!r.ok)throw new Error(data.code+': '+data.error);return data}
+function bind(id,fn){$(id).onclick=async()=>{try{$('result').textContent=JSON.stringify(await fn(),null,2)}catch(e){$('result').textContent=e.message}}}
+const sid=()=>encodeURIComponent($('space').value.trim());
+bind('load',async()=>{adminToken=$('token').value;$('token').value='';const d=await api('admin/spaces');$('spaces').textContent=JSON.stringify(d,null,2);return{ok:true}});
+bind('projectCreate',async()=>{const d=await api('admin/projects','POST',{projectId:$('project').value.trim()});$('credential').textContent='请保存项目凭据（仅显示一次）：'+d.token;return{ok:true,projectId:d.projectId}});
+bind('spaceCreate',()=>api('admin/spaces','POST',{spaceId:$('space').value.trim(),owner:$('owner').value.trim()}));
+bind('grant',()=>api('admin/spaces/'+sid()+'/readers','PUT',{projectIds:$('readers').value.split(',').map(x=>x.trim()).filter(Boolean)}));
+bind('settingsLoad',async()=>{const d=await api('admin/spaces/'+sid()+'/settings');$('settings').value=JSON.stringify(d.values,null,2);return d});
+bind('settingsSave',()=>api('admin/spaces/'+sid()+'/settings','PUT',{patch:JSON.parse($('settings').value)}));
+bind('status',()=>api('spaces/'+sid()+'/status'));bind('jobs',()=>api('spaces/'+sid()+'/jobs'));
+for(const type of ['consolidate','index'])bind(type,()=>api('spaces/'+sid()+'/jobs','POST',{type}));
+bind('recall',()=>api('spaces/'+sid()+'/recall','POST',{query:$('query').value,conversationId:'management',scope:{kind:'private',id:'management'}}));
+</script></html>
