@@ -80,3 +80,17 @@ test('real HTTP empty-library workflow survives restart and isolates projects',a
   let job;for(let i=0;i<30;i++){job=(await api(token,'spaces/personal/jobs/'+task.jobId,'GET')).job;if(job.status==='failed')break;await new Promise(resolve=>setTimeout(resolve,10));}
   assert.equal(job.status,'failed');assert.equal(job.error.code,'LLM_UNCONFIGURED');
 });
+
+test('revocation during queued recall prevents shared content from being returned',async t=>{
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'vec-revoke-')),admin=initialize(root);let release,started;
+  const gate=new Promise(r=>release=r),begun=new Promise(r=>started=r);
+  const service=createService({root,engineFactory:()=>({call:async op=>{if(op==='job'){started();await gate;return {ok:true}}return {ok:true,items:[{id:'x',text:'content'}],block:'content',receiptId:'r'}},close:async()=>{}})});
+  t.after(async()=>{release();await service.close();fs.rmSync(root,{recursive:true,force:true})});
+  const call=(token,route,method='POST',body={})=>service.handle({token,path:'/api/v1/'+route,method,body});
+  let token;
+  for(const p of ['a','b']){const result=await call(admin,'admin/projects','POST',{projectId:p});if(p==='a')token=result.body.token;await call(admin,'admin/spaces','POST',{spaceId:p,owner:p})}
+  await call(admin,'admin/spaces/b/readers','PUT',{projectIds:['a']});await call(token,'spaces/a/jobs','POST',{type:'index'});await begun;
+  const pending=call(token,'spaces/a/recall','POST',{sharedSpaceIds:['b']});await new Promise(r=>setImmediate(r));
+  await call(admin,'admin/spaces/b/readers','PUT',{projectIds:[]});release();
+  const result=await pending;assert.equal(result.status,403);assert.equal(result.body.items,undefined);
+});
