@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { DurableLog, MemoryError, copy, digest, requireText } from './durable-log.mjs';
 import { scopeType, evaluateVisibility } from './visibility.mjs';
 import { normalizeReferences } from './provenance.mjs';
-export const SUBJECT_KINDS = Object.freeze(['group','work','project','object','case','concept']);
+export const SUBJECT_KINDS = Object.freeze(['group','work','project','object','case','concept','meme']);
 const canonicalScope = s => typeof s === 'string' && /^(group|private):C[0-9]+$/.test(s);
 const mentions = (text,name) => {
   if (!/^[A-Za-z0-9 _.-]+$/.test(name)) return text.includes(name);
@@ -84,6 +84,70 @@ export class SubjectStore {
       return {subjects:[subject],observations:[observation],extra:{subject,observation}};
     });
   }
+  // Human revisions preserve the original claim and evidence rather than rewriting history.
+  reviseObservation(request) {
+    return this.transact(request,state=>{
+      const subject=this.active(state,request.subjectId,request.expectedSubjectRev??state.subjects.get(request.subjectId)?.rev);
+      const old=state.observations.get(request.observationId);
+      if(!old || this.canonical(old.subjectId,state).id!==subject.id) fail('NOT_FOUND','Observation not found',404);
+      if(old.rev!==request.expectedRev || old.status!=='active') fail('STALE_REVISION','Observation changed',409);
+      if(!['correct','retract'].includes(request.action)) fail('INVALID_ARGUMENT','action must be correct or retract');
+      const at=Number(request.observedAt??Date.now());
+      if(!Number.isFinite(at)||at<0) fail('INVALID_ARGUMENT','Invalid observedAt');
+      const previous={...old,status:'retracted',rev:old.rev+1,retractionReason:requireText(request.reason,'reason',1000)};
+      const observations=[previous]; let observation=null;
+      if(request.action==='correct') {
+        observation={...old,id:randomUUID(),statement:requireText(request.statement,'statement',2000),status:'active',rev:1,
+          operationId:request.operationId,observedAt:at,authority:'manual',knowledgeStatus:'observed',supersedes:old.id,
+          provenance:[{type:'manual',id:request.operationId,reason:request.reason}],originalProvenance:copy(old.provenance)};
+        observations.push(observation);
+      }
+      const updated={...subject,rev:subject.rev+1};
+      return {subjects:[updated],observations,extra:{subject:updated,observation,retracted:previous}};
+    });
+  }
+  applyDiscovery(request, {verifyEntry}={}) {
+    return this.transact(request,state=>{
+      if(!canonicalScope(request.scope)||!Array.isArray(request.entries)) fail('INVALID_DISCOVERY','Invalid discovery batch');
+      const changed=new Map(),observations=[],results=[];
+      for(const entry of request.entries) {
+        if(typeof verifyEntry!=='function'||!verifyEntry(entry,request.scope)) fail('INVALID_PROVENANCE','Discovery evidence no longer matches its user messages');
+        const key=v=>v.normalize('NFC').toLowerCase();
+        const names=new Set([entry.label,...entry.aliases].map(key));
+        const matches=[...state.subjects.values()].filter(s=>s.status==='active'&&s.scopeBinding===request.scope&&[s.label,...s.aliases].some(n=>names.has(key(n))));
+        // Ambiguous names stay visible as distinct candidates; no similarity-based identity merges.
+        const compatible=matches.filter(s=>s.kind===entry.kind),ambiguous=matches.length>1||matches.length===1&&!compatible.length;
+        const discoveryKey=digest({scope:request.scope,kind:entry.kind,label:key(entry.label),ambiguous:true});
+        let subject=!ambiguous&&compatible.length===1?compatible[0]:[...state.subjects.values()].find(s=>s.status==='active'&&s.discoveryKey===discoveryKey);
+        if(!subject) {
+          subject={id:randomUUID(),kind:entry.kind,label:entry.label,aliases:[],scopeBinding:request.scope,status:'active',mergedInto:null,rev:1,knowledgeStatus:'candidate',discovered:true,...(ambiguous?{discoveryKey}:{})};
+          state.subjects.set(subject.id,subject);
+        }
+        // An explicitly attested alias can join exactly one identity; collisions remain unassigned.
+        const safeAliases=entry.aliases.filter(alias=>![...state.subjects.values()].some(s=>s.id!==subject.id&&s.status==='active'&&s.scopeBinding===request.scope&&[s.label,...s.aliases].some(n=>key(n)===key(alias))));
+        const manual=[...state.observations.values()].find(o=>o.subjectId===subject.id&&o.aspect===entry.aspect&&o.status==='active'&&o.authority==='manual');
+        const knowledgeStatus=ambiguous||entry.interpretation==='mention'||manual?'candidate':'observed';
+        if(knowledgeStatus==='observed')for(const prior of state.observations.values()){
+          if(prior.subjectId===subject.id&&prior.status==='active'&&prior.interpretation==='mention'){
+            const resolved={...prior,status:'retracted',rev:prior.rev+1,resolutionReason:'definition-added'};
+            observations.push(resolved);state.observations.set(prior.id,resolved);
+          }
+        }
+        const duplicate=[...state.observations.values()].find(o=>o.subjectId===subject.id&&o.status==='active'&&o.aspect===entry.aspect&&o.statement===entry.statement&&o.claimType===entry.claimType&&digest(o.provenance)===digest(entry.provenance));
+        if(duplicate) {results.push({subjectId:subject.id,observationId:duplicate.id,duplicate:true});continue;}
+        const observation={id:randomUUID(),subjectId:subject.id,aspect:entry.aspect,statement:entry.statement,claimType:entry.claimType,
+          sourceScope:request.scope,reporterLabel:null,provenance:entry.provenance,observedAt:entry.observedAt,operationId:request.operationId,
+          status:'active',rev:1,authority:'automatic',knowledgeStatus,interpretation:entry.interpretation,
+          ...(ambiguous?{reviewReason:'ambiguous-name',possibleSubjectIds:matches.map(s=>s.id)}:manual?{reviewReason:'manual-override',conflictsWith:manual.id}:{})};
+        observations.push(observation);state.observations.set(observation.id,observation);
+        subject={...subject,aliases:[...new Set([...subject.aliases,...safeAliases])],rev:subject.rev+1,
+          knowledgeStatus:subject.knowledgeStatus==='observed'||knowledgeStatus==='observed'?'observed':'candidate'};
+        state.subjects.set(subject.id,subject);changed.set(subject.id,subject);
+        results.push({subjectId:subject.id,observationId:observation.id,knowledgeStatus,ambiguous});
+      }
+      return {subjects:[...changed.values()],observations,extra:{discoveries:results}};
+    });
+  }
   aliases(request) {
     return this.transact(request,state=>{
       const s=this.active(state,request.subjectId,request.expectedRev);
@@ -128,10 +192,12 @@ export class SubjectStore {
   select({scope,text='',subjectId=null,limit=4}={}) {
     if(!canonicalScope(scope)) return [];
     const state=this.snapshot(),selected=subjectId?new Set([this.canonical(subjectId,state).id]):this.matchingSubjectIds({scope,text});
+    // Read-side ambiguity is displayed, while write-side matching stays unambiguous.
+    if(!subjectId)for(const s of state.subjects.values())if(s.status==='active'&&s.scopeBinding===scope&&[s.label,...s.aliases].some(name=>mentions(text.normalize('NFC').toLowerCase(),name.normalize('NFC').toLowerCase())))selected.add(s.id);
     return [...state.observations.values()].filter(o=>o.status==='active' && selected.has(this.canonical(o.subjectId,state).id) &&
       evaluateVisibility({sourceScope:o.sourceScope,targetScope:scope,section:'subject'}).allowed)
-      .sort((a,b)=>b.observedAt-a.observedAt || a.id.localeCompare(b.id)).slice(0,Math.max(0,limit))
-      .map(o=>({ ...o,subject:this.canonical(o.subjectId,state),relation:'same' }));
+      .sort((a,b)=>(b.authority==='manual')-(a.authority==='manual')||(a.knowledgeStatus==='candidate')-(b.knowledgeStatus==='candidate')||b.observedAt-a.observedAt || a.id.localeCompare(b.id)).slice(0,Math.max(0,limit))
+      .map(o=>({ ...o,subject:this.canonical(o.subjectId,state),relation:'same',possibleConflict:[...state.observations.values()].some(other=>other.id!==o.id&&other.status==='active'&&other.aspect===o.aspect&&other.statement!==o.statement&&other.sourceScope===o.sourceScope&&this.canonical(other.subjectId,state).id===this.canonical(o.subjectId,state).id) }));
   }
   // Freeze requests alongside the model output, BEFORE applying any window output.
   prepareWindow({win,windowId,scope,candidates=[],normalize=s=>s,allowedSubjectIds=null,resolveReporter=()=>null}) {

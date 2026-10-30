@@ -99,7 +99,7 @@ export function createService({ root, engineFactory = createSpaceEngine } = {}) 
         const parts = url.pathname.split('/').filter(Boolean).map(decodeURIComponent);
         if (parts[0] !== 'api' || parts[1] !== 'v1') throw new MemoryError('NOT_FOUND', 'Unknown route', 404);
         const finish = value => ({ status: 200, body: { ok: true, ...value } });
-        if (parts[2] === 'version' && method === 'GET') return finish({ protocolVersion: 1, implementationVersion: '0.30.0', capabilities: ['spaces', 'messages', 'entities', 'memories', 'recall', 'adoptions', 'jobs', 'sharing'] });
+        if (parts[2] === 'version' && method === 'GET') return finish({ protocolVersion: 1, implementationVersion: '0.31.0', capabilities: ['spaces', 'messages', 'entities', 'memories', 'recall', 'adoptions', 'jobs', 'sharing', 'subjects', 'discoveries', 'subject-revisions'] });
         if (parts[2] === 'admin') {
           if (!who.admin) throw new MemoryError('FORBIDDEN', 'Administrator credential required', 403);
           if (parts[3] === 'projects' && parts.length === 4 && method === 'POST') {
@@ -131,7 +131,7 @@ export function createService({ root, engineFactory = createSpaceEngine } = {}) 
             if (method === 'PUT') {
               const patch = body.patch;
               if (!patch || typeof patch !== 'object' || Array.isArray(patch)) throw new MemoryError('INVALID_ARGUMENT', 'patch required');
-              const allowed = /^(embed(BaseURL|ApiKey|Model|Revision|BatchSize|TimeoutMs|Dimensions)|llm(BaseURL|ApiKey|Model|TimeoutMs|EndpointKind)|topK|consolidateEnabled|consolidateIntervalMin|consolidateWindowMsgs|consolidateWindowSpanMin|consolidateSettleMin|consolidateMaxWindowsPerRun|consolidateTimeoutMs|promoteHits|autoIndexEnabled|autoIndexIntervalMin|injectEnabled|rememberEnabled|profileCrossScope)$/;
+              const allowed = /^(embed(BaseURL|ApiKey|Model|Revision|BatchSize|TimeoutMs|Dimensions)|llm(BaseURL|ApiKey|Model|TimeoutMs|EndpointKind)|topK|consolidateEnabled|consolidateIntervalMin|consolidateWindowMsgs|consolidateWindowSpanMin|consolidateSettleMin|consolidateMaxWindowsPerRun|consolidateTimeoutMs|promoteHits|autoIndexEnabled|autoIndexIntervalMin|injectEnabled|rememberEnabled|profileCrossScope|thingDiscoveryEnabled|subjectMemoryEnabled)$/;
               if (Object.keys(patch).some(k => !allowed.test(k))) throw new MemoryError('INVALID_SETTING', 'Unsupported setting');
               const settings = read(file, {});
               for (const [k,v] of Object.entries(patch)) { if (/key/i.test(k) && v === '') continue; if (v === null) delete settings[k]; else settings[k] = v; }
@@ -147,8 +147,14 @@ export function createService({ root, engineFactory = createSpaceEngine } = {}) 
           if (!Array.isArray(body.projectIds) || body.projectIds.some(p => !access.projects[p])) throw new MemoryError('INVALID_ARGUMENT', 'Known projectIds required');
           space.readers = [...new Set(body.projectIds)]; saveJson(accessFile, access); return finish({ spaceId: sid });
         }
-        const writes = ['messages','entities','memories','jobs','adoptions'];
-        permit(access, who, sid, writes.includes(operation));
+        const writes = ['messages','entities','memories','jobs','adoptions','discoveries'];
+        permit(access, who, sid, writes.includes(operation) || operation === 'subjects' && method !== 'GET');
+        if (operation === 'discoveries' && parts.length === 5 && method === 'POST') return finish(await serial(sid, () => invoke(sid, 'discover', body)));
+        if (operation === 'subjects' && [5,6].includes(parts.length) && method === 'GET') {
+          const scope = { kind: url.searchParams.get('scopeKind'), id: url.searchParams.get('scopeId') };
+          return finish(await invoke(sid, parts[5] ? 'subject' : 'subjects', { scope, q: url.searchParams.get('q') || '', subjectId: parts[5] }));
+        }
+        if (operation === 'subjects' && parts.length === 7 && parts[6] === 'revisions' && method === 'POST') return finish(await serial(sid, () => invoke(sid, 'subjectRevision', { ...body, subjectId: parts[5] })));
         if (operation === 'messages' && method === 'POST') return finish(await serial(sid, () => engine(sid).call('ingest', body)));
         if (operation === 'entities' && method === 'PUT') return finish(await serial(sid, () => engine(sid).call('entity', { ...body, entityId: decodeURIComponent(parts[5] || '') })));
         if (operation === 'memories' && method === 'POST') return finish(await serial(sid, () => engine(sid).call('remember', body)));

@@ -49,6 +49,16 @@ npm run serve:standalone -- --root E:\vec-standalone-data
 
 `POST /memories` 提交 `{operationId?,actorId,text,scope,kind?,source?,evidenceIds?,attr?,itemKey?,aspect?}`。actorId 必须已登记；kind 默认 preference，支持现有事实分类但拒绝 pattern；trait 必须带 attr 或 itemKey。source 为 manual/assistant/evidence，默认 assistant：manual 是人工声明，可不附聊天证据；其他来源必须引用已接收、同场合的 evidenceIds。建议始终提供稳定 operationId；同 ID 不同请求冲突。结果包含 `{ok,saved,action?,rev,kind,itemKey?,speaker?,replayed?}`。
 
+## 新事物条目
+
+`POST /discoveries` 接受 `{operationId?,name,scope,evidenceIds,statement?,kind?,aliases?,interpretation?,aspect?,claimType?,quote?}`。kind 为 meme/concept/work/project/object/case，默认 concept；interpretation 为 mention/definition/usage，默认按有无 statement 选择 definition/mention；claimType 为 fact/opinion/pattern，默认 fact。name 最多 200 字符，statement 最多 2000 字符，aspect 最多 100 字符；evidenceIds 与 aliases 为字符串数组，最多 30 项，证据不能为空。所有引用必须是同场合已接收的 user 消息。名称必须出现在证据中，解释与用法必须附逐字原话，原话包含名称；quote 省略时尝试使用完整原消息。别名须在同一原话中明确出现。结果 `{ok,saved,discoveries:[{subjectId,observationId,knowledgeStatus?,ambiguous?,duplicate?}],replayed?}`。
+
+`GET /subjects` 和 `GET /subjects/{subjectId}` 都必须提供 `scopeKind` 与 `scopeId` 查询参数。列表另支持 q，返回 `{ok,subjects}`；详情含 subject、observations（包括撤回历史）与 groups。读取需空间读权限，范围不匹配返回 404。
+
+`POST /subjects/{subjectId}/revisions` 接受 `{operationId,scope,action,observationId,expectedRev,statement?,reason}`。action 为 correct/retract；correct 必须提供 statement。只允许有写权限者修改。成功返回 `{ok,subject,observation,retracted,replayed}`，retract 的 observation 为 null。保留原观察及证据，修正后为人工来源；expectedRev 过期返回 409/STALE_REVISION，相同操作可幂等重试。
+
+新事物默认在规范原料的整理请求中一起发现；thingDiscoveryEnabled:false 可关闭此功能。它不启用自动整理，也不增加一次独立模型调用。候选与来源观察不等于已核验知识；[完整行为和示例](thing-memory.md)。
+
 ## 召回与采用
 
 `POST /recall` 接受 `{scope,query?,conversationId?,actorIds?,sharedSpaceIds?,mode?,limit?}`。scope 必填；conversationId 限制工作记忆会话；actorIds 限制人物候选。共享空间只在 sharedSpaceIds 显式请求且有授权时读取，全部请求空间都须通过权限检查。当前 v1 记忆按同一明确场合读取；跨空间授权不扩大场合可见性。

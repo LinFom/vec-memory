@@ -1328,6 +1328,530 @@
           }
         }
       }
+    },
+    "/api/v1/spaces/{spaceId}/discoveries": {
+      "post": {
+        "summary": "Record a source-backed thing or pending name; write permission required",
+        "tags": [
+          "Memory"
+        ],
+        "parameters": [
+          {
+            "name": "spaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "const": true
+                    },
+                    "saved": {
+                      "type": "boolean"
+                    },
+                    "replayed": {
+                      "type": "boolean"
+                    },
+                    "discoveries": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "subjectId": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 200
+                          },
+                          "observationId": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 200
+                          },
+                          "knowledgeStatus": {
+                            "enum": [
+                              "candidate",
+                              "observed"
+                            ]
+                          },
+                          "ambiguous": {
+                            "type": "boolean"
+                          },
+                          "duplicate": {
+                            "type": "boolean"
+                          }
+                        },
+                        "required": [
+                          "subjectId",
+                          "observationId"
+                        ],
+                        "additionalProperties": true
+                      }
+                    }
+                  },
+                  "required": [
+                    "ok",
+                    "saved",
+                    "discoveries"
+                  ],
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Failure with a stable code. HTTP status may be 400, 401, 403, 404, 409, 413, 415, 500 or 503.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "operationId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  },
+                  "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  },
+                  "scope": {
+                    "$ref": "#/components/schemas/Scope"
+                  },
+                  "evidenceIds": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 200
+                    },
+                    "minItems": 1,
+                    "maxItems": 30
+                  },
+                  "kind": {
+                    "enum": [
+                      "meme",
+                      "concept",
+                      "work",
+                      "project",
+                      "object",
+                      "case"
+                    ],
+                    "default": "concept"
+                  },
+                  "aliases": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 200
+                    },
+                    "maxItems": 30
+                  },
+                  "interpretation": {
+                    "enum": [
+                      "mention",
+                      "definition",
+                      "usage"
+                    ]
+                  },
+                  "statement": {
+                    "type": "string",
+                    "minLength": 0,
+                    "maxLength": 2000
+                  },
+                  "aspect": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 100
+                  },
+                  "claimType": {
+                    "enum": [
+                      "fact",
+                      "opinion",
+                      "pattern"
+                    ],
+                    "default": "fact"
+                  },
+                  "quote": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "name",
+                  "scope",
+                  "evidenceIds"
+                ],
+                "additionalProperties": true,
+                "description": "Only accepted user evidence from this scope. Name must occur in evidence. Definition/usage require statement and an exact quote containing name; omitted quote uses a matching whole message. Aliases require both names in that quote. Missing statement defaults to a mention candidate; observed means source observation, not verified truth. Stable operationId enables idempotent retries."
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/spaces/{spaceId}/subjects": {
+      "get": {
+        "summary": "List subjects in one explicit scope; read permission required",
+        "tags": [
+          "Memory"
+        ],
+        "parameters": [
+          {
+            "name": "spaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$"
+            }
+          },
+          {
+            "name": "scopeKind",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "enum": [
+                "group",
+                "private"
+              ]
+            }
+          },
+          {
+            "name": "scopeId",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "const": true
+                    },
+                    "subjects": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Subject"
+                      }
+                    }
+                  },
+                  "required": [
+                    "ok",
+                    "subjects"
+                  ],
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Failure with a stable code. HTTP status may be 400, 401, 403, 404, 409, 413, 415, 500 or 503.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/spaces/{spaceId}/subjects/{subjectId}": {
+      "get": {
+        "summary": "Read subject and observation history in one scope",
+        "tags": [
+          "Memory"
+        ],
+        "parameters": [
+          {
+            "name": "spaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$"
+            }
+          },
+          {
+            "name": "subjectId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            }
+          },
+          {
+            "name": "scopeKind",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "enum": [
+                "group",
+                "private"
+              ]
+            }
+          },
+          {
+            "name": "scopeId",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "const": true
+                    },
+                    "subject": {
+                      "$ref": "#/components/schemas/Subject"
+                    },
+                    "resolvedSubjectId": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 200
+                    },
+                    "observations": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/SubjectObservation"
+                      }
+                    },
+                    "groups": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      }
+                    }
+                  },
+                  "required": [
+                    "ok",
+                    "subject",
+                    "observations"
+                  ],
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Failure with a stable code. HTTP status may be 400, 401, 403, 404, 409, 413, 415, 500 or 503.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/spaces/{spaceId}/subjects/{subjectId}/revisions": {
+      "post": {
+        "summary": "Correct or retract an observation; keep original history",
+        "tags": [
+          "Memory"
+        ],
+        "parameters": [
+          {
+            "name": "spaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$"
+            }
+          },
+          {
+            "name": "subjectId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "const": true
+                    },
+                    "subject": {
+                      "$ref": "#/components/schemas/Subject"
+                    },
+                    "observation": {
+                      "anyOf": [
+                        {
+                          "$ref": "#/components/schemas/SubjectObservation"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "retracted": {
+                      "$ref": "#/components/schemas/SubjectObservation"
+                    },
+                    "replayed": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "ok",
+                    "subject",
+                    "observation",
+                    "retracted"
+                  ],
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Failure with a stable code. HTTP status may be 400, 401, 403, 404, 409, 413, 415, 500 or 503.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "operationId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  },
+                  "scope": {
+                    "$ref": "#/components/schemas/Scope"
+                  },
+                  "action": {
+                    "enum": [
+                      "correct",
+                      "retract"
+                    ]
+                  },
+                  "observationId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  },
+                  "expectedRev": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "statement": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 2000
+                  },
+                  "reason": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 1000
+                  }
+                },
+                "required": [
+                  "operationId",
+                  "scope",
+                  "action",
+                  "observationId",
+                  "expectedRev",
+                  "reason"
+                ],
+                "additionalProperties": true,
+                "allOf": [
+                  {
+                    "if": {
+                      "properties": {
+                        "action": {
+                          "const": "correct"
+                        }
+                      }
+                    },
+                    "then": {
+                      "required": [
+                        "statement"
+                      ]
+                    }
+                  }
+                ],
+                "description": "Write permission required. Preserves history and evidence; stale revisions return 409 STALE_REVISION. Repeating identical operationId is idempotent. Correction creates a manual observation; retraction returns observation:null."
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -1743,6 +2267,157 @@
           "ok",
           "adopted",
           "replayed"
+        ],
+        "additionalProperties": true
+      },
+      "Subject": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "kind": {
+            "enum": [
+              "group",
+              "meme",
+              "concept",
+              "work",
+              "project",
+              "object",
+              "case"
+            ]
+          },
+          "label": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "aliases": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            }
+          },
+          "scopeBinding": {
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "active",
+              "merged"
+            ]
+          },
+          "rev": {
+            "type": "integer"
+          },
+          "knowledgeStatus": {
+            "enum": [
+              "candidate",
+              "observed"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "label",
+          "aliases",
+          "scopeBinding",
+          "status",
+          "rev"
+        ],
+        "additionalProperties": true
+      },
+      "SubjectObservation": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "subjectId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "aspect": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100
+          },
+          "statement": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000
+          },
+          "claimType": {
+            "enum": [
+              "fact",
+              "opinion",
+              "pattern"
+            ]
+          },
+          "sourceScope": {
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "active",
+              "retracted"
+            ]
+          },
+          "rev": {
+            "type": "integer"
+          },
+          "knowledgeStatus": {
+            "enum": [
+              "candidate",
+              "observed"
+            ]
+          },
+          "authority": {
+            "enum": [
+              "manual",
+              "automatic"
+            ]
+          },
+          "provenance": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "originalProvenance": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "reviewReason": {
+            "type": "string"
+          },
+          "interpretation": {
+            "enum": [
+              "mention",
+              "definition",
+              "usage"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "subjectId",
+          "aspect",
+          "statement",
+          "sourceScope",
+          "status",
+          "rev",
+          "provenance"
         ],
         "additionalProperties": true
       }

@@ -39,5 +39,5 @@ export function policyImpact(input) {
 }
 export function subjectSection(subjects,scope,text,limit=4) {
   const details=subjects.select({scope,text,limit});
-  return {subjectDetails:details,subjectLines:details.map(o=>`${o.subject.label} · ${o.aspect}（${o.claimType}）：${o.statement}`)};
+  return {subjectDetails:details,subjectLines:details.map(o=>`${o.knowledgeStatus==='candidate'?'【待确认】':o.authority==='manual'?'【人工修订】':''}${o.possibleConflict?'【存在不同说法】':''}${o.subject.label} · ${o.aspect}（${o.claimType}）：${o.statement}`)};
 }

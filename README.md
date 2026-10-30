@@ -1,6 +1,6 @@
 # vec-memory
 
-独立、自托管的混合记忆库。任何项目通过 HTTP JSON 提交消息，即可使用工作记忆、事件记忆、人物事实、关键词与向量检索，以及采用后排练和长期记忆提升。无需安装 QQ-Agent。
+独立、自托管的混合记忆库。任何项目通过 HTTP JSON 提交消息，即可使用工作记忆、事件记忆、人物事实、新梗与概念条目、关键词与向量检索，以及采用后排练和长期记忆提升。无需安装 QQ-Agent。
 
 每个项目使用独立记忆空间。空间所有者可以授权其他项目读取；接入方必须显式选择共享空间。身份、原料、缓存、后台整理和采用记录均按空间隔离。
 
@@ -31,6 +31,7 @@ Windows 可将路径换成 `E:\vec-memory-data`。保存初始化时仅显示一
 - [Node.js 示例](examples/standalone/client.mjs) · [Python 示例](examples/standalone/client.py)
 - [历史数据迁移与回退](docs/operations/standalone-migration.md)
 - [QQ-Agent 适配](adapters/qq-agent/README.md)
+- [新事物自动发现、候选与人工纠正](docs/thing-memory.md)
 
 本仓库仅提供源码、空库初始化和合成测试，不包含作者记忆、生产配置、凭据或模型权重。旧宿主格式的读取只用于兼容与显式导入；独立实例正常运行使用自己的规范原料。
 

@@ -14,6 +14,8 @@ import {readLineage} from '../core/lineage.mjs';
 import {readRecentEvents,readEventsById,readEventRows,readHitLog,bumpEventHits} from '../core/consolidate.mjs';
 import {getEventIndex,searchEvents} from '../core/event-index.mjs';
 import {FACT_KINDS} from '../core/facts.mjs';
+import {prepareDiscoveries,applyDiscoveries} from '../core/thing-discovery.mjs';
+import {openSubjectStore} from '../core/subjects.mjs';
 const root=path.resolve(workerData.root),input=path.join(root,'input'),legacy=path.join(root,'legacy','data');
 fs.mkdirSync(input,{recursive:true});fs.mkdirSync(legacy,{recursive:true});
 if(!fs.existsSync(path.join(input,'source.json'))) fs.writeFileSync(path.join(input,'source.json'),JSON.stringify({version:1,kind:'canonical'}));
@@ -78,6 +80,40 @@ async function remember(p){
  return memoryOperations.append(operationId,p,{kind,actorId,scope,source},result);
 }
 function eventRefs(e){return [{type:'window',id:e.windowId||e.id,chatKey:e.chatKey,fromTs:e.fromTs,toTs:e.toTs,matchMethod:'persisted-window'}];}
+function subjectScope(p) { return canonicalChatKey(p.scope); }
+async function subjects(p) {
+ const rt=await getRuntime(),scope=rt.normalizer.scopeLabel(subjectScope(p)),store=openSubjectStore(rt.dir);
+ return {ok:true,subjects:store.list({q:p.q||''}).filter(s=>s.scopeBinding===scope)};
+}
+async function subject(p) {
+ const rt=await getRuntime(),scope=rt.normalizer.scopeLabel(subjectScope(p)),store=openSubjectStore(rt.dir),result=store.get(requireText(p.subjectId,'subjectId',200));
+ if(result.subject.scopeBinding!==scope)throw new MemoryError('NOT_FOUND','Subject not found in this scope',404);
+ return {...result,observations:result.observations.filter(o=>o.sourceScope===scope)};
+}
+async function discover(p) {
+ const operationId='thing:'+digest(requireText(p.operationId||digest(p),'operationId',200)),old=memoryOperations.replay(operationId,p);if(old)return old;
+ const chatKey=subjectScope(p),name=requireText(p.name||p.label,'name',200);
+ if(!Array.isArray(p.evidenceIds)||!p.evidenceIds.length)throw new MemoryError('EVIDENCE_REQUIRED','Provide the user messages that introduced this thing');
+ if(p.evidenceIds.some(id=>typeof id!=='string')||p.aliases!==undefined&&(!Array.isArray(p.aliases)||p.aliases.some(a=>typeof a!=='string')))throw new MemoryError('INVALID_DISCOVERY','evidenceIds and aliases must be string arrays');
+ const all=new Map(canonicalMessages(input).map(m=>[m.messageId,m]));
+ const aliasesFile=path.join(input,'evidence-aliases.json');if(fs.existsSync(aliasesFile))for(const [alias,target]of Object.entries(JSON.parse(fs.readFileSync(aliasesFile,'utf8'))))if(all.has(target)&&!all.has(alias))all.set(alias,all.get(target));
+ const ids=[...new Set(p.evidenceIds.map(String))],messages=ids.map(id=>{const m=all.get(id);if(!m||m.role!=='user'||canonicalChatKey(m.scope)!==chatKey)throw new MemoryError('INVALID_EVIDENCE','Use accepted user messages from this scope');return {...m,id};});
+ const rt=await getRuntime();await ensureIdentity(rt);
+ const statement=p.statement||'',quote=p.quote||messages.find(m=>m.text.includes(name)&&(p.aliases||[]).every(a=>m.text.includes(a)))?.text||'';
+ const win={chatKey,rows:messages.map(m=>({id:m.id,text:m.text,role:m.role,self:false})),fromTs:messages.reduce((n,m)=>Math.min(n,m.timestamp),Infinity),toTs:messages.reduce((n,m)=>Math.max(n,m.timestamp),0)};
+ const scope=rt.normalizer.scopeLabel(chatKey),requests=prepareDiscoveries({win,windowId:'api:'+digest(operationId),scope,discoveries:[{label:name,kind:p.kind||'concept',statement,quote,interpretation:p.interpretation||(statement?'definition':'mention'),aspect:p.aspect,aliases:p.aliases||[],claimType:p.claimType||'fact',evidenceIds:ids}],normalize:text=>rt.normalizer.normalize(String(text),{register:false}).text});
+ const results=applyDiscoveries(openSubjectStore(rt.dir),requests,win,scope),result={ok:true,saved:true,discoveries:results.flatMap(r=>r.discoveries||[])};
+ return memoryOperations.append(operationId,p,{scope,name},result);
+}
+async function subjectRevision(p) {
+ const operationId='subject-revision:'+digest(requireText(p.operationId,'operationId',200));
+ const old=memoryOperations.replay(operationId,p);if(old)return old;
+ await subject(p);const rt=await getRuntime();
+ const request={...p,operationId};
+ if(p.action==='correct')request.statement=rt.normalizer.normalize(requireText(p.statement,'statement',2000),{register:false}).text;
+ const updated=openSubjectStore(rt.dir).reviseObservation(request);
+ return memoryOperations.append(operationId,p,{subjectId:p.subjectId},updated);
+}
 async function recall(p){
  const chatKey=canonicalChatKey(p.scope),rt=await getRuntime();await ensureIdentity(rt);
  const query=typeof p.query==='string'?p.query.trim():'',scope=rt.normalizer.scopeLabel(chatKey),facts=memoryCoreOf(rt,factStoreOf(rt)).manual.readStore();if(facts.readOnlyReason)throw new MemoryError('STORAGE_UNAVAILABLE',facts.readOnlyReason,503);
@@ -107,7 +143,7 @@ async function recall(p){
   for(const h of r.body.hits||[]){if(h.chatKey!==chatKey)continue;const e=events.get(h.id);if(e&&eventIds.has(e.id))continue;items.push({id:`document:${h.id}`,text:h.text||h.title||'',layer:'long-term',sourceRefs:e?eventRefs(e):[{type:'window',id:h.id,chatKey,matchMethod:'corpus-document'}],score:h.score});if(e)eventIds.add(e.id);}
  }
  const subjects=subjectSection(memoryCoreOf(rt,factStoreOf(rt)).subjects,scope,query,4);
- for(const d of subjects.subjectDetails)items.push({id:`subject:${d.id||digest(d)}`,text:`${d.subject.label} · ${d.aspect}：${d.statement}`,layer:'subject',sourceRefs:d.provenance||[]});
+ for(const d of subjects.subjectDetails)items.push({id:`subject:${d.id||digest(d)}`,text:`${d.knowledgeStatus==='candidate'?'【待确认】':d.authority==='manual'?'【人工修订】':'【来源观察】'}${d.possibleConflict?'【存在不同说法】':''}${d.subject.label} · ${d.aspect}：${d.statement}`,layer:'subject',knowledgeStatus:d.knowledgeStatus||'observed',authority:d.authority||'automatic',possibleConflict:!!d.possibleConflict,sourceRefs:d.provenance||[]});
  const working=canonicalMessages(input).filter(m=>canonicalChatKey(m.scope)===chatKey&&(!p.conversationId||m.conversationId===p.conversationId)).sort((a,b)=>b.timestamp-a.timestamp).slice(0,6).reverse();
  for(const m of working)items.push({id:`message:${m.messageId}`,text:`${m.actorId}：${m.text}`,layer:'working',sourceRefs:[{type:'message',id:m.messageId,chatKey,fromTs:m.timestamp,toTs:m.timestamp}]});
  const unique=[...new Map(items.map(i=>[i.id,i])).values()],receiptId=randomUUID();
@@ -124,7 +160,7 @@ async function adoption(p){const r=receipts.get(p.receiptId);if(!r||r.expires<=D
 async function job(p){const cfg=configuredSettings();if(p.type==='consolidate'){if(!cfg.llmBaseURL||!cfg.llmModel)throw new MemoryError('LLM_UNCONFIGURED','Consolidation requires llmBaseURL and llmModel');const result=await runConsolidateNow({force:true,limit:p.limit,chatKey:p.scope?canonicalChatKey(p.scope):undefined,reason:'v1-job'});if(result.failedWindows>0)throw new MemoryError('CONSOLIDATE_FAILED',result.details?.filter(d=>d.error).map(d=>d.error).join('; ')||'Consolidation failed',502,{result});return result;}
  if(p.type==='index'){const rt=await getRuntime();if(!checkEndpoint(endpointOf(rt.settings)).ok)throw new MemoryError('EMBED_UNCONFIGURED','Indexing requires embedding endpoint and model');return await runIndex({reason:'v1-job'});}throw new MemoryError('INVALID_JOB','type must be consolidate or index');}
 async function status(){const rt=await getRuntime();return {ok:true,messages:canonicalMessages(input).length,entities:canonicalEntities(input).length,background:backgroundStatus,embeddingConfigured:checkEndpoint(endpointOf(rt.settings)).ok,llmConfigured:!!(rt.settings.llmBaseURL&&rt.settings.llmModel),dataRoot:legacy,sourceRoot:input};}
-const operations={ingest,entity,remember,recall,adoption,job,status};
+const operations={ingest,entity,remember,discover,subjects,subject,subjectRevision,recall,adoption,job,status};
 let chain=Promise.resolve();parentPort.on('message',m=>{chain=chain.then(async()=>{try{if(!operations[m.operation])throw new MemoryError('INVALID_OPERATION','Unknown engine operation');parentPort.postMessage({id:m.id,result:await operations[m.operation](m.payload||{})});}catch(e){parentPort.postMessage({id:m.id,error:{message:e.message,code:e.code||'ENGINE_FAILED',status:e.status||500,result:e.result}});}});});
 
 const backgroundStatus={lastConsolidateAt:0,lastIndexAt:0,lastError:null};

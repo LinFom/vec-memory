@@ -1,6 +1,6 @@
 {
   "name": "vec-memory",
-  "version": "0.30.0",
+  "version": "0.31.0",
   "private": true,
   "type": "module",
   "description": "Standalone hybrid memory service: isolated project spaces, evidence-backed memories, keyword/vector recall and adoption.",
@@ -13,7 +13,7 @@
     "init:standalone": "node tools/standalone-server.mjs init",
     "serve:standalone": "node tools/standalone-server.mjs serve",
     "test": "node --test \"test/standalone-*.mjs\"",
-    "test:adapter": "node --test adapters/qq-agent/protocol-v1.test.mjs"
+    "test:adapter": "node --test adapters/qq-agent/protocol-v1.test.mjs adapters/qq-agent/tool-contract.test.mjs"
   },
   "dependencies": {
     "sqlite-vec": "^0.1.9"

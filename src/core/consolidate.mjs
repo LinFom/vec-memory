@@ -1,5 +1,6 @@
 import { isCanonicalSource, canonicalEvidence } from './input-source.mjs';
 import { openSubjectStore } from './subjects.mjs';
+import { DISCOVERY_PROMPT, prepareDiscoveries, applyDiscoveries } from './thing-discovery.mjs';
 import { windowReferences } from './provenance.mjs';
 import { encodingIdentity } from './vector-generation.mjs';
 // 事件整理（M5）—— 把「上次整理结束 → 现在」这段对话整理成**两样东西**：
@@ -499,7 +500,8 @@ function normalizeConsolidateJson(obj, genericIds = false) {
     });
   }
   if (Object.hasOwn(obj,'observations') && !Array.isArray(obj.observations)) return {ok:false,error:'observations must be an array',events:[],people:[]};
-  return { ok: true, events, people, ...(Array.isArray(obj.observations) ? {observations:obj.observations} : {}) };
+  if (Object.hasOwn(obj,'discoveries') && !Array.isArray(obj.discoveries)) return {ok:false,error:'discoveries must be an array',events:[],people:[]};
+  return { ok: true, events, people, ...(Array.isArray(obj.observations) ? {observations:obj.observations} : {}), ...(Array.isArray(obj.discoveries) ? {discoveries:obj.discoveries} : {}) };
 }
 
 // ── 落库：事件 ───────────────────────────────────────────────────────────
@@ -1504,6 +1506,10 @@ async function runConsolidateOnce(deps = {}, opts = {}) {
         prompt.user += '\n允许主体：'+JSON.stringify(subjects.map(s=>({id:s.id,label:s.label,aliases:s.aliases})))+
           '\n以下引用编号只用于 observations.evidenceIds：\n'+win.rows.map(r=>'[evidenceId='+r.id+'] '+renderTranscript([r],{fromTs:win.fromTs,maxChars:1000})).join('\n');
       }
+      if (!resume && (settings.thingDiscoveryEnabled === true || isCanonicalSource(sourceRoot) && settings.thingDiscoveryEnabled !== false)) {
+        prompt.system += '\n'+DISCOVERY_PROMPT;
+        prompt.user += '\n新事物发现可使用的消息与引用：\n'+win.rows.filter(r=>!r.self&&(!r.role||r.role==='user')).map(r=>JSON.stringify({evidenceId:String(r.id),text:String(r.text||'').slice(0,2000)})).join('\n');
+      }
       raw = resume ? JSON.stringify(resume.parsed) : await callLlm(prompt);
     } catch (err) {
       const msg = `LLM 调用失败：${String(err?.message ?? err)}`;
@@ -1542,7 +1548,7 @@ async function runConsolidateOnce(deps = {}, opts = {}) {
     if (dryRun) {
       result.details.push({
         chatKey: win.chatKey, fromTs: win.fromTs, toTs: win.toTs, msgCount: win.msgCount,
-        dryRun: true, events: parsed.events, people: parsed.people, observations: parsed.observations || []
+        dryRun: true, events: parsed.events, people: parsed.people, observations: parsed.observations || [], discoveries: parsed.discoveries || []
       });
       result.processed++;
       continue;
@@ -1556,7 +1562,9 @@ async function runConsolidateOnce(deps = {}, opts = {}) {
         const observationRequests = parsed.observations?.length ? openSubjectStore(libDir).prepareWindow({win,windowId:eventIdOf(win),scope:normalizer.scopeLabel(win.chatKey),candidates:parsed.observations,allowedSubjectIds:openSubjectStore(libDir).matchingSubjectIds({scope:normalizer.scopeLabel(win.chatKey),text:transcript}),
           resolveReporter:id=>resolveSpeaker(normalizer,id)?.label || null,
           normalize:text=>normalizer.normalize(String(text||''),{context:'subject-observation',register:false})?.text || String(text||'')}) : [];
-        pending[win.chatKey] = { win: { ...win, rows: win.rows.map(r => ({ id: r.id })) }, parsed, observationRequests, now };
+        if (parsed.discoveries?.length && !(settings.thingDiscoveryEnabled === true || isCanonicalSource(sourceRoot) && settings.thingDiscoveryEnabled !== false)) throw new Error('Thing discovery is not enabled');
+        const discoveryRequests = parsed.discoveries?.length ? prepareDiscoveries({win,windowId:eventIdOf(win),scope:normalizer.scopeLabel(win.chatKey),discoveries:parsed.discoveries,normalize:text=>normalizer.normalize(String(text||''),{context:'thing-discovery',register:false})?.text || String(text||'')}) : [];
+        pending[win.chatKey] = { win: { ...win, rows: win.rows.map(r => ({ id: r.id })) }, parsed, observationRequests, discoveryRequests, now };
         savePending(libDir, pending);
       }
       applied = await applyWindow({ win, parsed, normalizer, factStore, store, settings, libDir, now: resume?.now || now, say });
@@ -1564,6 +1572,9 @@ async function runConsolidateOnce(deps = {}, opts = {}) {
       const observationRequests = pending[win.chatKey]?.observationRequests || [];
       if (parsed.observations?.length && !observationRequests.length) throw new Error('Pending observations have no prepared requests');
       if (observationRequests.length) openSubjectStore(libDir).applyPrepared(observationRequests,win,normalizer.scopeLabel(win.chatKey));
+      const discoveryRequests = pending[win.chatKey]?.discoveryRequests || [];
+      if (parsed.discoveries?.length && !discoveryRequests.length) throw new Error('Pending discoveries have no prepared requests');
+      if (discoveryRequests.length) applyDiscoveries(openSubjectStore(libDir),discoveryRequests,win,normalizer.scopeLabel(win.chatKey));
       advanceCursor({ libDir, state, chatKey: win.chatKey, toTs: win.toTs });
       delete pending[win.chatKey];
       try { savePending(libDir, pending); } catch (e) { say('warn', `已提交窗口的重试记录清理失败：${e.message}`); }

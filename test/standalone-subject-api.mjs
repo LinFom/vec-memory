@@ -1,0 +1,63 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import {initialize} from '../src/standalone/service.mjs';
+import {createStandaloneServer} from '../src/standalone/server.mjs';
+
+test('HTTP things: scoped evidence, candidates, sharing, corrections, retries and restart',async t=>{
+ const root=fs.mkdtempSync(path.join(os.tmpdir(),'vec-thing-http-')),admin=initialize(root);
+ let runtime=createStandaloneServer({root});
+ const listen=()=>new Promise(resolve=>runtime.server.listen(0,'127.0.0.1',resolve));await listen();
+ t.after(async()=>{await runtime.close();fs.rmSync(root,{recursive:true,force:true})});
+ async function api(token,route,method='POST',body={}){
+  const r=await fetch(`http://127.0.0.1:${runtime.server.address().port}/api/v1/${route}`,{method,headers:{Authorization:'Bearer '+token,...(method==='GET'?{}:{'content-type':'application/json'})},...(method==='GET'?{}:{body:JSON.stringify(body)})});return {status:r.status,...await r.json()};
+ }
+ const a=(await api(admin,'admin/projects','POST',{projectId:'a'})).token,b=(await api(admin,'admin/projects','POST',{projectId:'b'})).token;
+ for(const id of ['a','b'])await api(admin,'admin/spaces','POST',{spaceId:id,owner:id});
+ const scope={kind:'group',id:'team'},query='?scopeKind=group&scopeId=team';
+ const message={messageId:'m1',conversationId:'chat',actorId:'alice',timestamp:Date.now()-10000,role:'user',scope,text:'冰箱战术就是把暂时解决不了的问题放一边。'};
+ await api(a,'spaces/a/messages','POST',{messages:[message,{...message,messageId:'bot',role:'assistant'}]});
+ const request={operationId:'mention'.padEnd(200,'x'),name:'冰箱战术',scope,evidenceIds:['m1']};
+ let result=await api(a,'spaces/a/discoveries','POST',request);assert.equal(result.status,200);assert.equal(result.discoveries[0].knowledgeStatus,'candidate');
+ const id=result.discoveries[0].subjectId,route='spaces/a/subjects/'+id;
+ assert.equal((await api(a,'spaces/a/discoveries','POST',request)).replayed,true);
+ assert.equal((await api(a,'spaces/a/discoveries','POST',{...request,name:'别的名称'})).status,409);
+ assert.equal((await api(a,'spaces/a/discoveries','POST',{...request,operationId:'bot',evidenceIds:['bot']})).code,'INVALID_EVIDENCE');
+ assert.equal((await api(a,'spaces/a/discoveries','POST',{...request,operationId:'other-scope',scope:{kind:'group',id:'other'}})).code,'INVALID_EVIDENCE');
+ assert.equal((await api(a,'spaces/a/discoveries','POST',{...request,operationId:'bad-alias',aliases:{}})).status,400);
+ await api(a,'spaces/a/discoveries','POST',{...request,operationId:'definition',statement:'把暂时解决不了的问题放一边'});
+ let detail=await api(a,route+query,'GET');assert.equal(detail.status,200);
+ assert.equal(detail.observations.find(o=>o.interpretation==='mention').status,'retracted');
+ const observation=detail.observations.find(o=>o.status==='active');assert.equal(observation.knowledgeStatus,'observed');
+ assert.equal((await api(a,route+'?scopeKind=group&scopeId=other','GET')).status,404);
+ assert.equal((await api(b,route+query,'GET')).status,403);
+ await api(a,'spaces/a/readers','PUT',{projectIds:['b']});
+ assert.equal((await api(b,route+query,'GET')).status,200);
+ const revision={operationId:'fix'.padEnd(200,'x'),action:'correct',observationId:observation.id,expectedRev:observation.rev,statement:'先暂缓处理，并约定复查时间',reason:'补齐条件',scope};
+ assert.equal((await api(b,route+'/revisions','POST',revision)).status,403);
+ result=await api(a,route+'/revisions','POST',revision);assert.equal(result.status,200);assert.equal(result.observation.authority,'manual');
+ assert.equal((await api(a,route+'/revisions','POST',revision)).replayed,true);
+ assert.equal((await api(a,route+'/revisions','POST',{...revision,statement:'changed'})).status,409);
+ // Simulate interruption after the subject transaction commits but before the API receipt commits.
+ await runtime.close();
+ const operations=path.join(root,'spaces','a','input','memory-operations.jsonl'),lines=fs.readFileSync(operations,'utf8').trimEnd().split('\n');
+ assert.match(JSON.parse(lines.at(-1)).operationId,/^subject-revision:/);
+ fs.writeFileSync(operations,lines.slice(0,-1).join('\n')+'\n');
+ runtime=createStandaloneServer({root});await listen();
+ assert.equal((await api(a,route+'/revisions','POST',revision)).replayed,true);
+ await api(a,'spaces/a/discoveries','POST',{...request,operationId:'new-machine-observation',statement:'把暂时解决不了的问题放一边',aspect:'含义'});
+ const recall=await api(b,'spaces/b/recall','POST',{scope,query:'冰箱战术',sharedSpaceIds:['a']});
+ assert(recall.items.some(i=>i.layer==='subject'&&i.authority==='manual'&&i.spaceId==='a'&&i.possibleConflict));
+ assert(recall.items.some(i=>i.layer==='subject'&&i.knowledgeStatus==='candidate'));
+ await api(a,'spaces/a/readers','PUT',{projectIds:[]});
+ assert.equal((await api(b,route+query,'GET')).status,403);
+ assert.equal((await api(b,'spaces/b/adoptions','POST',{receiptId:recall.receiptId})).status,403);
+ await runtime.close();runtime=createStandaloneServer({root});await listen();
+ detail=await api(a,route+query,'GET');assert(detail.observations.some(o=>o.authority==='manual'&&o.status==='active'));
+ assert.equal((await api(a,route+'/revisions','POST',revision)).replayed,true);
+ assert.equal((await api(a,'spaces/a/subjects'+query,'GET')).subjects.length,1);
+ const manual=detail.observations.find(o=>o.authority==='manual');
+ assert.equal((await api(a,route+'/revisions','POST',{operationId:'retract',action:'retract',observationId:manual.id,expectedRev:manual.rev,reason:'暂停采用',scope})).retracted.status,'retracted');
+});

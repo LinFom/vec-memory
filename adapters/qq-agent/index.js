@@ -106,6 +106,7 @@ function mvCfg() {
 let v1Bridge = null;
 let v1Timer = null;
 let v1Store = null;
+const v1TriggerEvidence = new Map();
 function protocolV1() { return mvCfg().protocolV1 === true; }
 export const providers = {
   'memory.vec': () => ({
@@ -194,6 +195,13 @@ export function setup(api) {
   /** 读侧超时：要现算查询向量（一次嵌入往返）+ 全库余弦，给够但别无限等。 */
   const SEARCH_TIMEOUT_MS = 8000;
 
+  if (protocolV1()) api.registerTool({
+    id:'remember_thing', name:'记下新事物', category:'memory', icon:'📝',
+    description:'聊天里有人解释新梗、术语、作品、项目或物件时，顺手记下名称和他说的意思。只听到名称也可只传 name 记成待解释候选，不要自己编定义。例：name=冰箱战术，statement=先把问题搁置，等对手忘了再处理，aspect=含义。后续补充用法或纠正时仍用同一名称。',
+    parameters:{type:'object',properties:{name:{type:'string',description:'聊天中出现的名称'},statement:{type:'string',description:'可选：用户给的解释或补充；只有名称、没人解释时不要填'},aspect:{type:'string',description:'可选：含义、用法、来历或适用场景'},evidence:{type:'array',items:{type:'string'},description:'用户原话的消息编号；省略时仅使用本轮核对过的用户消息，没有来源会提示补充'}},required:['name']},
+    execute:(ctx,args)=>toolV1('thing',ctx,args)
+  });
+
   // ── 写侧：memory-vec__remember（记事实）──────────────────────────────────
   //
   // 由来（用户 2026-10-12 拍板）：要「AI 得到短期内能下结论的事实印象后调用工具、直接
@@ -217,12 +225,7 @@ export function setup(api) {
   api.registerTool({
     id: 'remember',                       // 注册后模型看到的是 memory-vec__remember
     name: '记事实',
-    description: '记一条关于某个群友的稳定印象 —— 以后相关话题出现时会自动参考（不主动提起）。'
-      + '该记：对方自述的固定信息（职业/年龄/所在地/宠物/忌口…）、喜好口味、雷点禁忌、'
-      + '说话风格与性格、身份关系、长期约定、反复玩的梗。'
-      + '不记：一次性的闲聊、当下的情绪、刚发生的琐事 —— 那些本来就在上下文里。'
-      + 'userId 必须是对方的 QQ 号。trait 按属性（attr）并存、speaker_profile 按方面（aspect）并存；'
-      + '其余 kind 同一人只留最新一条。',
+    description: '对方明确说了自己的喜好、职业、忌口、约定，或纠正了旧信息时，顺手记一条。一次明确表达就可以记，不必等它反复出现。例：他说喝茶不加糖，就记「喝茶不加糖」。'+(protocolV1()?'新梗、术语、作品的解释用 remember_thing。':''),
     category: 'memory',
     icon: '🧠',
     parameters: {
@@ -257,7 +260,7 @@ export function setup(api) {
         evidence: {
           type: 'array',
           items: { type: 'string' },
-          description: '可选：支撑这条的消息 id（prompt 里每条消息前的 #数字），可给多个。留空可信度按 0 条算'
+          description: protocolV1()?'支撑内容的用户消息编号，例如聊天中的 #123。可省略时由适配器取本轮已核对的用户消息；没有可核对来源会明确失败，请勿编造编号':'可选：支撑内容的用户消息编号，例如聊天中的 #123。给真实编号，不要编造；省略时旧协议不自动补齐证据'
         }
       },
       required: ['userId', 'text']
@@ -409,10 +412,7 @@ export function setup(api) {
   api.registerTool({
     id: 'search',
     name: '搜旧事',
-    description: '按**语义**翻长期记忆 —— 换了说法也能命中（问「家在哪」能捞到「家在沈阳」）。'
-      + '只在上下文不够、被问到很久以前的事、或「你还记得…」时才用；'
-      + '要抠准词、按天翻原文用 memory_search。'
-      + '返回压缩片段不是完整录像；搜不到就如实说想不起来，**不要编**。',
+    description: '想查以前聊过的人、事情、梗或概念时直接搜索。用自然话描述，例如「上次说的冰箱战术是什么意思」。不必等用户明确说「你还记得吗」。返回相关片段及来源；没有找到就说明未找到。独立协议模式只搜索当前场合，不能用 chatKey 越权跨场合。',
     category: 'memory',
     icon: '🔎',
     parameters: {
@@ -426,7 +426,7 @@ export function setup(api) {
         k: { type: 'number', description: '返回几条，可选，默认 5（1~12）' },
         chatKey: {
           type: 'string',
-          description: '可选：只在某个会话里搜，形如 group:群号 / private:QQ号。不填 = 全库'
+          description: '旧协议可选会话筛选；独立协议只支持当前场合，省略即可'
         }
       },
       required: ['q']
@@ -789,7 +789,7 @@ async function probeFromHost() {
 
 export function deactivate() {
   if(v1Timer)clearInterval(v1Timer);v1Timer=null;
-  v1Bridge?.stop();v1Bridge=null;v1Store=null;
+  v1Bridge?.stop();v1Bridge=null;v1Store=null;v1TriggerEvidence.clear();
   /* 服务**不在这里关** —— 由 `--parent-pid` 看住宿主（见上）。 */
   outboxEpoch++;
   for (const ac of outboxControllers) ac.abort();
@@ -995,11 +995,11 @@ function appendToLastSystem(messages, block) {
 const GUIDE_SENTINEL = '<!--mv-guide-->';
 
 const REMEMBER_GUIDE_TEXT = '【记人】（系统维护消息：不需要回复本条，更不要在回复里提起它）\n'
-  + '你有一个记忆工具 memory-vec__remember：把关于具体的人的稳定印象记进记忆库，'
+  + '你有一个记忆工具 memory-vec__remember：把对方明确说过的喜好、信息或约定记进记忆库，一次明确表达就可以记，'
   + '以后相关话题里自动参考（不主动提及）。'
   + '该记：对方自述的固定信息、喜好口味、雷点禁忌、风格性格、身份关系、长期约定、反复玩的梗。\n'
   + '节律：聊出印象就顺手记一条，不要每条都记；先记后答，记完继续正常回复。'
-  + '想不起某个人的旧事时，先用 memory-vec__search 翻一下再答。';
+  + '想查旧事或不懂以前的梗时，直接用 memory-vec__search。若工具列表有 memory-vec__remember_thing，遇到新梗、概念或项目的解释就记名称和原意，后续补充仍用同一名称。';
 
 /**
  * 追加「记人」节到最后一条 user（没有则退 system）。同轮多 round 只加一次
@@ -1050,7 +1050,7 @@ const CHECKPOINT_EVERY_DEFAULT = 4;
  *  0 响应），改成「有⇒先记再答 / 没有⇒直接回复、不要硬编」的二分指令 ——
  *  保留「不要硬编」防滥写，但不再给模型一个"整条可以无视"的心理出口。 */
 const CHECKPOINT_TEXT = '【记忆检查点】（系统维护消息：不需要回复本条，更不要在回复里提起它）\n'
-  + '回顾最近这段对话：有没有关于某个具体的人的**稳定事实**值得记住 —— 对方自述的固定信息'
+  + '回顾最近这段对话：有没有对方明确说过的新信息或对旧信息的纠正值得记住 —— 对方自述的固定信息'
   + '（职业/年龄/所在地/宠物/忌口…）、喜好口味、雷点禁忌、风格性格、身份关系、长期约定、反复玩的梗。\n'
   + '有 ⇒ 在正常回复之前先调用 memory-vec__remember 逐条记下（一条一件事；固定信息用 kind:"trait" '
   + '并给 attr；userId 抄聊天行「名字(QQ数字)」括号里的数字），记完继续正常回复。\n'
@@ -1303,16 +1303,41 @@ async function injectV1(ctx) {
     if(p.receiptId)bridge.request('adoptions',{receiptId:p.receiptId,itemIds:(p.items||[]).map(x=>x.id)}).catch(()=>{});
   }catch(e){diag({at:'v1-recall-error',error:String(e.message)});}
 }
+function resolveV1Evidence(ctx, explicit) {
+  const chat=String(ctx.chatKey||'');
+  if (explicit!==undefined && (!Array.isArray(explicit)||explicit.some(x=>typeof x!=='string')))throw Error('evidence 应为消息编号数组');
+  if(explicit?.length)return [...new Set(explicit.map(id=>id.startsWith(chat+':')?id:chat+':'+id.replace(/^#/,'')))];
+  const store=ctx.store||v1Store;if(!store?.recent)return [];
+  const rows=store.recent(chat,{limit:500,includeSelf:true});
+  const triggers=[...(v1TriggerEvidence.get(chat)||[])];
+  if(ctx.evidenceId!=null){const raw=String(ctx.evidenceId);triggers.push({id:raw.startsWith(chat+':')?raw.slice(chat.length+1):raw,senderId:ctx.senderId});}
+  return [...new Set(triggers.flatMap(trigger=>{
+    const row=rows.find(r=>!r.self && String(r.id)===String(trigger.id));
+    const expectedSender=trigger.senderId??trigger.sender?.id;
+    if(!row||(expectedSender!=null&&String(row.senderId??row.sender?.id)!==String(expectedSender)))return [];
+    return [chat+':'+row.id];
+  }))];
+}
 async function toolV1(kind,ctx,args) {
   try {
     if(!v1Bridge)throw Error('通用协议适配层未启动');
     const conversationId=String(ctx.chatKey||'');const scope=scopeOf(conversationId);
     if(kind==='search') {
-      const p=await v1Bridge.request('recall',{query:String(args.q||args.query||''),conversationId,scope});
+      if(args.chatKey && args.chatKey!==conversationId)throw Error('独立协议只搜索当前场合，请在目标会话中查询。');
+      const p=await v1Bridge.request('recall',{query:String(args.q||args.query||''),conversationId,scope,limit:Math.min(12,Math.max(1,Number(args.k)||5))});
       return {content:p.block||'未找到相关记忆。',isError:false};
     }
+    await v1Bridge.sync();
+    const references = resolveV1Evidence(ctx,args.evidence);
+    if (!references.length) throw Error('还没有可核对的用户原话。请给 evidence 传聊天中的 #消息编号，再试一次；不要编造编号。');
+    if(v1Bridge.status().pending)throw Error('用户原话尚未同步到记忆库，稍后重试即可。');
+    if(kind==='thing') {
+      if(!String(args.name||'').trim())throw Error('请给出聊天中出现的名称。');
+      const p=await v1Bridge.request('discoveries',{operationId:randomUUID(),scope,name:String(args.name),statement:String(args.statement||'').trim(),interpretation:String(args.statement||'').trim()?'definition':'mention',aspect:args.aspect,evidenceIds:references});
+      return {content:JSON.stringify(p),isError:false};
+    }
     if(!String(args.text||'').trim())throw Error('text 不能为空');
-    const p=await v1Bridge.request('memories',{operationId:randomUUID(),conversationId,actorId:String(args.userId||''),scope,text:String(args.text),kind:args.kind||'preference',attr:args.attr,aspect:args.aspect,source:'assistant',evidenceIds:(args.evidence||[]).map(id=>`${conversationId}:${id}`)});
+    const p=await v1Bridge.request('memories',{operationId:randomUUID(),conversationId,actorId:String(args.userId||''),scope,text:String(args.text),kind:args.kind||'preference',attr:args.attr,aspect:args.aspect,source:'assistant',evidenceIds:references});
     return {content:JSON.stringify(p),isError:false};
   }catch(e){return {content:`记忆操作失败：${e.message}`,isError:true};}
 }
@@ -1329,7 +1354,7 @@ export const hooks = {
    * 旧形状（`senderId/senderName`）由 `personOf()` 兼容。
    */
   'before-context': async (ctx = {}) => {
-    if(protocolV1()) { v1Bridge?.sync().catch(e=>diag({at:'v1-sync-error',error:String(e.message)})); return; }
+    if(protocolV1()) { const entries=ctx.triggerEntries??ctx.evidence;v1TriggerEvidence.set(String(ctx.chatKey||''),Array.isArray(entries)?entries:[]);if(v1TriggerEvidence.size>200)v1TriggerEvidence.delete(v1TriggerEvidence.keys().next().value);v1Bridge?.sync().catch(e=>diag({at:'v1-sync-error',error:String(e.message)})); return; }
     try {
       const key = pendingKey(ctx);
       if (!key) return;
@@ -1346,7 +1371,7 @@ export const hooks = {
   },
 
   'before-llm-messages': async (ctx = {}) => {
-    if(protocolV1()) { await injectV1(ctx); maybeCheckpoint(ctx); return; }
+    if(protocolV1()) { if(mvCfg().rememberGuideEnabled!==false && Array.isArray(ctx.messages))appendRememberGuide(ctx.messages); await injectV1(ctx); maybeCheckpoint(ctx); return; }
     await injectMemories(ctx);   // 读侧：人格属性注入（内部全程静默）
     maybeCheckpoint(ctx);        // 写侧：记忆检查点（到点才追加，见上）
   },
@@ -1361,7 +1386,7 @@ export const hooks = {
    */
   'after-tool': async (ctx = {}) => {
     try {
-      if (String(ctx?.toolName || '') !== 'memory-vec__remember') return;
+      if (!['memory-vec__remember','memory-vec__remember_thing'].includes(String(ctx?.toolName || ''))) return;
       const key = String(ctx?.chatKey || '') || '(no-chat)';
       const st = checkpointTurns.get(key);
       if (st) {
