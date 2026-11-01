@@ -8,6 +8,7 @@
 | QQ 适配器 `VEC_MEMORY_ROOT=<repo> npm run test:adapter` | 11/11 通过，无跳过 | 真实工具与钩子连接临时 HTTP 服务，可靠补投、召回、注入、采用；不是生产 QQ 实发 |
 | 原开发树 `node --test --test-concurrency=1 "test/*.mjs"` | 424/424 通过，无跳过 | 原有算法与兼容路径的全部测试及本次新增测试 |
 | QQ 旧群记忆测试 | 29/29 通过 | 原功能、落盘失败不假成功、损坏文件不覆盖、输入超长不静默截断 |
+| GitHub Actions | Linux、Windows 均通过 | [21fc939 检查记录](https://github.com/LinFom/vec-memory/actions/runs/41280257333) |
 | 浏览器烟雾检查 | 通过 | Chrome 加载临时服务管理页，实际读取人物小卡和场景历史 |
 | 固定合成检索评估 | 6 个查询通过 | precision@8 从 2/3 到 1，recall@8 保持 1，误注入查询比例从 1/6 到 0；无外部模型请求 |
 
