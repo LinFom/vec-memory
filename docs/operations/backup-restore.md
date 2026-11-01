@@ -159,7 +159,7 @@ node tools/standalone-backup.mjs create \
 ```text
 node tools/standalone-backup.mjs create <stopped-root> <new-file> [spaceId]
 node tools/standalone-backup.mjs inspect <file>
-node tools/standalone-backup.mjs restore <file> <new-directory>
+node tools/standalone-backup.mjs restore <file> <new-directory> [expected-checksum]
 ```
 
 - `create` 用 `flag:'wx'` 写目标文件；目标已存在会失败，不会覆盖。
@@ -198,7 +198,7 @@ Remove-Item Env:VEC_MEMORY_BACKUP_PASSWORD
 - DurableLog 行的 seq/previous/hash 链；
 - 完整服务备份必须含 `access.json` 且有 `adminHash`。
 
-**检查通过不等于恢复成功**：还要在旁置目录做恢复和 `audit`。检查/预览的 `checksum` 要记录，恢复时用于确认“预览的就是恢复的”。
+**检查通过不等于恢复成功**：还要在旁置目录做恢复和 `audit`。检查/预览的 `checksum` 要记录，恢复时用于确认“预览的就是恢复的”。管理 API 强制传 expectedChecksum；CLI 可将 checksum 作为恢复命令第四个位置参数，省略时仍校验归档完整性，但不绑定之前的预览。
 
 ## 6. 完整服务恢复（旁置目录，人工切换）
 
@@ -210,9 +210,12 @@ Remove-Item Env:VEC_MEMORY_BACKUP_PASSWORD
 
 ```powershell
 $env:VEC_MEMORY_BACKUP_PASSWORD = Read-Host -Prompt '备份密码'
+$review = node tools/standalone-backup.mjs inspect E:\backups\vec-memory-20261101-full.vmb | ConvertFrom-Json
+$review
+# 核对 kind、files、totalBytes 和 checksum 后恢复同一份归档
 node tools/standalone-backup.mjs restore `
   E:\backups\vec-memory-20261101-full.vmb `
-  E:\vec-memory-restored-20261101
+  E:\vec-memory-restored-20261101 $review.checksum
 Remove-Item Env:VEC_MEMORY_BACKUP_PASSWORD
 ```
 
@@ -302,7 +305,7 @@ GET /api/v1/version                  → implementationVersion 0.32.0（以实�
 
 ### 7.4 CLI 的边界
 
-`node tools/standalone-backup.mjs restore <file> <new-directory>` 对空间归档只把内容恢复到指定目录并跑 audit；它**不会**更新服务根的 `access.json`，也不会自动注册成 `spaces/<id>`。要把空间导入一个正在运行的服务，请用管理页/管理 API；CLI 更适合离线检查或手动搭建目录。
+`node tools/standalone-backup.mjs restore <file> <new-directory> [expected-checksum]` 对空间归档只把内容恢复到指定目录并跑 audit；它**不会**更新服务根的 `access.json`，也不会自动注册成 `spaces/<id>`。要把空间导入一个正在运行的服务，请用管理页/管理 API；CLI 更适合离线检查或手动搭建目录。
 
 ## 8. 恢复失败怎么办
 

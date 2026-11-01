@@ -1,3 +1,5 @@
+import {spawnSync} from 'node:child_process';
+import {fileURLToPath} from 'node:url';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -62,6 +64,11 @@ test('encrypted full and portable space backups reject wrong password and damage
  assert.equal(JSON.parse(fs.readFileSync(path.join(dir,'restored','spaces','s','settings.json'))).consolidateEnabled,false);
  assert.throws(()=>restoreBackup(bytes,path.join(dir,'restored'),{password:'password-123'}),/new destination/i);
  const portable=inspectBackup(createBackup(root,{spaceId:'s'}));assert(!JSON.stringify(portable).includes('secret'));assert.equal(JSON.parse(Buffer.from(portable.files.find(f=>f.name==='settings.json').data,'base64')).llmApiKey,undefined);
+ const archiveFile=path.join(dir,'cli.vmb');fs.writeFileSync(archiveFile,bytes);
+ const cli=fileURLToPath(new URL('../tools/standalone-backup.mjs',import.meta.url)),env={...process.env,VEC_MEMORY_BACKUP_PASSWORD:'password-123'};
+ const runCli=(...args)=>spawnSync(process.execPath,[cli,...args],{env,encoding:'utf8',timeout:20000});
+ const bad=runCli('restore',archiveFile,path.join(dir,'cli-bad'),'wrong-checksum');assert.notEqual(bad.status,0);assert(!fs.existsSync(path.join(dir,'cli-bad')));
+ const good=runCli('restore',archiveFile,path.join(dir,'cli-good'),manifest.checksum);assert.equal(good.status,0,good.stderr);assert.equal(JSON.parse(good.stdout).validated,true);
  const changed=JSON.parse(bytes);changed.tag=Buffer.alloc(16).toString('base64');assert.throws(()=>inspectBackup(Buffer.from(JSON.stringify(changed)),'password-123'),/damaged/i);
 });
 test('real service scene/person APIs, backup/import and permission boundaries',async t=>{
