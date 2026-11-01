@@ -8,6 +8,8 @@
 
 需要 Node.js 22.5 或更新版本。
 
+发行包的逐步操作见[安装与接入手册](docs/安装与接入手册.md)。Windows 解压后可依次双击 `install.cmd`、`init.cmd`（仅新库）、`start.cmd`；默认数据保存在程序目录旁的 `vec-memory-data`，升级时继续使用原数据目录。包内不捆绑 Node.js 或依赖，首次安装依赖需要联网。
+
 ```sh
 npm ci
 npm run init -- --root /absolute/path/to/memory-data
@@ -47,3 +49,5 @@ npm run test:adapter
 ```
 
 测试使用临时库和模拟模型，不产生外部模型费用，覆盖隔离、共享撤销、持久化重启、整理、索引、采用确认与旁置迁移。
+
+维护者可在干净、已提交的检出中执行 `python tools/build-release.py --output <新输出目录>`，生成服务源码包、QQ 适配器包、独立手册和 SHA-256 清单；`*-share.zip` 将发行包、接入手册和完整设计资料放在一起，便于分享。构建仅使用 Git 跟踪的发行目录，不包含本机数据、凭据、依赖或 DSH 执行记录。
