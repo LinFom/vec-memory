@@ -1,0 +1,78 @@
+{
+  "fixtureVersion": 1,
+  "queries": 6,
+  "precisionAt8": 0.6666666666666666,
+  "recallAt8": 1,
+  "falseInjectionRate": 0.16666666666666666,
+  "externalModelRequests": 0,
+  "scope": "Synthetic keyword semantic retrieval only; not a claim about production LLM accuracy or comparative superiority",
+  "rows": [
+    {
+      "id": "long-name",
+      "expected": [
+        "喜欢绿茶，不加糖"
+      ],
+      "actual": [
+        "蜂蜜柚子茶：喜欢绿茶，不加糖"
+      ],
+      "correct": 1,
+      "actualMode": "keyword",
+      "latencyMs": 9
+    },
+    {
+      "id": "short-name",
+      "expected": [
+        "喜欢红茶，加蜂蜜"
+      ],
+      "actual": [
+        "柚子：喜欢红茶，加蜂蜜"
+      ],
+      "correct": 1,
+      "actualMode": "keyword",
+      "latencyMs": 2
+    },
+    {
+      "id": "game-context",
+      "expected": [
+        "喜欢建造城堡"
+      ],
+      "actual": [
+        "建造玩家：喜欢建造城堡"
+      ],
+      "correct": 1,
+      "actualMode": "keyword",
+      "latencyMs": 3
+    },
+    {
+      "id": "no-private-in-group",
+      "expected": [],
+      "actual": [],
+      "correct": 0,
+      "actualMode": "keyword",
+      "latencyMs": 3
+    },
+    {
+      "id": "unrelated",
+      "expected": [],
+      "actual": [
+        "柚子：喜欢红茶，加蜂蜜",
+        "蜂蜜柚子茶：喜欢绿茶，不加糖"
+      ],
+      "correct": 0,
+      "actualMode": "keyword",
+      "latencyMs": 2
+    },
+    {
+      "id": "long-forgotten",
+      "expected": [
+        "喜欢建造城堡"
+      ],
+      "actual": [
+        "建造玩家：喜欢建造城堡"
+      ],
+      "correct": 1,
+      "actualMode": "keyword",
+      "latencyMs": 2
+    }
+  ]
+}

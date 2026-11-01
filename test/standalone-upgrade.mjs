@@ -1,0 +1,113 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import {SceneMemory} from '../src/core/scene-memory.mjs';
+import {Normalizer} from '../src/core/normalize.mjs';
+import {planEventCarry,encodingIdentity} from '../src/core/vector-generation.mjs';
+import {createBackup,inspectBackup,restoreBackup} from '../src/standalone/backup.mjs';
+import {initialize,createService} from '../src/standalone/service.mjs';
+
+function temporary(t){const dir=fs.mkdtempSync(path.join(os.tmpdir(),'vec-upgrade-'));t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));return dir;}
+const scope={kind:'group',id:'a'}, outside={kind:'private',id:'dm'};
+test('ambiguous nicknames never assert one person; stable accounts remain distinct',()=>{
+ const n=new Normalizer({secret:Buffer.alloc(32,3)});
+ n.setVocabulary([{id:'qq:10001',kind:'person',surface:['蜂蜜柚子茶','柚子']},{id:'qq:10002',kind:'person',surface:['柚子']}]);
+ assert.notEqual(n.resolveKnown('qq:10001').label,n.resolveKnown('qq:10002').label);
+ assert(![n.resolveKnown('qq:10001').label,n.resolveKnown('qq:10002').label].some(label=>n.normalize('柚子').text.includes(label)));
+ assert.equal(n.normalize('蜂蜜柚子茶').text,'〔'+n.resolveKnown('qq:10001').label+'〕');
+});
+test('unknown original vector identity stays unknown across second and third carry',()=>{
+ const identity={model:'m',dim:3,encoding:encodingIdentity({embedModel:'m',embedBaseURL:'https://example.test',embedDimensions:3})};
+ const first=planEventCarry({sourceMetas:[{id:'e',kind:'event',model:'m',dim:3}],targetIdentity:identity,allowUnknown:true});
+ assert.equal(first.accepted[0].verdict.verdict,'unknown');
+ const second=planEventCarry({sourceMetas:[{...first.accepted[0].meta,carriedFrom:'A',carryIdentity:first.accepted[0].sourceIdentity}],sourceEncoding:identity.encoding,targetIdentity:identity});
+ assert.equal(second.blocked[0].verdict,'unknown');
+ const missing=planEventCarry({sourceMetas:[{id:'e',kind:'event',carriedFrom:'B',model:'m',dim:3}],sourceEncoding:identity.encoding,targetIdentity:identity});assert.equal(missing.blocked[0].verdict,'unknown');
+});
+test('scene candidates, duplicate tombstones, proven dependency corrections and explicit sharing',t=>{
+ const dir=temporary(t), w=new SceneMemory(dir);w.scene({operationId:'s',sceneId:'a',name:'A',bindings:[scope]});
+ const save=(id,text,more={})=>w.entry({operationId:id,sceneId:'a',scope,text,...more},{admin:true});
+ const root=save('r','不正确的规矩',{confirm:true,shareable:true}).entry;
+ const child=save('c','由规矩形成的印象',{derivedFrom:[root.id]}).entry;
+ save('private','内部信息',{confirm:true});
+ assert.equal(w.query({scope:outside}).length,1);
+ assert.equal(w.entry({operationId:'candidate',sceneId:'a',scope:outside,text:'外部补充'},{evidence:[{id:'m'}]}).entry.status,'candidate');
+ assert.equal(save('again','不正确的规矩').duplicate,true);
+ const preview=w.preview(root.id);assert.deepEqual(new Set(preview.proven),new Set([root.id,child.id]));
+ w.retract({operationId:'delete',entryId:root.id,previewToken:preview.previewToken,reason:'纠正'});
+ assert.equal(save('resurrection','不正确的规矩').blocked,true);assert.equal(w.query({scope:outside}).length,0);
+ const reopen=new SceneMemory(dir);assert.equal(reopen.state().entries[child.id].status,'retracted');
+ const restored=reopen.entry({operationId:'restore-explicit',entryId:root.id,expectedRev:reopen.state().entries[root.id].rev,previewToken:reopen.preview(root.id).previewToken,sceneId:'a',scope,text:'修正后的规矩',confirm:true,shareable:true},{admin:true}).entry;
+ assert.equal(restored.status,'confirmed');assert.equal(reopen.state().entries[child.id].status,'retracted');
+ assert.equal(new SceneMemory(dir).query({scope:outside})[0].text,'修正后的规矩');
+ const candidate=Object.values(reopen.state().entries).find(e=>e.text==='外部补充');
+ assert.throws(()=>reopen.entry({operationId:'publish',entryId:candidate.id,expectedRev:1,sceneId:'a',scope:outside,text:'外部补充',shareable:true},{evidence:[{id:'m'}]}),/administrator/i);
+});
+test('confirmed account links are reversible and transitive without changing original IDs',t=>{
+ const w=new SceneMemory(temporary(t));assert.throws(()=>w.link({operationId:'bad',a:'qq:1',b:'game:1'}),/confirm/i);
+ const l=w.link({operationId:'link',a:'qq:1',b:'game:1',confirmed:true}).link;
+ assert.deepEqual(w.accounts('game:1').sort(),['game:1','qq:1']);
+ w.link({operationId:'unlink',a:l.a,b:l.b,active:false,expectedRev:l.rev,confirmed:true});assert.deepEqual(w.accounts('game:1'),['game:1']);
+});
+test('encrypted full and portable space backups reject wrong password and damage; never overwrite',t=>{
+ const dir=temporary(t),root=path.join(dir,'root');initialize(root);
+ fs.mkdirSync(path.join(root,'spaces','s'),{recursive:true});fs.writeFileSync(path.join(root,'spaces','s','state.json'),JSON.stringify({jobs:{pending:{status:'queued'},active:{status:'running'}},receipts:{old:{}}}));fs.writeFileSync(path.join(root,'spaces','s','settings.json'),JSON.stringify({llmApiKey:'secret',consolidateEnabled:true}));
+ assert.throws(()=>createBackup(root),/password/i);
+ const bytes=createBackup(root,{password:'password-123'});assert(!bytes.includes(Buffer.from('secret')));assert.throws(()=>inspectBackup(bytes,'wrong-password'),/password/i);
+ const manifest=inspectBackup(bytes,'password-123');assert.equal(manifest.kind,'service');
+ const restored=restoreBackup(bytes,path.join(dir,'restored'),{password:'password-123',expectedChecksum:manifest.checksum});assert.equal(restored.automaticTasksSuspended,true);
+ const resumed=JSON.parse(fs.readFileSync(path.join(dir,'restored','spaces','s','state.json')));assert.equal(resumed.jobs.pending.status,'failed');assert.equal(resumed.jobs.active.error.code,'RESTORED_REVIEW_REQUIRED');assert.deepEqual(resumed.receipts,{});
+ assert.equal(JSON.parse(fs.readFileSync(path.join(dir,'restored','spaces','s','settings.json'))).consolidateEnabled,false);
+ assert.throws(()=>restoreBackup(bytes,path.join(dir,'restored'),{password:'password-123'}),/new destination/i);
+ const portable=inspectBackup(createBackup(root,{spaceId:'s'}));assert(!JSON.stringify(portable).includes('secret'));assert.equal(JSON.parse(Buffer.from(portable.files.find(f=>f.name==='settings.json').data,'base64')).llmApiKey,undefined);
+ const changed=JSON.parse(bytes);changed.tag=Buffer.alloc(16).toString('base64');assert.throws(()=>inspectBackup(Buffer.from(JSON.stringify(changed)),'password-123'),/damaged/i);
+});
+test('real service scene/person APIs, backup/import and permission boundaries',async t=>{
+ const root=temporary(t),admin=initialize(root),service=createService({root});t.after(()=>service.close());
+ const call=async(route,body={},token=admin,method='POST')=>{const r=await service.handle({path:'/api/v1/'+route,method,token,body});return {...r.body,status:r.status};};
+ const token=(await call('admin/projects',{projectId:'p'})).token;await call('admin/spaces',{spaceId:'s',owner:'p'});
+ const w=(action,p={},tk=admin)=>call('spaces/s/workspace',{action,...p},tk);
+ assert.equal((await w('state',{},token)).status,403);
+ assert.equal((await w('scene',{operationId:'s',sceneId:'a',name:'A',bindings:[scope]})).status,200);
+ const e=await w('entry',{operationId:'e',sceneId:'a',scope,text:'公开定位',shareable:true,confirm:true});assert.equal(e.status,200);
+ const external=await w('query',{scope:outside},token);assert.equal(external.entries[0].text,'公开定位');assert.deepEqual(external.entries[0].evidence,[]);
+ await call('spaces/s/entities/qq%3A1',{displayName:'A'},token,'PUT');await call('spaces/s/memories',{operationId:'m',actorId:'qq:1',source:'manual',kind:'trait',attr:'饮品',text:'绿茶',scope},token);
+ let person=await call('spaces/s/people',{actorId:'qq:1',scope},token);assert.equal(person.profiles.length,1);
+ const item=person.profiles[0];assert.equal((await call('spaces/s/people',{actorId:'qq:1',scope,action:'revision',operationId:'hide',op:'hide',target:{key:item.key,itemKey:item.itemKey},expectedEtag:item.etag,reason:'错误'})).status,200);
+ const recalled=await call('spaces/s/recall',{query:'绿茶',scope},token);assert(!recalled.items.some(i=>i.layer==='profile'&&i.text.includes('绿茶')));
+ const backup=await call('admin/backups',{spaceId:'s'});assert.equal(backup.status,200);
+ const preview=await call('admin/backups/'+backup.backupId+'/preview');assert.equal(preview.kind,'space');
+ const imported=await call('admin/backups/'+backup.backupId+'/restore',{expectedChecksum:preview.checksum,spaceId:'copy',owner:'p'});assert.equal(imported.status,200);
+ assert.equal((await call('spaces/copy/status',{},token,'GET')).messages,0);
+ assert.equal((await call('spaces/copy/people',{actorId:'qq:1',scope},token)).profiles[0].hidden,true);
+ assert.equal((await call('admin/backups',{spaceId:'s'},token)).status,403);
+ await call('spaces/s/entities/game%3Aplayer',{displayName:'Game Alice'},token,'PUT');
+ await call('spaces/s/memories',{operationId:'game-habit',actorId:'game:player',source:'manual',kind:'trait',attr:'兴趣',text:'建造城堡',scope:{kind:'group',id:'game-room'}},token);
+ const link=(await w('link',{operationId:'link',a:'qq:1',b:'game:player',confirmed:true})).link;assert(link);
+ const combined=await call('spaces/s/people',{actorId:'qq:1',scope,allScopes:true});assert.equal(combined.profiles.length,2);assert(combined.profiles.some(i=>i.accountId==='game:player'&&i.value.includes('城堡')));
+ assert.equal((await call('spaces/s/people',{actorId:'qq:1',scope,allScopes:true},token)).status,403);
+ assert(!(await call('spaces/s/recall',{scope,actorIds:['qq:1']},token)).items.some(i=>i.text.includes('城堡')));
+ await w('link',{operationId:'unlink',a:link.a,b:link.b,confirmed:true,active:false,expectedRev:link.rev});
+ assert.equal((await call('spaces/s/people',{actorId:'qq:1',scope,allScopes:true})).profiles.length,1);
+});
+
+test('person correction previews and retracts dependent scenes, protects manual value after re-extraction and restart',async t=>{
+ const root=temporary(t),admin=initialize(root);let service=createService({root});t.after(()=>service.close());
+ const call=async(route,body={})=>{const r=await service.handle({path:'/api/v1/'+route,method:'POST',token:admin,body});assert.equal(r.status,200,JSON.stringify(r.body));return r.body;};
+ await call('admin/projects',{projectId:'p'});await call('admin/spaces',{spaceId:'s',owner:'p'});
+ let response=await service.handle({path:'/api/v1/spaces/s/entities/qq%3A1',method:'PUT',token:admin,body:{displayName:'A'}});assert.equal(response.status,200);
+ const remember={actorId:'qq:1',source:'manual',kind:'trait',attr:'饮品',text:'绿茶',scope};
+ await call('spaces/s/memories',{...remember,operationId:'tea'});
+ const item=(await call('spaces/s/people',{actorId:'qq:1',scope})).profiles[0];
+ await call('spaces/s/workspace',{action:'scene',operationId:'s',sceneId:'a',name:'A',bindings:[scope]});
+ const child=(await call('spaces/s/workspace',{action:'entry',operationId:'derived',sceneId:'a',scope,text:'这个群都爱绿茶',confirm:true,derivedFrom:[item.id]})).entry;
+ const p={actorId:'qq:1',scope,target:{key:item.key,itemKey:item.itemKey}},preview=await call('spaces/s/people',{...p,action:'preview'});assert.deepEqual(preview.proven,[child.id]);
+ const correction={...p,action:'revision',operationId:'correct-tea',expectedEtag:item.etag,previewToken:preview.previewToken,op:'replace',value:'红茶',reason:'原印象错误'};
+ await call('spaces/s/people',correction);await call('spaces/s/memories',{...remember,operationId:'old-evidence-again'});
+ assert.equal((await call('spaces/s/people',{actorId:'qq:1',scope})).profiles[0].value,'红茶');
+ assert.equal((await call('spaces/s/workspace',{action:'state'})).entries[child.id].status,'retracted');
+ await service.close();service=createService({root});assert.equal((await call('spaces/s/people',{actorId:'qq:1',scope})).profiles[0].value,'红茶');
+ assert.equal((await call('spaces/s/people',correction)).replayed,true);
+});

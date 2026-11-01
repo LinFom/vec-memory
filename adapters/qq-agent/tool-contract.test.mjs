@@ -43,6 +43,9 @@ test('actual thing tool writes and recalls through standalone HTTP',{skip:!proce
   mod.activate({dataDir:path.join(dir,'host'),store:{listChats:()=>['group:42'],recent:()=>[row]}});
   await mod.hooks['before-context']({chatKey:'group:42',triggerEntries:[{id:1,sender:{id:'12345'}}]});
   const result=await tools.find(t=>t.id==='remember_thing').execute({chatKey:'group:42'},{name:'冰箱战术',statement:'先搁置问题'});assert.equal(result.isError,false,result.content);
+  const scene=await tools.find(t=>t.id==='remember_scene').execute({chatKey:'group:42'},{text:'本群把先搁置问题叫冰箱战术',kind:'meme'});assert.equal(scene.isError,false,scene.content);
+  const ownScene=await tools.find(t=>t.id==='query_scene').execute({chatKey:'group:42'},{sceneId:'group:42'});assert.match(ownScene.content,/冰箱战术/);
+  const otherChannel=await tools.find(t=>t.id==='query_scene').execute({chatKey:'private:12345'},{sceneId:'group:42'});assert.doesNotMatch(otherChannel.content,/冰箱战术/);
   const ctx={chatKey:'group:42',messages:[{role:'user',content:'冰箱战术是什么意思？'}]};await mod.hooks['before-llm-messages'](ctx);assert.match(ctx.messages[0].content,/来源观察.*冰箱战术/);assert.match(ctx.messages[0].content,/先搁置问题/);
  }finally{mod?.deactivate();if(runtime)await runtime.close();if(oldDir===undefined)delete process.env.QQ_AGENT_DATA_DIR;else process.env.QQ_AGENT_DATA_DIR=oldDir;fs.rmSync(dir,{recursive:true,force:true})}
 });

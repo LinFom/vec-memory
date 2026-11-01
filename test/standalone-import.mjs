@@ -23,8 +23,8 @@ test('offline import preserves evidence IDs, original labels, facts and indexed 
  engine=createSpaceEngine({root:spaceRoot});
  const replay=await engine.call('ingest',{messages:[{messageId:`${chatKey}:1`,conversationId:chatKey,actorId:row.speakerId,role:'user',timestamp:new Date(ts).toISOString(),text:row.text,scope:{kind:'group',id:'123456'},mentions:[]}]});assert.equal(replay.duplicates,1);assert.equal(replay.accepted,0);
  const recalled=await engine.call('recall',{query:'露营',scope:{kind:'group',id:'123456'},actorIds:['1234567']});
- assert(recalled.items.some(i=>i.layer==='semantic'&&i.sourceRefs.some(r=>r.id===row.id)));assert(recalled.items.some(i=>i.layer==='long-term'&&i.text.includes('露营')));
+ assert(!recalled.items.some(i=>i.layer==='semantic'&&i.text.includes('喜欢绿茶')));assert(recalled.items.some(i=>i.layer==='long-term'&&i.text.includes('露营')));
  const entity=await engine.call('entity',{entityId:'1234567',displayName:'Alice new'});assert.equal(entity.label,speaker);
- assert((await engine.call('recall',{query:'绿茶',scope:{kind:'group',id:'123456'},actorIds:['1234567']})).items.some(i=>i.layer==='semantic'));
+ assert((await engine.call('recall',{query:'绿茶',scope:{kind:'group',id:'123456'},actorIds:['1234567']})).items.some(i=>i.layer==='semantic'&&i.sourceRefs.some(r=>r.id===row.id)));
  }finally{await engine?.close();fs.rmSync(temp,{recursive:true,force:true});}
 });

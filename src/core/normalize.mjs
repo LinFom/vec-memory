@@ -39,7 +39,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 
-export const NORMALIZER_VERSION = 2;
+export const NORMALIZER_VERSION = 3;
 
 /**
  * **低权重词条**：不超过三位的纯 ASCII 字母/数字（`16` / `17` / `abc` / `3`）。
@@ -1062,6 +1062,10 @@ export class Normalizer {
 
   /** 已知实体 → 用它的稳定编号；未知 → 派生一个临时编号并登记。 */
   _resolveTerm(term, kindHint) {
+    // A shared nickname is useful for redaction, but is not proof of a person's identity.
+    if (this.ambiguous?.some(a => a.surface === term)) {
+      return {label:this._ephemeralLabel('other',`ambiguous:${term}`,'X'),kind:'other'};
+    }
     const owner = this.surfaceIndex.get(term);
     if (owner) {
       return { label: this.labelById.get(owner) || 'SELF', kind: this.kindOf(owner), known: true };

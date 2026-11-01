@@ -16,19 +16,23 @@ import {getEventIndex,searchEvents} from '../core/event-index.mjs';
 import {FACT_KINDS} from '../core/facts.mjs';
 import {prepareDiscoveries,applyDiscoveries} from '../core/thing-discovery.mjs';
 import {openSubjectStore} from '../core/subjects.mjs';
+import {SceneMemory} from '../core/scene-memory.mjs';
 const root=path.resolve(workerData.root),input=path.join(root,'input'),legacy=path.join(root,'legacy','data');
 fs.mkdirSync(input,{recursive:true});fs.mkdirSync(legacy,{recursive:true});
 if(!fs.existsSync(path.join(input,'source.json'))) fs.writeFileSync(path.join(input,'source.json'),JSON.stringify({version:1,kind:'canonical'}));
 const log=new DurableLog(path.join(input,'messages.jsonl'),()=>{});
 bindCanonicalMessages(input,()=>{log.assertReadable();return log.rows.map(r=>r.data.message);});
 const memoryOperations=new DurableLog(path.join(input,'memory-operations.jsonl'),()=>{});
+const corrections=new DurableLog(path.join(input,'correction-intents.jsonl'),()=>{});
+const workspace=new SceneMemory(input);let paused=false;
+const appliedCorrections=new Set();
 function configuredSettings(){const file=path.join(root,'settings.json');return {...DEFAULT_SETTINGS,...workerData.settings,...(fs.existsSync(file)?JSON.parse(fs.readFileSync(file,'utf8')):{})};}
 // Background work is serialized by this worker rather than by legacy global timers.
 function settings(){return {...configuredSettings(),autoIndexEnabled:false,consolidateEnabled:false};}
 const router=createRouter({dataRoot:legacy,settings:{getSkillConfig:(_id,defaults)=>({...defaults,...settings()})}});
 bindHost({config:{DATA_DIR:legacy,SOURCE_DIR:input},settings:{getSkillConfig:(_id,defaults)=>({...defaults,...settings()})},fallbackRoot:root});
 const receipts=new Map();
-function atomic(file,value){fs.mkdirSync(path.dirname(file),{recursive:true});const tmp=file+'.tmp';fs.writeFileSync(tmp,JSON.stringify(value,null,2));fs.renameSync(tmp,file);}
+function atomic(file,value){fs.mkdirSync(path.dirname(file),{recursive:true});const tmp=file+'.tmp',fd=fs.openSync(tmp,'w',0o600);try{fs.writeFileSync(fd,JSON.stringify(value,null,2));fs.fsyncSync(fd);}finally{fs.closeSync(fd);}fs.renameSync(tmp,file);}
 function message(raw){
  const m={messageId:requireText(raw?.messageId,'messageId',200),conversationId:requireText(raw?.conversationId,'conversationId',200),actorId:requireText(raw?.actorId,'actorId',200),role:requireText(raw?.role,'role',20),timestamp:typeof raw?.timestamp==='number'?raw.timestamp:Date.parse(raw?.timestamp),text:typeof raw?.text==='string'?raw.text:null,scope:raw?.scope};
  canonicalChatKey(m.scope);m.scope={kind:m.scope.kind,id:m.scope.id.trim()};
@@ -118,7 +122,7 @@ async function recall(p){
  const chatKey=canonicalChatKey(p.scope),rt=await getRuntime();await ensureIdentity(rt);
  const query=typeof p.query==='string'?p.query.trim():'',scope=rt.normalizer.scopeLabel(chatKey),facts=memoryCoreOf(rt,factStoreOf(rt)).manual.readStore();if(facts.readOnlyReason)throw new MemoryError('STORAGE_UNAVAILABLE',facts.readOnlyReason,503);
  const lineage=readLineage(rt.dir);if(!lineage.ok)throw new MemoryError('STORAGE_UNAVAILABLE',lineage.error,503);
- const actorIds=Array.isArray(p.actorIds)?p.actorIds:[...new Set(canonicalMessages(input).filter(m=>canonicalChatKey(m.scope)===chatKey).map(m=>m.actorId))];
+ const actorIds=[...new Set((Array.isArray(p.actorIds)?p.actorIds:[...new Set(canonicalMessages(input).filter(m=>canonicalChatKey(m.scope)===chatKey).map(m=>m.actorId))]).flatMap(id=>workspace.accounts(id)))];
  const people=actorIds.map(id=>({id,name:canonicalEntities(input).find(e=>e.id===id||e.aliases?.includes(id))?.displayName||id}));
  // All v1 layers use the same explicit scope, including SELF and manual overrides.
  const winners=[...facts.slots.values()].filter(r=>r.scope===scope);
@@ -129,7 +133,7 @@ async function recall(p){
   else degraded={code:'EMBED_UNCONFIGURED',reason:'Embedding endpoint or model is missing'};
   if(!sims){sims=tokenOverlapSims(candidates.map(c=>c.line),q);metric='keyword';}
  }
- const selected=selectInjectLines({candidates,sims,minScore:metric==='keyword'?DEFAULT_TOKEN_MIN_SCORE:rt.settings.injectThreshold,mode:'boost',perPerson:2,total:8});
+ const selected=selectInjectLines({candidates,sims,minScore:metric==='keyword'?DEFAULT_TOKEN_MIN_SCORE:rt.settings.injectThreshold,mode:query?'hard':'boost',perPerson:2,total:8});
  for(const l of selected.lines){const c=candidates.find(c=>c.line===l.line&&c.who===l.who);items.push({id:`fact:${digest(c.rec.key)}`,text:`${l.who}：${l.line}`,layer:'semantic',sourceRefs:c.rec.provenance||[],score:l.score});}
  const profiles=buildProfileCandidates({winners,people,normalizer:rt.normalizer,lineage:lineage.entries,nowScope:scope,profilePolicy:'same-scope',allowCrossScope:false});
  for(const l of selectInjectLines({candidates:profiles,perPerson:1,total:8}).lines){const c=profiles.find(c=>c.line===l.line&&c.who===l.who);items.push({id:`profile:${digest(c.sourceSlots)}`,text:`${l.who}：${l.line}`,layer:'profile',sourceRefs:c.rec.sourceRecords.flatMap(r=>r.provenance||[])});}
@@ -146,6 +150,8 @@ async function recall(p){
  for(const d of subjects.subjectDetails)items.push({id:`subject:${d.id||digest(d)}`,text:`${d.knowledgeStatus==='candidate'?'【待确认】':d.authority==='manual'?'【人工修订】':'【来源观察】'}${d.possibleConflict?'【存在不同说法】':''}${d.subject.label} · ${d.aspect}：${d.statement}`,layer:'subject',knowledgeStatus:d.knowledgeStatus||'observed',authority:d.authority||'automatic',possibleConflict:!!d.possibleConflict,sourceRefs:d.provenance||[]});
  const working=canonicalMessages(input).filter(m=>canonicalChatKey(m.scope)===chatKey&&(!p.conversationId||m.conversationId===p.conversationId)).sort((a,b)=>b.timestamp-a.timestamp).slice(0,6).reverse();
  for(const m of working)items.push({id:`message:${m.messageId}`,text:`${m.actorId}：${m.text}`,layer:'working',sourceRefs:[{type:'message',id:m.messageId,chatKey,fromTs:m.timestamp,toTs:m.timestamp}]});
+ const sceneState=workspace.state();
+ for(const e of workspace.query({scope:p.scope,sceneId:p.sceneId}).filter(e=>p.sceneId||sceneState.scenes[e.sceneId].bindings.some(b=>canonicalChatKey(b)===chatKey)).slice(0,Math.min(8,Math.max(1,Number(p.limit)||4)))){const same=e.sourceScope===chatKey;items.push({id:e.id,text:`${sceneState.scenes[e.sceneId].name} · ${e.kind}：${e.text}`,layer:'scene',sceneId:e.sceneId,status:e.status,sourceRefs:e.evidence.filter(ref=>ref.chatKey===chatKey),sourceScope:same?e.sourceScope:undefined,sourceVisibility:same?'visible':'restricted'});}
  const unique=[...new Map(items.map(i=>[i.id,i])).values()],receiptId=randomUUID();
  for(const [id,r]of receipts)if(r.expires<Date.now())receipts.delete(id);
  receipts.set(receiptId,{expires:Date.now()+60000,chatKey,itemIds:new Set(unique.map(i=>i.id)),eventIds:new Set(eventIds),adopted:new Set()});
@@ -160,8 +166,65 @@ async function adoption(p){const r=receipts.get(p.receiptId);if(!r||r.expires<=D
 async function job(p){const cfg=configuredSettings();if(p.type==='consolidate'){if(!cfg.llmBaseURL||!cfg.llmModel)throw new MemoryError('LLM_UNCONFIGURED','Consolidation requires llmBaseURL and llmModel');const result=await runConsolidateNow({force:true,limit:p.limit,chatKey:p.scope?canonicalChatKey(p.scope):undefined,reason:'v1-job'});if(result.failedWindows>0)throw new MemoryError('CONSOLIDATE_FAILED',result.details?.filter(d=>d.error).map(d=>d.error).join('; ')||'Consolidation failed',502,{result});return result;}
  if(p.type==='index'){const rt=await getRuntime();if(!checkEndpoint(endpointOf(rt.settings)).ok)throw new MemoryError('EMBED_UNCONFIGURED','Indexing requires embedding endpoint and model');return await runIndex({reason:'v1-job'});}throw new MemoryError('INVALID_JOB','type must be consolidate or index');}
 async function status(){const rt=await getRuntime();return {ok:true,messages:canonicalMessages(input).length,entities:canonicalEntities(input).length,background:backgroundStatus,embeddingConfigured:checkEndpoint(endpointOf(rt.settings)).ok,llmConfigured:!!(rt.settings.llmBaseURL&&rt.settings.llmModel),dataRoot:legacy,sourceRoot:input};}
-const operations={ingest,entity,remember,discover,subjects,subject,subjectRevision,recall,adoption,job,status};
-let chain=Promise.resolve();parentPort.on('message',m=>{chain=chain.then(async()=>{try{if(!operations[m.operation])throw new MemoryError('INVALID_OPERATION','Unknown engine operation');parentPort.postMessage({id:m.id,result:await operations[m.operation](m.payload||{})});}catch(e){parentPort.postMessage({id:m.id,error:{message:e.message,code:e.code||'ENGINE_FAILED',status:e.status||500,result:e.result}});}});});
+async function workspaceOp(p) {
+ const {action,admin,...request}=p;
+ if(action==='state')return {ok:true,...workspace.state(),accounts:canonicalEntities(input)};
+ if(action==='scenes') {const state=workspace.state(),chat=canonicalChatKey(request.scope),visible=new Set(workspace.query(request).map(e=>e.sceneId));return {ok:true,scenes:Object.values(state.scenes).filter(s=>s.bindings.some(b=>canonicalChatKey(b)===chat)||visible.has(s.sceneId)).map(s=>({sceneId:s.sceneId,name:s.name,type:s.type}))};}
+ if(action==='ensureScene') {const sceneId=canonicalChatKey(request.scope);if(workspace.state().scenes[sceneId])return {ok:true,sceneId};const result=workspace.scene({operationId:'ensure:'+digest(sceneId),sceneId,name:request.name||sceneId,bindings:[request.scope]});return {...result,sceneId};}
+ if(action==='scene')return workspace.scene(request);
+ if(action==='link') {if(!admin)throw new MemoryError('FORBIDDEN','Administrator confirmation required',403);const rt=await getRuntime();await ensureIdentity(rt);for(const key of ['a','b']){const account=request[key],known=rt.normalizer.resolveKnown(account)||(String(account).startsWith('qq:')?rt.normalizer.resolveKnown(account.slice(3)):null);if(!known)throw new MemoryError('UNKNOWN_ENTITY','Register both exact platform accounts before linking');request[key]=known.id;}return workspace.link(request);}
+ if(action==='preview')return workspace.preview(request.entryId);
+ if(action==='retract') {if(!admin)throw new MemoryError('FORBIDDEN','Administrator correction required',403);return workspace.retract(request);}
+ if(action==='query')return {ok:true,entries:workspace.query(request).map(e=>({...e,evidence:e.evidence.filter(ref=>ref.chatKey===canonicalChatKey(request.scope)),sourceScope:e.sourceScope===canonicalChatKey(request.scope)?e.sourceScope:undefined,sourceVisibility:e.sourceScope===canonicalChatKey(request.scope)?'visible':'restricted',legacyRecord:undefined,history:undefined}))};
+ if(action==='entry') {
+   for(const id of request.derivedFrom||[])if(id.startsWith('person:')){const rt=await getRuntime(),manual=memoryCoreOf(rt,factStoreOf(rt)).manual;if(!manual.items().some(i=>!i.hidden&&'person:'+digest([i.key,i.itemKey])===id))throw new MemoryError('INVALID_DEPENDENCY','Person source item does not exist');}
+   const evidence=(request.evidenceIds||[]).map(id=>{const m=canonicalMessages(input).find(m=>m.messageId===id);if(!m||m.role!=='user'||canonicalChatKey(m.scope)!==canonicalChatKey(request.scope))throw new MemoryError('INVALID_EVIDENCE','Use accepted user messages in the submitting scope');return {type:'message',id,chatKey:canonicalChatKey(m.scope)};});
+   const result=workspace.entry(request,{admin,evidence});
+   if(!admin&&result.duplicate)return {ok:true,duplicate:true,entryId:result.entry.id};
+   return result;
+ }
+ if(action==='support') {const entry=workspace.state().entries[request.entryId];if(!entry)throw new MemoryError('NOT_FOUND','Entry not found',404);const evidence=(request.evidenceIds||[]).map(id=>{const m=canonicalMessages(input).find(m=>m.messageId===id);if(!m||m.role!=='user'||canonicalChatKey(m.scope)!==canonicalChatKey(request.scope)||!m.text.includes(entry.text))throw new MemoryError('INVALID_EVIDENCE','Target scene message must explicitly contain the candidate statement');return {type:'message',id,chatKey:canonicalChatKey(m.scope)};});return workspace.support(request,evidence);}
+ throw new MemoryError('INVALID_OPERATION','Unknown workspace operation');
+}
+async function person(p) {
+ const rt=await getRuntime();await ensureIdentity(rt);const manual=memoryCoreOf(rt,factStoreOf(rt)).manual;
+ const accounts=workspace.accounts(requireText(p.actorId,'actorId',200)),labels=accounts.map(a=>rt.normalizer.resolveKnown(a)?.label).filter(Boolean);
+ const scope=rt.normalizer.scopeLabel(canonicalChatKey(p.scope));
+ if(p.allScopes&&!p.admin)throw new MemoryError('FORBIDDEN','Only management may aggregate person records from all scopes',403);
+ if(['preview','revision'].includes(p.action)) {
+   if(!p.admin)throw new MemoryError('FORBIDDEN','Administrator correction required',403);
+   const replay=p.action==='revision'?corrections.replay('person:'+digest(p.operationId),p):null;if(replay)return replay;
+   const items=manual.items().filter(i=>labels.some(l=>manual.records().find(r=>r.key===i.key)?.speaker===l)&&(p.allScopes||i.scope===scope)),item=items.find(i=>i.key===p.target?.key&&i.itemKey===p.target?.itemKey);
+   if(!item)throw new MemoryError('NOT_FOUND','Person item not found in scope',404);
+   const entryId='person:'+digest([item.key,item.itemKey]),preview=workspace.preview(entryId);
+   const token=digest([item.etag,preview.previewToken]);
+   if(p.action==='preview')return {ok:true,...preview,item,previewToken:token};
+   if(p.expectedEtag!==item.etag)throw new MemoryError('STALE_REVISION','Person item changed',409);
+   if(preview.proven.length&&p.previewToken!==token)throw new MemoryError('PREVIEW_REQUIRED','Preview dependent scene entries before correction',409);
+   // Validate before durable intent; after this point recovery must finish the same decision.
+   if(!['replace','hide','restore'].includes(p.op))throw new MemoryError('INVALID_ARGUMENT','Invalid revision operation');
+   if(p.op==='replace')requireText(p.value,'value',4000);else if(Object.hasOwn(p,'value'))throw new MemoryError('INVALID_ARGUMENT','Only replace accepts value');
+   if(p.reason!=null)requireText(p.reason,'reason',1000);
+   const intent={request:{...p,operationId:'person-edit:'+digest(p.operationId)},entryId,previewToken:preview.previewToken};
+   const result=corrections.append('person:'+digest(requireText(p.operationId,'operationId',200)),p,intent,{ok:true,affectedScenes:preview.proven,operationId:p.operationId});
+   await recoverCorrections();receipts.clear();return result;
+ }
+ const records=manual.records().filter(r=>labels.includes(r.speaker)&&(p.allScopes||r.scope===scope));
+ const items=manual.items(records).map(i=>({...i,accountId:accounts.find(a=>rt.normalizer.resolveKnown(a)?.label===records.find(r=>r.key===i.key)?.speaker)}));
+ return {ok:true,accounts,profiles:items.filter(i=>i.kind==='trait').map(i=>({...i,id:'person:'+digest([i.key,i.itemKey])})),impressions:items.filter(i=>i.kind!=='trait').map(i=>({...i,id:'person:'+digest([i.key,i.itemKey])}))};
+}
+async function recoverCorrections(){
+ corrections.assertReadable();if(!corrections.rows.length)return;
+ const rt=await getRuntime(),manual=memoryCoreOf(rt,factStoreOf(rt)).manual;
+ for(const {data:d}of corrections.rows){
+   if(appliedCorrections.has(d.request.operationId))continue;
+   manual.commit(d.request);
+   workspace.retract({operationId:'person-dependents:'+digest(d.request.operationId),entryId:d.entryId,previewToken:d.previewToken,reason:d.request.reason||'Person source corrected'});
+   appliedCorrections.add(d.request.operationId);
+ }
+}
+const operations={ingest,entity,remember,discover,subjects,subject,subjectRevision,recall,adoption,job,status,workspace:workspaceOp,person,quiesce:async()=>{paused=true;return {ok:true};},audit:async()=>{log.assertReadable();memoryOperations.assertReadable();workspace.state();const rt=await getRuntime();if(factStoreOf(rt).readOnlyReason)throw new MemoryError('STORAGE_UNAVAILABLE','Fact store damaged',503);memoryCoreOf(rt,factStoreOf(rt)).manual.items();openSubjectStore(rt.dir).snapshot();const lineage=readLineage(rt.dir);if(!lineage.ok)throw new MemoryError('STORAGE_UNAVAILABLE',lineage.error,503);return {ok:true};}};
+let chain=Promise.resolve();parentPort.on('message',m=>{chain=chain.then(async()=>{try{await recoverCorrections();if(!operations[m.operation])throw new MemoryError('INVALID_OPERATION','Unknown engine operation');parentPort.postMessage({id:m.id,result:await operations[m.operation](m.payload||{})});}catch(e){parentPort.postMessage({id:m.id,error:{message:e.message,code:e.code||'ENGINE_FAILED',status:e.status||500,result:e.result}});}});});
 
 const backgroundStatus={lastConsolidateAt:0,lastIndexAt:0,lastError:null};
-setInterval(()=>{const cfg=configuredSettings(),now=Date.now();for(const [type,enabled,minutes,key] of [['consolidate',cfg.consolidateEnabled,Number(cfg.consolidateIntervalMin)||30,'lastConsolidateAt'],['index',cfg.autoIndexEnabled,Number(cfg.autoIndexIntervalMin)||30,'lastIndexAt']])if(enabled===true&&now-backgroundStatus[key]>=Math.max(60000,minutes*60000)){backgroundStatus[key]=now;chain=chain.then(()=>job({type})).catch(e=>{backgroundStatus.lastError={at:Date.now(),type,code:e.code||'BACKGROUND_FAILED',error:e.message};});}},60000).unref();
+setInterval(()=>{if(paused||workerData.maintenance)return;const cfg=configuredSettings(),now=Date.now();for(const [type,enabled,minutes,key] of [['consolidate',cfg.consolidateEnabled,Number(cfg.consolidateIntervalMin)||30,'lastConsolidateAt'],['index',cfg.autoIndexEnabled,Number(cfg.autoIndexIntervalMin)||30,'lastIndexAt']])if(enabled===true&&now-backgroundStatus[key]>=Math.max(60000,minutes*60000)){backgroundStatus[key]=now;chain=chain.then(()=>job({type})).catch(e=>{backgroundStatus.lastError={at:Date.now(),type,code:e.code||'BACKGROUND_FAILED',error:e.message};});}},60000).unref();

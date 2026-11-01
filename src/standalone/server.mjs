@@ -19,6 +19,16 @@ export function createStandaloneServer(options) {
         if (req.headers.origin !== expected) return send(403, { ok: false, code: 'ORIGIN_DENIED', error: 'Same-origin requests required' });
       }
       let body = {};
+      if (req.method === 'POST' && url.pathname === '/api/v1/admin/backups' && String(req.headers['content-type']).startsWith('application/octet-stream')) {
+        const token = /^Bearer (\S+)$/i.exec(req.headers.authorization || '')?.[1];
+        const auth = await service.handle({method:'GET',path:'/api/v1/admin/spaces',token});
+        if (auth.status !== 200) return send(auth.status,auth.body);
+        const chunks=[];let size=0;
+        for await (const chunk of req) {size+=chunk.length;if(size>1024*1024*1024) return send(413,{ok:false,code:'BODY_TOO_LARGE',error:'Maximum backup size is 1 GiB'});chunks.push(chunk);}
+        // Passwords travel in a request header, never in a URL or access log.
+        const result=await service.handle({method:'POST',path:url.pathname,token,body:{upload:Buffer.concat(chunks),password:req.headers['x-backup-password']?Buffer.from(req.headers['x-backup-password'],'base64').toString('utf8'):undefined}});
+        return send(result.status,result.body);
+      }
       if (['POST', 'PUT', 'PATCH'].includes(req.method)) {
         if (!String(req.headers['content-type'] || '').toLowerCase().startsWith('application/json')) return send(415, { ok: false, code: 'JSON_REQUIRED', error: 'application/json required' });
         const chunks = []; let size = 0;
@@ -27,7 +37,9 @@ export function createStandaloneServer(options) {
         if (!body || typeof body !== 'object' || Array.isArray(body)) return send(400, { ok: false, code: 'INVALID_ARGUMENT', error: 'JSON object required' });
       }
       const token = /^Bearer (\S+)$/i.exec(req.headers.authorization || '')?.[1];
-      const result = await service.handle({ method: req.method, path: req.url, body, token }); send(result.status, result.body);
+      const result = await service.handle({ method: req.method, path: req.url, body, token });
+      if (result.binary) {res.writeHead(result.status,{'content-type':'application/octet-stream','content-disposition':`attachment; filename="${result.filename}"`,'cache-control':'no-store'});return res.end(result.binary);}
+      send(result.status, result.body);
     } catch { if (!res.headersSent) send(500, { ok: false, code: 'INTERNAL_ERROR', error: 'Internal service error' }); else res.end(); }
   });
   server.on('close', () => void service.close());

@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "vec-memory standalone protocol",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "description": "Standalone service. Default port 8091. All business and admin routes require Bearer credentials; admin routes require administrator credentials. POST/PUT bodies must be JSON objects, at most 4 MiB. This contract is separate from the legacy /api/vec service."
   },
   "servers": [
@@ -1852,6 +1852,290 @@
           }
         }
       }
+    },
+    "/api/v1/spaces/{spaceId}/workspace": {
+      "post": {
+        "summary": "Scene CRUD, support, dependency preview and confirmed account links. state/scene/link/preview/retract require admin; entry revision/publication requires admin.",
+        "parameters": [
+          {
+            "name": "spaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WorkspaceRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Success"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Stable error; includes MAINTENANCE (503), STALE_REVISION / PREVIEW_REQUIRED (409), INVALID_BACKUP / PASSWORD_REQUIRED (400)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/spaces/{spaceId}/people": {
+      "post": {
+        "summary": "Read linked accounts in explicit scope; admin-only preview and correction with durable dependent retraction.",
+        "parameters": [
+          {
+            "name": "spaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PersonRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Success"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Stable error; includes MAINTENANCE (503), STALE_REVISION / PREVIEW_REQUIRED (409), INVALID_BACKUP / PASSWORD_REQUIRED (400)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/admin/backups": {
+      "post": {
+        "summary": "Admin-only consistent encrypted service or portable space backup. Binary upload also supported, maximum 1 GiB.",
+        "parameters": [
+          {
+            "name": "X-Backup-Password",
+            "in": "header",
+            "description": "Binary uploads only: UTF-8 password encoded as base64. Never place passwords in URLs.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BackupRequest"
+              }
+            },
+            "application/octet-stream": {
+              "schema": {
+                "type": "string",
+                "format": "binary"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Success"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Stable error; includes MAINTENANCE (503), STALE_REVISION / PREVIEW_REQUIRED (409), INVALID_BACKUP / PASSWORD_REQUIRED (400)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/admin/backups/{backupId}/preview": {
+      "post": {
+        "summary": "Admin-only authentication, checksums and restore preview.",
+        "parameters": [
+          {
+            "name": "backupId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BackupRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Success"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Stable error; includes MAINTENANCE (503), STALE_REVISION / PREVIEW_REQUIRED (409), INVALID_BACKUP / PASSWORD_REQUIRED (400)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/admin/backups/{backupId}/restore": {
+      "post": {
+        "summary": "Admin-only checked side-directory restore; expectedChecksum mandatory; space replacement explicit.",
+        "parameters": [
+          {
+            "name": "backupId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BackupRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Success"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Stable error; includes MAINTENANCE (503), STALE_REVISION / PREVIEW_REQUIRED (409), INVALID_BACKUP / PASSWORD_REQUIRED (400)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/admin/backups/{backupId}": {
+      "get": {
+        "summary": "Administrator-only binary backup download",
+        "parameters": [
+          {
+            "name": "backupId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Backup archive",
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Stable error; includes MAINTENANCE (503), STALE_REVISION / PREVIEW_REQUIRED (409), INVALID_BACKUP / PASSWORD_REQUIRED (400)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -2070,6 +2354,13 @@
               "type": "string",
               "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$"
             }
+          },
+          "degraded": {
+            "type": "object",
+            "description": "Actual degradation reasons keyed by source spaceId. May be empty.",
+            "additionalProperties": {
+              "type": "object"
+            }
           }
         },
         "required": [
@@ -2080,7 +2371,8 @@
           "actualMode",
           "sources"
         ],
-        "additionalProperties": true
+        "additionalProperties": true,
+        "description": " Scene items keep sourceScope and sceneId; sourceRefs are filtered by origin scope. Explicit sceneId is required for cross-channel scene recall."
       },
       "Message": {
         "type": "object",
@@ -2419,6 +2711,577 @@
           "rev",
           "provenance"
         ],
+        "additionalProperties": true
+      },
+      "WorkspaceRequest": {
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "operationId": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              },
+              "scope": {
+                "$ref": "#/components/schemas/Scope"
+              },
+              "sceneId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "entryId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "expectedRev": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "previewToken": {
+                "type": "string",
+                "minLength": 1
+              },
+              "action": {
+                "const": "state"
+              }
+            },
+            "required": [
+              "action"
+            ],
+            "additionalProperties": true
+          },
+          {
+            "type": "object",
+            "properties": {
+              "operationId": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              },
+              "scope": {
+                "$ref": "#/components/schemas/Scope"
+              },
+              "sceneId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "entryId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "expectedRev": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "previewToken": {
+                "type": "string",
+                "minLength": 1
+              },
+              "action": {
+                "const": "scenes"
+              }
+            },
+            "required": [
+              "action",
+              "scope"
+            ],
+            "additionalProperties": true
+          },
+          {
+            "type": "object",
+            "properties": {
+              "operationId": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              },
+              "scope": {
+                "$ref": "#/components/schemas/Scope"
+              },
+              "sceneId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "entryId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "expectedRev": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "previewToken": {
+                "type": "string",
+                "minLength": 1
+              },
+              "action": {
+                "const": "query"
+              },
+              "includeCandidates": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "action",
+              "scope"
+            ],
+            "additionalProperties": true
+          },
+          {
+            "type": "object",
+            "properties": {
+              "operationId": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              },
+              "scope": {
+                "$ref": "#/components/schemas/Scope"
+              },
+              "sceneId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "entryId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "expectedRev": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "previewToken": {
+                "type": "string",
+                "minLength": 1
+              },
+              "action": {
+                "const": "ensureScene"
+              },
+              "name": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "action",
+              "scope"
+            ],
+            "additionalProperties": true
+          },
+          {
+            "type": "object",
+            "properties": {
+              "operationId": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              },
+              "scope": {
+                "$ref": "#/components/schemas/Scope"
+              },
+              "sceneId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "entryId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "expectedRev": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "previewToken": {
+                "type": "string",
+                "minLength": 1
+              },
+              "action": {
+                "const": "scene"
+              },
+              "name": {
+                "type": "string",
+                "minLength": 1
+              },
+              "type": {
+                "type": "string",
+                "minLength": 1
+              },
+              "bindings": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 50,
+                "items": {
+                  "$ref": "#/components/schemas/Scope"
+                }
+              }
+            },
+            "required": [
+              "action",
+              "operationId",
+              "sceneId",
+              "name",
+              "bindings"
+            ],
+            "additionalProperties": true
+          },
+          {
+            "type": "object",
+            "properties": {
+              "operationId": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              },
+              "scope": {
+                "$ref": "#/components/schemas/Scope"
+              },
+              "sceneId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "entryId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "expectedRev": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "previewToken": {
+                "type": "string",
+                "minLength": 1
+              },
+              "action": {
+                "const": "entry"
+              },
+              "kind": {
+                "type": "string",
+                "minLength": 1
+              },
+              "text": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4000
+              },
+              "evidenceIds": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "derivedFrom": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "confirm": {
+                "type": "boolean"
+              },
+              "shareable": {
+                "type": "boolean"
+              },
+              "legacy": {
+                "type": "boolean"
+              },
+              "legacyRecord": {
+                "type": "object"
+              }
+            },
+            "required": [
+              "action",
+              "operationId",
+              "sceneId",
+              "scope",
+              "text"
+            ],
+            "additionalProperties": true
+          },
+          {
+            "type": "object",
+            "properties": {
+              "operationId": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              },
+              "scope": {
+                "$ref": "#/components/schemas/Scope"
+              },
+              "sceneId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "entryId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "expectedRev": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "previewToken": {
+                "type": "string",
+                "minLength": 1
+              },
+              "action": {
+                "const": "preview"
+              }
+            },
+            "required": [
+              "action",
+              "entryId"
+            ],
+            "additionalProperties": true
+          },
+          {
+            "type": "object",
+            "properties": {
+              "operationId": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              },
+              "scope": {
+                "$ref": "#/components/schemas/Scope"
+              },
+              "sceneId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "entryId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "expectedRev": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "previewToken": {
+                "type": "string",
+                "minLength": 1
+              },
+              "action": {
+                "const": "retract"
+              },
+              "reason": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "action",
+              "operationId",
+              "entryId",
+              "previewToken",
+              "reason"
+            ],
+            "additionalProperties": true
+          },
+          {
+            "type": "object",
+            "properties": {
+              "operationId": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              },
+              "scope": {
+                "$ref": "#/components/schemas/Scope"
+              },
+              "sceneId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "entryId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "expectedRev": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "previewToken": {
+                "type": "string",
+                "minLength": 1
+              },
+              "action": {
+                "const": "support"
+              },
+              "evidenceIds": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            },
+            "required": [
+              "action",
+              "operationId",
+              "entryId",
+              "scope",
+              "evidenceIds"
+            ],
+            "additionalProperties": true
+          },
+          {
+            "type": "object",
+            "properties": {
+              "operationId": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              },
+              "scope": {
+                "$ref": "#/components/schemas/Scope"
+              },
+              "sceneId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "entryId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "expectedRev": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "previewToken": {
+                "type": "string",
+                "minLength": 1
+              },
+              "action": {
+                "const": "link"
+              },
+              "a": {
+                "type": "string",
+                "minLength": 1
+              },
+              "b": {
+                "type": "string",
+                "minLength": 1
+              },
+              "confirmed": {
+                "const": true
+              },
+              "active": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "action",
+              "operationId",
+              "a",
+              "b",
+              "confirmed"
+            ],
+            "additionalProperties": true
+          }
+        ]
+      },
+      "PersonRequest": {
+        "type": "object",
+        "required": [
+          "actorId",
+          "scope"
+        ],
+        "properties": {
+          "actorId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "scope": {
+            "$ref": "#/components/schemas/Scope"
+          },
+          "action": {
+            "enum": [
+              "preview",
+              "revision"
+            ]
+          },
+          "operationId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "target": {
+            "type": "object",
+            "required": [
+              "key",
+              "itemKey"
+            ],
+            "properties": {
+              "key": {
+                "type": "string",
+                "minLength": 1
+              },
+              "itemKey": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          },
+          "expectedEtag": {
+            "type": "string",
+            "minLength": 1
+          },
+          "previewToken": {
+            "type": "string",
+            "minLength": 1
+          },
+          "op": {
+            "enum": [
+              "replace",
+              "hide",
+              "restore"
+            ]
+          },
+          "value": {
+            "type": "string",
+            "minLength": 1
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1
+          },
+          "allScopes": {
+            "type": "boolean",
+            "description": "Admin-only management aggregation across scopes; source accounts and scopes remain separate."
+          }
+        },
+        "additionalProperties": true
+      },
+      "BackupRequest": {
+        "type": "object",
+        "properties": {
+          "password": {
+            "type": "string",
+            "minLength": 8
+          },
+          "spaceId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "owner": {
+            "type": "string",
+            "minLength": 1
+          },
+          "replace": {
+            "type": "boolean"
+          },
+          "expectedChecksum": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          }
+        },
         "additionalProperties": true
       }
     }

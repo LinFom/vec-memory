@@ -32,6 +32,10 @@ Windows 可将路径换成 `E:\vec-memory-data`。保存初始化时仅显示一
 - [历史数据迁移与回退](docs/operations/standalone-migration.md)
 - [QQ-Agent 适配](adapters/qq-agent/README.md)
 - [新事物自动发现、候选与人工纠正](docs/thing-memory.md)
+- [完整设计](docs/完整设计文档.md) · [本次改进与评估对照](docs/项目客观评估.md) · [验收记录](docs/acceptance-20261101.md)
+- [备份、导入与回退](docs/operations/backup-restore.md)
+
+0.32 新增通用场景档案、逐条跨渠道授权、关联纠正、人工确认的跨平台账号绑定，以及人物档案前置展示。完整备份密码加密，导入支持旁置验证与回退副本；不需要更换存储引擎。旧群记忆通过 `tools/import-group-memory.mjs` 显式导入为未核验候选。
 
 本仓库仅提供源码、空库初始化和合成测试，不包含作者记忆、生产配置、凭据或模型权重。旧宿主格式的读取只用于兼容与显式导入；独立实例正常运行使用自己的规范原料。
 

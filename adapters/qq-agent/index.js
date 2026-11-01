@@ -1,6 +1,6 @@
 import { createProtocolBridge, scopeOf } from './protocol-v1.mjs';
 import { randomUUID } from 'node:crypto';
-// memory-vec — QQ-Agent 适配层入口（**新树 `refactor/` 版** · 0.27.0）
+// memory-vec — QQ-Agent 适配层入口（**新树 `refactor/` 版** · 0.32.0）
 //
 // ── 这一层是什么 ───────────────────────────────────────────────────────────
 // 一个**薄适配层**：不含任何向量库代码，只持有一个地址（设置里的 `serviceBaseURL`，
@@ -201,6 +201,11 @@ export function setup(api) {
     parameters:{type:'object',properties:{name:{type:'string',description:'聊天中出现的名称'},statement:{type:'string',description:'可选：用户给的解释或补充；只有名称、没人解释时不要填'},aspect:{type:'string',description:'可选：含义、用法、来历或适用场景'},evidence:{type:'array',items:{type:'string'},description:'用户原话的消息编号；省略时仅使用本轮核对过的用户消息，没有来源会提示补充'}},required:['name']},
     execute:(ctx,args)=>toolV1('thing',ctx,args)
   });
+
+  if(protocolV1())for(const [id,name,kind,description]of [
+    ['remember_scene','记下场景信息','scene-write','有人介绍本群、频道或游戏房间的规矩、梗、定位、约定时，顺手记一条。一次明确说明就可以提交，有疑问也可保留候选。传 sceneId 可为别的场景提交补充候选，不能替它直接改规矩。'],
+    ['query_scene','查场景档案','scene-query','想了解某个群、频道或游戏房间时就查。省略 sceneId 先查看可访问的场景列表；指定 sceneId 查询其可见条目。私聊也能查询允许跨渠道使用的内容。']
+  ])api.registerTool({id,name,category:'memory',description,parameters:{type:'object',properties:{sceneId:{type:'string',description:'目标场景稳定 ID；写入时省略表示当前场景'},text:{type:'string',description:'用户说明的原意，写入时必填'},kind:{type:'string',description:'rule、meme、term、topic、event 或 impression'},evidence:{type:'array',items:{type:'string'},description:'用户原话消息编号；省略时取本轮核对过的用户原话'}}},execute:(ctx,args)=>toolV1(kind,ctx,args)});
 
   // ── 写侧：memory-vec__remember（记事实）──────────────────────────────────
   //
@@ -999,7 +1004,7 @@ const REMEMBER_GUIDE_TEXT = '【记人】（系统维护消息：不需要回复
   + '以后相关话题里自动参考（不主动提及）。'
   + '该记：对方自述的固定信息、喜好口味、雷点禁忌、风格性格、身份关系、长期约定、反复玩的梗。\n'
   + '节律：聊出印象就顺手记一条，不要每条都记；先记后答，记完继续正常回复。'
-  + '想查旧事或不懂以前的梗时，直接用 memory-vec__search。若工具列表有 memory-vec__remember_thing，遇到新梗、概念或项目的解释就记名称和原意，后续补充仍用同一名称。';
+  + '想查旧事或不懂以前的梗时，直接用 memory-vec__search。若工具列表有 memory-vec__remember_thing，遇到新梗、概念或项目的解释就记名称和原意，后续补充仍用同一名称。若有 remember_scene，遇到场景定位、规矩和约定可直接提交；query_scene 可在私聊查询允许分享的场景档案。';
 
 /**
  * 追加「记人」节到最后一条 user（没有则退 system）。同轮多 round 只加一次
@@ -1327,10 +1332,15 @@ async function toolV1(kind,ctx,args) {
       const p=await v1Bridge.request('recall',{query:String(args.q||args.query||''),conversationId,scope,limit:Math.min(12,Math.max(1,Number(args.k)||5))});
       return {content:p.block||'未找到相关记忆。',isError:false};
     }
+    if(kind==='scene-query'){const p=await v1Bridge.request('workspace',{action:args.sceneId?'query':'scenes',scope,sceneId:args.sceneId});return {content:JSON.stringify(p),isError:false};}
     await v1Bridge.sync();
     const references = resolveV1Evidence(ctx,args.evidence);
     if (!references.length) throw Error('还没有可核对的用户原话。请给 evidence 传聊天中的 #消息编号，再试一次；不要编造编号。');
     if(v1Bridge.status().pending)throw Error('用户原话尚未同步到记忆库，稍后重试即可。');
+    if(kind==='scene-write'){
+      let sceneId=args.sceneId;if(!sceneId)sceneId=(await v1Bridge.request('workspace',{action:'ensureScene',scope})).sceneId;
+      const p=await v1Bridge.request('workspace',{action:'entry',operationId:randomUUID(),sceneId,scope,text:String(args.text||''),kind:args.kind||'impression',evidenceIds:references});return {content:JSON.stringify(p),isError:false};
+    }
     if(kind==='thing') {
       if(!String(args.name||'').trim())throw Error('请给出聊天中出现的名称。');
       const p=await v1Bridge.request('discoveries',{operationId:randomUUID(),scope,name:String(args.name),statement:String(args.statement||'').trim(),interpretation:String(args.statement||'').trim()?'definition':'mention',aspect:args.aspect,evidenceIds:references});

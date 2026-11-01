@@ -125,7 +125,11 @@ export function planEventCarry({
     if (hasTarget(meta.id)) continue;
     // 来源身份**只取旧行自己写的** model/dim 与旧代 index 的 encoding。
     // 绝不拿 settings.embedModel 再写一遍 —— 那是上一轮被驳回的自证。
-    const sourceIdentity = {
+    const sourceIdentity = meta.carriedFrom || meta.carryIdentity ? {
+      model: meta.carryIdentity?.model ?? null,
+      dim: meta.carryIdentity?.dim ?? null,
+      encoding: meta.carryIdentity?.encoding ?? null
+    } : {
       model: meta.model ?? null,
       dim: meta.dim ?? meta.embedDim ?? null,
       encoding: sourceEncoding

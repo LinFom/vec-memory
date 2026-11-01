@@ -3,6 +3,8 @@ import path from 'node:path';
 import { randomBytes, createHash, randomUUID } from 'node:crypto';
 import { MemoryError, digest } from '../core/durable-log.mjs';
 import { createSpaceEngine } from './engine.mjs';
+import { createBackup, inspectBackup, restoreBackup, writeBackup } from './backup.mjs';
+const IMPLEMENTATION_VERSION=JSON.parse(fs.readFileSync(new URL('../../package.json',import.meta.url),'utf8')).version;
 
 const id = value => {
   if (typeof value !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$/.test(value)) throw new MemoryError('INVALID_ID', 'Invalid identifier');
@@ -40,8 +42,38 @@ export function createService({ root, engineFactory = createSpaceEngine } = {}) 
   }
   const lock = fs.openSync(lockFile, 'wx', 0o600);
   fs.writeFileSync(lock, JSON.stringify({ pid: process.pid })); fs.closeSync(lock);
+  const intentFile = path.join(root,'import-intent.json');
+  try {
+  if (fs.existsSync(intentFile)) {
+    const intent = read(intentFile), prefix = path.join(root,'spaces') + path.sep;
+    for (const target of [intent.destination,intent.staging,intent.rollback].filter(Boolean)) if (!path.resolve(target).startsWith(prefix)) throw new Error('Invalid import recovery path');
+    if (!fs.existsSync(intent.destination)) fs.renameSync(fs.existsSync(intent.staging)?intent.staging:intent.rollback,intent.destination);
+    const recovered=read(accessFile); recovered.spaces[intent.sid]={owner:intent.owner,readers:[]};saveJson(accessFile,recovered);fs.unlinkSync(intentFile);
+  }
+  } catch (error) {fs.unlinkSync(lockFile);throw error;}
   const engines = new Map(), queues = new Map();
-  let closed = false, closePromise;
+  async function validateRestored(directory, kind) {
+    const spaces = kind==='space' ? [directory] : Object.keys(read(path.join(directory,'access.json')).spaces).map(sid=>path.join(directory,'spaces',id(sid)));
+    for (const space of spaces) { const validator=engineFactory({root:space,maintenance:true}); try {await validator.call('audit',{});} finally {await validator.close();} }
+  }
+  let closed = false, closePromise, maintenance = false, active = 0;
+  async function exclusive(fn) {
+    maintenance = true;
+    const reopen = [...engines.keys()];
+    try {
+      while (active > 1) await new Promise(resolve => setTimeout(resolve, 10));
+      await Promise.allSettled([...queues.values()]);
+      await Promise.all([...engines.values()].map(e => e.call('quiesce', {})));
+      await Promise.all([...engines.values()].map(e => e.close())); engines.clear();
+      return await fn();
+    } finally {
+      await Promise.allSettled([...engines.values()].map(e=>e.close()));engines.clear();
+      maintenance = false;
+      for (const sid of reopen) engine(sid);
+      const access = read(accessFile);
+      for (const sid of Object.keys(access.spaces)) for (const job of Object.values(state(sid).jobs)) if (job.status === 'queued') setImmediate(() => void runJob(sid,job.id));
+    }
+  }
   const engine = spaceId => {
     if (!engines.has(spaceId)) engines.set(spaceId, engineFactory({ root: path.join(root, 'spaces', spaceId) }));
     return engines.get(spaceId);
@@ -72,7 +104,7 @@ export function createService({ root, engineFactory = createSpaceEngine } = {}) 
     throw new MemoryError('FORBIDDEN', 'Space permission denied', 403);
   }
   async function runJob(sid, jobId) {
-    if (closed) return;
+    if (closed || maintenance) return;
     await serial(sid, async () => {
       const current = state(sid), job = current.jobs[jobId];
       if (!job || !['queued', 'running'].includes(job.status)) return;
@@ -92,6 +124,8 @@ export function createService({ root, engineFactory = createSpaceEngine } = {}) 
   }
   return {
     async handle({ method = 'GET', path: requestPath, token, body = {} }) {
+      if (maintenance) return {status:503,body:{ok:false,code:'MAINTENANCE',error:'Backup or import in progress; retry shortly'}};
+      active++;
       try {
         if (closed) throw new MemoryError('UNAVAILABLE', 'Service is closed', 503);
         const access = read(accessFile), who = principal(token, access);
@@ -99,9 +133,43 @@ export function createService({ root, engineFactory = createSpaceEngine } = {}) 
         const parts = url.pathname.split('/').filter(Boolean).map(decodeURIComponent);
         if (parts[0] !== 'api' || parts[1] !== 'v1') throw new MemoryError('NOT_FOUND', 'Unknown route', 404);
         const finish = value => ({ status: 200, body: { ok: true, ...value } });
-        if (parts[2] === 'version' && method === 'GET') return finish({ protocolVersion: 1, implementationVersion: '0.31.0', capabilities: ['spaces', 'messages', 'entities', 'memories', 'recall', 'adoptions', 'jobs', 'sharing', 'subjects', 'discoveries', 'subject-revisions'] });
+        if (parts[2] === 'version' && method === 'GET') return finish({ protocolVersion: 1, implementationVersion: IMPLEMENTATION_VERSION, capabilities: ['spaces', 'messages', 'entities', 'memories', 'recall', 'adoptions', 'jobs', 'sharing', 'subjects', 'discoveries', 'subject-revisions','backups','scenes','account-links','person-revisions'] });
         if (parts[2] === 'admin') {
           if (!who.admin) throw new MemoryError('FORBIDDEN', 'Administrator credential required', 403);
+          if (parts[3] === 'backups') {
+            const dir = path.join(root,'backups'); fs.mkdirSync(dir,{recursive:true});
+            const file = name => path.join(dir,id(name)+'.vmb');
+            if (parts[4] && method === 'GET') return {status:200,binary:fs.readFileSync(file(parts[4])),filename:parts[4]+'.vmb'};
+            if (!parts[4] && method === 'POST') {
+              const backupId = randomUUID();
+              if (body.upload) { inspectBackup(body.upload,body.password); writeBackup(file(backupId),body.upload); }
+              else await exclusive(async () => { if(body.spaceId) permit(access,who,id(body.spaceId)); writeBackup(file(backupId),createBackup(root,body)); });
+              return finish({backupId,download:'/api/v1/admin/backups/'+backupId});
+            }
+            if (parts[4] && parts[5] === 'preview' && method === 'POST') {
+              const archive = inspectBackup(fs.readFileSync(file(parts[4])),body.password);
+              return finish({kind:archive.kind,files:archive.files.length,totalBytes:archive.totalBytes,checksum:archive.checksum,sourceSpaceId:archive.spaceId,automaticTasksSuspendedOnRestore:true});
+            }
+            if (parts[4] && parts[5] === 'restore' && method === 'POST') return finish(await exclusive(async () => {
+              const bytes = fs.readFileSync(file(parts[4])), archive = inspectBackup(bytes,body.password);
+              if (!body.expectedChecksum || body.expectedChecksum !== archive.checksum) throw new MemoryError('BACKUP_CHANGED','Preview and supply its checksum first',409);
+              if (archive.kind === 'service') {const result=restoreBackup(bytes,root+'.restore-'+randomUUID(),body);await validateRestored(result.destination,'service');return {...result,validated:true};}
+              const sid = id(body.spaceId), owner = id(body.owner);
+              if (!access.projects[owner]) throw new MemoryError('INVALID_OWNER','Known owner required');
+              if (access.spaces[sid] && body.replace !== true) throw new MemoryError('ALREADY_EXISTS','Choose a new space or explicitly replace',409);
+              const destination = path.join(root,'spaces',sid), staging = destination+'.import-'+randomUUID();
+              const result = restoreBackup(bytes,staging,body);
+              await validateRestored(staging,'space');
+              const rollback = fs.existsSync(destination) ? destination+'.rollback-'+randomUUID() : null;
+              // Durable intent makes an interrupted pair of renames recoverable on startup.
+              const intentFile=path.join(root,'import-intent.json');
+              saveJson(intentFile,{destination,staging,rollback,sid,owner});
+              if (rollback) fs.renameSync(destination,rollback);
+              fs.renameSync(staging,destination);
+              access.spaces[sid]={owner,readers:[]}; saveJson(accessFile,access); fs.unlinkSync(intentFile);
+              return {...result,destination,spaceId:sid,rollback};
+            }));
+          }
           if (parts[3] === 'projects' && parts.length === 4 && method === 'POST') {
             const projectId = id(body.projectId);
             if (access.projects[projectId]) throw new MemoryError('ALREADY_EXISTS', 'Project already exists', 409);
@@ -142,6 +210,15 @@ export function createService({ root, engineFactory = createSpaceEngine } = {}) 
         }
         if (parts[2] !== 'spaces') throw new MemoryError('NOT_FOUND', 'Unknown route', 404);
         const sid = id(parts[3]), operation = parts[4];
+        if (operation === 'workspace' && method === 'POST') {
+          permit(access,who,sid,!['query','scenes'].includes(body.action));
+          if (['state','scene','link','retract','preview'].includes(body.action) && !who.admin) throw new MemoryError('FORBIDDEN','Administrator credential required',403);
+          return finish(await serial(sid,()=>invoke(sid,'workspace',{...body,admin:who.admin})));
+        }
+        if (operation === 'people' && method === 'POST') {
+          permit(access,who,sid,body.action==='revision');
+          return finish(await serial(sid,()=>invoke(sid,'person',{...body,admin:who.admin})));
+        }
         if (operation === 'readers' && method === 'PUT') {
           const space = permit(access, who, sid, true);
           if (!Array.isArray(body.projectIds) || body.projectIds.some(p => !access.projects[p])) throw new MemoryError('INVALID_ARGUMENT', 'Known projectIds required');
@@ -177,7 +254,7 @@ export function createService({ root, engineFactory = createSpaceEngine } = {}) 
           });
           const finalAccess = read(accessFile), finalWho = principal(token, finalAccess);
           for (const source of sources) permit(finalAccess, finalWho, source);
-          return finish({ items, block: results.map(({source,result}) => result.block ? `[${source}]\n${result.block}` : '').filter(Boolean).join('\n\n'), receiptId, actualMode: Object.fromEntries(results.map(({source,result}) => [source,result.actualMode])), sources });
+          return finish({ items, block: results.map(({source,result}) => result.block ? `[${source}]\n${result.block}` : '').filter(Boolean).join('\n\n'), receiptId, actualMode: Object.fromEntries(results.map(({source,result}) => [source,result.actualMode])), degraded:Object.fromEntries(results.filter(({result})=>result.degraded).map(({source,result})=>[source,result.degraded])), sources });
         }
         if (operation === 'adoptions' && method === 'POST') return finish(await serial(sid, async () => {
           const current = state(sid), receipt = current.receipts[body.receiptId];
@@ -208,7 +285,8 @@ export function createService({ root, engineFactory = createSpaceEngine } = {}) 
         if (operation === 'jobs' && method === 'GET') { const jobs = state(sid).jobs; if (parts[5]) { const job = jobs[parts[5]]; if (!job) throw new MemoryError('NOT_FOUND', 'Job not found', 404); return finish({ job }); } return finish({ jobs: Object.values(jobs) }); }
         throw new MemoryError('NOT_FOUND', 'Unknown route', 404);
       } catch (error) { return { status: error.status || 500, body: { ok: false, code: error.code || 'INTERNAL_ERROR', error: error.status ? error.message : 'Internal service error' } }; }
+      finally { active--; }
     },
-    close() { return closePromise ??= (async () => { closed = true; await Promise.allSettled([...queues.values()]); await Promise.allSettled([...engines.values()].map(e => e.close())); if (fs.existsSync(lockFile)) fs.unlinkSync(lockFile); })(); }
+    close() { return closePromise ??= (async () => { closed = true; while(active>0)await new Promise(resolve=>setTimeout(resolve,10));await Promise.allSettled([...queues.values()]); await Promise.allSettled([...engines.values()].map(e => e.close())); if (fs.existsSync(lockFile)) fs.unlinkSync(lockFile); })(); }
   };
 }

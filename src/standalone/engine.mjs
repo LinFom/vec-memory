@@ -1,6 +1,6 @@
 import { Worker } from 'node:worker_threads';
-export function createSpaceEngine({root,settings={}}) {
-  const worker=new Worker(new URL('./worker.mjs',import.meta.url),{workerData:{root,settings},execArgv:[]});
+export function createSpaceEngine({root,settings={},maintenance=false}) {
+  const worker=new Worker(new URL('./worker.mjs',import.meta.url),{workerData:{root,settings,maintenance},execArgv:[]});
   const pending=new Map();let seq=0,closed=false;
   worker.on('message',m=>{const p=pending.get(m.id);if(!p)return;pending.delete(m.id);m.error?p.reject(Object.assign(new Error(m.error.message),m.error)):p.resolve(m.result);});
   const fail=error=>{closed=true;for(const p of pending.values())p.reject(error);pending.clear();};

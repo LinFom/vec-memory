@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "description": "Synthetic human-authored relevance labels. No model calls; tests keyword behavior and visibility, not LLM extraction quality.",
+  "memories": [
+    {"actorId":"qq:tea","displayName":"蜂蜜柚子茶","scope":{"kind":"group","id":"lobby"},"text":"喜欢绿茶，不加糖"},
+    {"actorId":"qq:yuzu","displayName":"柚子","scope":{"kind":"group","id":"lobby"},"text":"喜欢红茶，加蜂蜜"},
+    {"actorId":"game:builder","displayName":"建造玩家","scope":{"kind":"group","id":"game"},"text":"喜欢建造城堡"},
+    {"actorId":"qq:tea","displayName":"蜂蜜柚子茶","scope":{"kind":"private","id":"dm"},"text":"私人约定是周二看医生"}
+  ],
+  "queries": [
+    {"id":"long-name","query":"绿茶 不加糖","actorIds":["qq:tea"],"scope":{"kind":"group","id":"lobby"},"expected":["喜欢绿茶，不加糖"]},
+    {"id":"short-name","query":"红茶 蜂蜜","actorIds":["qq:yuzu"],"scope":{"kind":"group","id":"lobby"},"expected":["喜欢红茶，加蜂蜜"]},
+    {"id":"game-context","query":"建造城堡","actorIds":["game:builder"],"scope":{"kind":"group","id":"game"},"expected":["喜欢建造城堡"]},
+    {"id":"no-private-in-group","query":"私人约定 看医生","actorIds":["qq:tea"],"scope":{"kind":"group","id":"empty"},"expected":[]},
+    {"id":"unrelated","query":"火星火箭发射","actorIds":["qq:tea","qq:yuzu"],"scope":{"kind":"group","id":"lobby"},"expected":[]},
+    {"id":"long-forgotten","query":"城堡","actorIds":["game:builder"],"scope":{"kind":"group","id":"game"},"expected":["喜欢建造城堡"]}
+  ]
+}
