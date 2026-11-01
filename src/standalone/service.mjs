@@ -244,7 +244,12 @@ export function createService({ root, engineFactory = createSpaceEngine } = {}) 
           // Permissions may have been revoked while an embedding call was in flight.
           const latestAccess = read(accessFile); const latestWho = principal(token, latestAccess);
           for (const source of sources) permit(latestAccess, latestWho, source);
-          const items = results.flatMap(({source, result}) => (result.items || []).map(item => ({ ...item, id: `${source}:${item.id}`, localId: item.id, spaceId: source })));
+          let items = results.flatMap(({source, result}) => (result.items || []).map(item => ({ ...item, id: `${source}:${item.id}`, localId: item.id, spaceId: source })));
+          if(body.purpose==='automatic') {
+            const leads=new Set(items.filter(i=>['semantic','profile'].includes(i.layer))
+              .sort((a,b)=>(Number(b.score)||0)-(Number(a.score)||0)).slice(0,2).map(i=>i.id));
+            items=items.filter(i=>!['semantic','profile'].includes(i.layer)||leads.has(i.id));
+          }
           const receiptId = randomUUID();
           await serial(sid, async () => {
             const current = state(sid);
@@ -254,7 +259,8 @@ export function createService({ root, engineFactory = createSpaceEngine } = {}) 
           });
           const finalAccess = read(accessFile), finalWho = principal(token, finalAccess);
           for (const source of sources) permit(finalAccess, finalWho, source);
-          return finish({ items, block: results.map(({source,result}) => result.block ? `[${source}]\n${result.block}` : '').filter(Boolean).join('\n\n'), receiptId, actualMode: Object.fromEntries(results.map(({source,result}) => [source,result.actualMode])), degraded:Object.fromEntries(results.filter(({result})=>result.degraded).map(({source,result})=>[source,result.degraded])), sources });
+          const block=body.purpose==='automatic'?(items.length?'<!--mv-inject-->\n'+items.map(i=>`[${i.spaceId}]【${i.layer}】${i.text}`).join('\n'):''):results.map(({source,result}) => result.block ? `[${source}]\n${result.block}` : '').filter(Boolean).join('\n\n');
+          return finish({ items, block, receiptId, actualMode: Object.fromEntries(results.map(({source,result}) => [source,result.actualMode])), degraded:Object.fromEntries(results.filter(({result})=>result.degraded).map(({source,result})=>[source,result.degraded])), sources });
         }
         if (operation === 'adoptions' && method === 'POST') return finish(await serial(sid, async () => {
           const current = state(sid), receipt = current.receipts[body.receiptId];

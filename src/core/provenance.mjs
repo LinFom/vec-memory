@@ -5,6 +5,8 @@ export function normalizeReferences(input = []) {
     if (!r || !['message','window','manual'].includes(r.type)) throw new MemoryError('INVALID_PROVENANCE', 'Invalid reference type');
     const out = { type: r.type, id: requireText(r.id,'reference.id',300), chatKey: r.chatKey == null ? null : requireText(r.chatKey,'chatKey',200),
       fromTs: r.fromTs ?? null, toTs: r.toTs ?? null, title: r.title == null ? null : requireText(r.title,'title',300), matchMethod: r.matchMethod || 'persisted-reference' };
+    for (const key of ['reporterId','aboutActorId']) if(r[key]!=null)out[key]=requireText(r[key],key,200);
+    if(r.attribution!=null){if(!['self-report','third-party','window-context'].includes(r.attribution))throw new MemoryError('INVALID_PROVENANCE','Invalid attribution');out.attribution=r.attribution;}
     for (const k of ['fromTs','toTs']) if (out[k] !== null && (!Number.isFinite(out[k]) || out[k] < 0)) throw new MemoryError('INVALID_PROVENANCE', 'Invalid reference time');
     if (out.fromTs !== null && out.toTs !== null && out.fromTs > out.toTs) throw new MemoryError('INVALID_PROVENANCE', 'Invalid reference interval');
     return out;

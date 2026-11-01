@@ -1,6 +1,6 @@
 import { createProtocolBridge, scopeOf } from './protocol-v1.mjs';
 import { randomUUID } from 'node:crypto';
-// memory-vec — QQ-Agent 适配层入口（**新树 `refactor/` 版** · 0.32.0）
+// memory-vec — QQ-Agent 适配层入口（**新树 `refactor/` 版** · 0.32.1）
 //
 // ── 这一层是什么 ───────────────────────────────────────────────────────────
 // 一个**薄适配层**：不含任何向量库代码，只持有一个地址（设置里的 `serviceBaseURL`，
@@ -230,7 +230,7 @@ export function setup(api) {
   api.registerTool({
     id: 'remember',                       // 注册后模型看到的是 memory-vec__remember
     name: '记事实',
-    description: '对方明确说了自己的喜好、职业、忌口、约定，或纠正了旧信息时，顺手记一条。一次明确表达就可以记，不必等它反复出现。例：他说喝茶不加糖，就记「喝茶不加糖」。'+(protocolV1()?'新梗、术语、作品的解释用 remember_thing。':''),
+    description: '用户明确说了自己或另一个人的喜好、职业、忌口、约定，或纠正旧信息时，顺手记一条。一次明确表达即可。A介绍B时，userId填被描述的人B，evidence引用说话人A的原话；不必等B发言。提问、猜测不当成事实。'+(protocolV1()?'新梗、术语、作品的解释用 remember_thing。':''),
     category: 'memory',
     icon: '🧠',
     parameters: {
@@ -238,7 +238,7 @@ export function setup(api) {
       properties: {
         userId: {
           type: ['integer', 'string'],
-          description: '**必填**：这条印象关于谁 —— 对方 QQ 号（聊天行「名字(QQ数字)」里的数字）。别只传昵称'
+          description: '**必填**：被描述的人 QQ 号，不是固定填当前说话人。A讲B的职业时填B，不填A。使用结构化@或已核对的人物ID；只有昵称且身份不确定时先询问，不猜号码'
         },
         text: {
           type: 'string',
@@ -417,7 +417,7 @@ export function setup(api) {
   api.registerTool({
     id: 'search',
     name: '搜旧事',
-    description: '想查以前聊过的人、事情、梗或概念时直接搜索。用自然话描述，例如「上次说的冰箱战术是什么意思」。不必等用户明确说「你还记得吗」。返回相关片段及来源；没有找到就说明未找到。独立协议模式只搜索当前场合，不能用 chatKey 越权跨场合。',
+    description: '谈到某个人B、评价他、需要他的职业/喜好/过去约定，或上下文只有一两条零碎印象时，先主动查记忆再回答，不要等用户说“你还记得吗”。B没有发言、在私聊中谈群成员时也应查。q写人物名和要查的事，已知QQ号可传userId。自动注入只是关键词线索，不是完整档案；搜不到就说明，不编。跨渠道只返回服务允许共享的档案，原话仍受场合限制。',
     category: 'memory',
     icon: '🔎',
     parameters: {
@@ -429,6 +429,7 @@ export function setup(api) {
             + '带上人/时间/事件更好，如「上周谁提过搬家」'
         },
         k: { type: 'number', description: '返回几条，可选，默认 5（1~12）' },
+        userId: {type:'string',description:'可选，被查询人物的已核对QQ号；不是固定填当前说话人。不确定时用姓名加具体话题查询，不猜ID'},
         chatKey: {
           type: 'string',
           description: '旧协议可选会话筛选；独立协议只支持当前场合，省略即可'
@@ -445,6 +446,10 @@ export function setup(api) {
 
         const base = baseURLOf(mvCfg());
         const k = Math.min(12, Math.max(1, Number(args?.k) || 5));
+        const personResponse=await fetch(`${base}/api/vec/inject`,{method:'POST',headers:{'Content-Type':'application/json'},signal:AbortSignal.timeout(SEARCH_TIMEOUT_MS),body:JSON.stringify({chatKey:String(ctx.chatKey||''),topic:q,people:args?.userId?[{id:String(args.userId),name:String(args.userId)}]:[],purpose:'query',rehearsal:'deferred',total:k,profileTotal:k})});
+        const personPayload=await personResponse.json();
+        if(!personResponse.ok||personPayload.ok!==true)throw Error(personPayload.error||'人物记忆查询失败');
+        if(personPayload.lines?.length||personPayload.profileLines?.length)return {content:personPayload.block,isError:false};
         const payloadReq = { q, k };
         if (args?.chatKey) payloadReq.chatKey = String(args.chatKey);
 
@@ -860,7 +865,7 @@ const PENDING_TTL_MS = 60000;
 /** 从 messages 的 user 侧解析参与者与话题文本（只读，不改 messages）。 */
 function extractPeopleAndTopic(messages) {
   const users = (Array.isArray(messages) ? messages : []).filter((m) => m?.role === 'user');
-  const text = users.map((m) => String(m.content ?? '')).join('\n');
+  const text = users.map((m) => contentToText(m.content).split('<!--mv-guide-->')[0]).join('\n');
   const people = [];
   const seen = new Set();
   for (const m of text.matchAll(PERSON_RE)) {
@@ -1003,8 +1008,9 @@ const REMEMBER_GUIDE_TEXT = '【记人】（系统维护消息：不需要回复
   + '你有一个记忆工具 memory-vec__remember：把对方明确说过的喜好、信息或约定记进记忆库，一次明确表达就可以记，'
   + '以后相关话题里自动参考（不主动提及）。'
   + '该记：对方自述的固定信息、喜好口味、雷点禁忌、风格性格、身份关系、长期约定、反复玩的梗。\n'
+  + 'A明确介绍B时也可记B：userId填B的已核对ID，evidence引用A原话；B没发言也能建档。不要把被描述的人和说话人混为一人，提问或猜测不写成肯定事实。\n'
   + '节律：聊出印象就顺手记一条，不要每条都记；先记后答，记完继续正常回复。'
-  + '想查旧事或不懂以前的梗时，直接用 memory-vec__search。若工具列表有 memory-vec__remember_thing，遇到新梗、概念或项目的解释就记名称和原意，后续补充仍用同一名称。若有 remember_scene，遇到场景定位、规矩和约定可直接提交；query_scene 可在私聊查询允许分享的场景档案。';
+  + '谈到第三人、需要评价或介绍B，或只有一两条零碎关键词印象时，回答前主动用 memory-vec__search 查“人物名＋具体话题”，不必等用户要求回忆；B不在当前聊天也可查，不要把自动线索当完整档案。若工具列表有 memory-vec__remember_thing，遇到新梗、概念或项目的解释就记名称和原意，后续补充仍用同一名称。若有 remember_scene，遇到场景定位、规矩和约定可直接提交；query_scene 可在私聊查询允许分享的场景档案。';
 
 /**
  * 追加「记人」节到最后一条 user（没有则退 system）。同轮多 round 只加一次
@@ -1245,6 +1251,7 @@ async function injectMemories(ctx = {}) {
         body: JSON.stringify({
           chatKey: String(ctx.chatKey || ''),
           rehearsal: 'deferred',
+          purpose: 'automatic',
           topic: topic.slice(-TOPIC_CHARS),
           people,
           ...injectOverrides(cfg) // 面板的条数 / 阈值 / 模式（见 injectOverrides 注释）
@@ -1301,7 +1308,7 @@ async function injectV1(ctx) {
   if(ctx.messages.some(m=>contentToText(m.content).includes('<!--mv-v1-->')))return;
   const bridge=v1Bridge;
   try {
-    const p=await bridge.request('recall',{query:extractPeopleAndTopic(ctx.messages).topic,conversationId:ctx.chatKey,scope:scopeOf(ctx.chatKey)});
+    const p=await bridge.request('recall',{query:extractPeopleAndTopic(ctx.messages).topic,conversationId:ctx.chatKey,scope:scopeOf(ctx.chatKey),purpose:'automatic'});
     if(bridge!==v1Bridge || !protocolV1())return;
     if(!p.block)return;
     appendToLastSystem(ctx.messages,`<!--mv-v1-->\n${p.block}`);
@@ -1329,7 +1336,7 @@ async function toolV1(kind,ctx,args) {
     const conversationId=String(ctx.chatKey||'');const scope=scopeOf(conversationId);
     if(kind==='search') {
       if(args.chatKey && args.chatKey!==conversationId)throw Error('独立协议只搜索当前场合，请在目标会话中查询。');
-      const p=await v1Bridge.request('recall',{query:String(args.q||args.query||''),conversationId,scope,limit:Math.min(12,Math.max(1,Number(args.k)||5))});
+      const p=await v1Bridge.request('recall',{query:String(args.q||args.query||''),conversationId,scope,purpose:'query',...(args.userId?{actorIds:[String(args.userId)]}:{}),limit:Math.min(12,Math.max(1,Number(args.k)||5))});
       return {content:p.block||'未找到相关记忆。',isError:false};
     }
     if(kind==='scene-query'){const p=await v1Bridge.request('workspace',{action:args.sceneId?'query':'scenes',scope,sceneId:args.sceneId});return {content:JSON.stringify(p),isError:false};}

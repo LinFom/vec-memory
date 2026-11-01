@@ -5,6 +5,14 @@
 业务前缀 `/api/v1`；所有业务与管理请求均要求 Bearer 凭据。接入者无需提供 QQ-Agent 目录、配置或存档格式。
 
 旧 `/api/vec` 路由仅作为内部兼容实现保留，不是新项目的接入接口。
+
+## 0.32.1：自动线索与主动查询
+
+`recall` 可传 `purpose:"automatic"` 或 `purpose:"query"`。自动模式在整个响应（包括显式共享空间）中合计最多返回两条关键词命中的人物印象或档案字段，空查询或无匹配不填充人物档案；每条带 `matchMethod:"keyword"`。其他记忆层沿用原规则。主动查询保留完整检索路径，省略 purpose 保持兼容行为。
+
+查询文本可按已登记、无歧义的姓名或别名定位未发言的人；也可明确传 `actorIds`。不得靠昵称片段合并身份。新空间跨渠道人物档案默认不开放，仅管理员显式配置 `profileCrossScope` 后按既有可见性规则读取，其他渠道的原始来源引用不会随档案返回；空间授权仍需同时满足。
+
+人物证据引用可新增 `reporterId/aboutActorId/attribution`：分别表示表达者、被描述者，以及 `self-report/third-party/window-context`。A介绍B时可以为B建档，保留A的来源；提问或猜测不能据此写成肯定事实。
 # 0.32 扩展：场景、人物纠正与备份
 
 `POST /api/v1/spaces/{spaceId}/workspace` 使用 `action` 选择业务操作：`scenes/query` 读取可见场景，`ensureScene` 登记当前场合，`entry` 新增观察或候选，`support` 以目标场景明确原话支持候选。管理员还可使用 `state/scene/link/preview/retract`，以及带 `entryId/expectedRev/previewToken` 的 `entry` 修订。禁止依赖调用方传入的 `admin`，服务始终由凭据决定管理权限。

@@ -1,3 +1,5 @@
+import {mentionedPeople} from './core/person-targets.mjs';
+import {keywordImpressions} from './core/keyword-impressions.mjs';
 import { memoryCoreOf, profileSummary, policyImpact, subjectSection } from './core/memory-core.mjs';
 import { evaluateVisibility, resolveProfilePolicy, scopeType } from './core/visibility.mjs';
 import { MemoryError, requireText } from './core/durable-log.mjs';
@@ -1828,7 +1830,8 @@ export async function handleMemoryVec(req, res, pathname, helpers) {
       const store = memoryCoreOf(rt, factStoreOf(rt)).manual.readStore();
       if (store.readOnlyReason) { json(res, 200, { ok: true, injected: false, reason: `store read-only: ${store.readOnlyReason}`, lines: [], block: '' }); return true; }
 
-      const people = Array.isArray(body.people) ? body.people : [];
+      const mentioned=mentionedPeople(String(body.topic||''),[...rt.normalizer.entities.values()]);
+      const people=[...new Map([...mentioned.ids.map(id=>({id,name:[...(rt.normalizer.entities.get(id)?.surface||[])][0]||id})),...(Array.isArray(body.people)?body.people:[])].map(p=>[String(p.id),p])).values()];
       const perPerson = Math.max(1, Math.min(6, Number(body.perPerson) || Number(s.injectPerPerson) || 2));
       const total = Math.max(1, Math.min(24, Number(body.total) || Number(s.injectTotal) || 8));
       // 阈值收敛收进纯函数（`resolveMinScore`，两条坑的说明见 `core/inject.mjs`）。
@@ -1883,7 +1886,7 @@ export async function handleMemoryVec(req, res, pathname, helpers) {
       // 没进入下面那段的两条路，各自留一个**能区分**的结论（而不是笼统的"不可用"）。
       if (!candidates.length) simNote = 'no-candidates';
       else if (!topic) simNote = 'no-topic';
-      if (candidates.length && topic) {
+      if (candidates.length && topic && body.purpose !== 'automatic') {
         // 归一化只做一次、两条路共用（与 `/search` 同一条纪律：查询侧必须与文档侧对称）。
         let topicNorm = topic;
         try {
@@ -1973,6 +1976,13 @@ export async function handleMemoryVec(req, res, pathname, helpers) {
         total: profileTotal
       });
 
+      if(body.purpose==='automatic') {
+        const leads=keywordImpressions({candidates,profiles:profileCandidates,query:String(body.topic||'')})
+          .map(({who,line,credibility,scopeRank,section,keywordScore})=>({who,line,credibility,scopeRank,section,score:keywordScore,matchMethod:'keyword'}));
+        lines.splice(0,lines.length,...leads.filter(c=>c.section==='semantic'));
+        profileLines.splice(0,profileLines.length,...leads.filter(c=>c.section==='profile'));
+        simMetric='token-overlap';simNote='keyword-automatic';
+      }
       const profileExplanation = profileSummary({winners:store.slots.values(),people,normalizer:rt.normalizer,lineage,nowScope,policy:profilePolicy,profileTotal});
       const subjectData = subjectSection(memoryCoreOf(rt,factStoreOf(rt)).subjects,nowScope,String(body.topic || ''),Math.min(4,Math.max(0,total-lines.length)));
       // ── 跨会话近况（`ADR-0043`）──────────────────────────────────────────────

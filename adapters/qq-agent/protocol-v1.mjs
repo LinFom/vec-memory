@@ -69,6 +69,13 @@ export function createProtocolBridge({config,dataDir,fetcher=(...args)=>fetch(..
           for(let n=0;n<entries.length;n+=500) {
             if(stopped)return;
             const batch=entries.slice(n,n+500);let highest=Number(state.cursors[chat]||0);
+            // Host sender metadata is authoritative for names; text is not an identity registry.
+            for(const e of batch) {
+              const id=String(e.senderId??e.sender?.id??''),name=String(e.senderName??e.sender?.name??'').trim();
+              if(!/^\d{5,15}$/.test(id)||!name||state.entityNames?.[id]===name)continue;
+              await request('entities/'+encodeURIComponent(id),{displayName:name},'PUT');
+              (state.entityNames||={})[id]=name;save();
+            }
             for(const e of batch)highest=Math.max(highest,Number(e.id));
             enqueue(batch.map(e=>messageOf(e,chat)),{chat,id:highest});
             await flush();

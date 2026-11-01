@@ -969,6 +969,13 @@
                   },
                   "limit": {
                     "type": "integer"
+                  },
+                  "purpose": {
+                    "enum": [
+                      "automatic",
+                      "query"
+                    ],
+                    "description": "automatic returns at most two keyword-matched person impression/profile fields across all selected spaces; other layers keep their limits. query performs deliberate retrieval. Omission keeps compatible behavior. Does not grant access."
                   }
                 },
                 "required": [

@@ -1,4 +1,9 @@
 import {test} from 'node:test';
+test('sync registers host-provided sender names and never promotes names guessed from text',async()=>{
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'qq-entity-sync-')),calls=[];
+ const bridge=createProtocolBridge({dataDir:dir,config:()=>({serviceBaseURL:'http://localhost',spaceId:'s',serviceToken:'test'}),store:{listChats:()=>['group:42'],recent:()=>[{id:1,ts:Date.now(),senderId:'11111',senderName:'甲同学',text:'[CQ:at,qq=22222] 乙同学做园艺',self:false}]},fetcher:async(url,o)=>{const body=JSON.parse(o.body);calls.push({url,method:o.method,body});return {ok:true,json:async()=>({ok:true,results:(body.messages||[]).map(m=>({messageId:m.messageId,status:'accepted'}))})};}});
+ try{await bridge.sync();assert.equal(calls.find(c=>c.url.endsWith('/entities/11111')).body.displayName,'甲同学');assert(!calls.some(c=>c.url.endsWith('/entities/22222')));assert.deepEqual(calls.find(c=>c.url.endsWith('/messages')).body.messages[0].mentions,['22222']);}finally{bridge.stop();fs.rmSync(dir,{recursive:true,force:true});}
+});
 import assert from 'node:assert/strict';
 import fs from 'node:fs';import os from 'node:os';import path from 'node:path';
 import {createProtocolBridge,messageOf} from './protocol-v1.mjs';

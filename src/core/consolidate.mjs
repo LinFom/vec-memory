@@ -2,6 +2,7 @@ import { isCanonicalSource, canonicalEvidence } from './input-source.mjs';
 import { openSubjectStore } from './subjects.mjs';
 import { DISCOVERY_PROMPT, prepareDiscoveries, applyDiscoveries } from './thing-discovery.mjs';
 import { windowReferences } from './provenance.mjs';
+import {mentionedPeople} from './person-targets.mjs';
 import { encodingIdentity } from './vector-generation.mjs';
 // 事件整理（M5）—— 把「上次整理结束 → 现在」这段对话整理成**两样东西**：
 //   ① 事件记忆：这期间发生了哪些事（append-only 落 `consolidate/events.jsonl`）
@@ -1256,6 +1257,12 @@ export function resolveSpeaker(normalizer, qq) {
   return null;
 }
 
+function windowPeople(win, normalizer) {
+  const named=mentionedPeople(win.rows.map(r=>r.text||'').join('\n'),[...(normalizer.entities?.values()||[])]);
+  return [...new Set([...win.rows.flatMap(r=>[r.speakerId,...(r.mentions||[])]),...named.ids]
+    .filter(Boolean).map(id=>normalizer.resolveKnown?.(id)?.id||normalizer.resolveKnown?.(`qq:${id}`)?.id||String(id)))];
+}
+
 // ⚠️ 2026-10-22：本地曾有一份 `normalizeTraitKey`（`trim().toLowerCase()`），注释写着
 // "与 router 的 remember 同口径" —— **它不是**。router/inject 那份还做全角冒号折算与
 // 别名归并（"工作"→职业），本地这份没有 ⇒ 整理写"工作"、直写写"职业"，两条并存。
@@ -1496,7 +1503,16 @@ async function runConsolidateOnce(deps = {}, opts = {}) {
       if (isCanonicalSource(sourceRoot)) {
         prompt.system = prompt.system.replaceAll('QQ 号','主体 ID').replaceAll('号码','主体 ID').replaceAll('qq 必须','actorId 必须').replaceAll('\"qq\"','\"actorId\"');
         prompt.system += '\n主体标识可以是任意字符串。people 使用 actorId，必须逐字复制下方允许的 actorId；不得猜测新身份。';
-        prompt.user += '\n允许 actorId：'+JSON.stringify([...new Set(win.rows.map(r=>r.speakerId))]);
+        const targets=windowPeople(win,normalizer);
+        prompt.system += '\n说话人不等于被描述的人。A明确谈到B的职业、喜好或约定时，people.actorId 应填B；不要求B本人发过言。只提问、猜测、玩笑或否认不产生肯定档案；保留转述来源，不把A的表述当成B自述。';
+        prompt.user += '\n允许 actorId：'+JSON.stringify(targets)+
+          '\n人物标识对应：'+JSON.stringify(targets.map(id=>({actorId:id,names:[...(normalizer.entities?.get(id)?.surface||[])]})))+
+          '\n结构化提及：'+JSON.stringify(win.rows.filter(r=>r.mentions?.length).map(r=>({evidenceId:r.id,reporterId:r.speakerId,actorIds:r.mentions})));
+      }
+      if (!isCanonicalSource(sourceRoot)) {
+        const targets=windowPeople(win,normalizer);
+        prompt.system += '\n说话人不等于被描述的人：A明确谈到B的职业、喜好或约定时，people.qq填B，可从下方已核对的人物对应表取号；B不必发过言。只提问、猜测或玩笑不产生肯定档案，不把A的转述当B自述。';
+        prompt.user += '\n本窗口已核对的人物：'+JSON.stringify(targets.map(id=>({qq:id.replace(/^qq:/,''),names:[...(normalizer.entities?.get(id)?.surface||[])]})));
       }
       if (settings.subjectMemoryEnabled === true && !resume) {
         const subjectStore = openSubjectStore(libDir);
@@ -1567,7 +1583,8 @@ async function runConsolidateOnce(deps = {}, opts = {}) {
         pending[win.chatKey] = { win: { ...win, rows: win.rows.map(r => ({ id: r.id })) }, parsed, observationRequests, discoveryRequests, now };
         savePending(libDir, pending);
       }
-      applied = await applyWindow({ win, parsed, normalizer, factStore, store, settings, libDir, now: resume?.now || now, say });
+      applied = await applyWindow({ win, parsed, normalizer, factStore, store, settings, libDir, now: resume?.now || now, say,
+        allowedPeople:isCanonicalSource(sourceRoot)?new Set(windowPeople(win,normalizer).map(id=>resolveSpeaker(normalizer,id)?.label)):null });
       if (applied.errors.length) throw new Error(applied.errors.join('; '));
       const observationRequests = pending[win.chatKey]?.observationRequests || [];
       if (parsed.observations?.length && !observationRequests.length) throw new Error('Pending observations have no prepared requests');
@@ -1669,7 +1686,7 @@ export function clearWindowFailure({ state, chatKey, fromTs }) {
  *
  * 两条**独立的**写路径，失败互不牵连：事件落不下不该连累印象，反之亦然。
  */
-async function applyWindow({ win, parsed, normalizer, factStore, store, settings, libDir, now, say }) {
+async function applyWindow({ win, parsed, normalizer, factStore, store, settings, libDir, now, say, allowedPeople = null }) {
   const out = { events: 0, slots: 0, skippedPeople: 0, eventId: '', titles: [], errors: [] };
 
   // ── ① 事件 ──
@@ -1776,6 +1793,11 @@ async function applyWindow({ win, parsed, normalizer, factStore, store, settings
   for (const p of parsed.people) {
     const who = resolveSpeaker(normalizer, p.qq);
     if (!who) { out.skippedPeople++; continue; }     // 词表里没有 ⇒ 不猜
+    if (allowedPeople && !allowedPeople.has(who.label)) { out.skippedPeople++; continue; }
+    const reporters=[...new Set(win.rows.map(r=>r.speakerId).filter(Boolean))];
+    const refs=windowReferences(win,windowId).map(r=>allowedPeople?{...r,aboutActorId:p.qq,
+      ...(reporters.length===1?{reporterId:reporters[0]}:{}),
+      attribution:reporters.every(id=>resolveSpeaker(normalizer,id)?.label!==who.label)?'third-party':reporters.length===1?'self-report':'window-context'}:r);
     let text = p.text;
     try { text = String(normalizer.normalize(text, { context: `slot:${who.label}`, register: false })?.text || text).trim(); } catch { /* 用原文 */ }
     if (!text) { out.skippedPeople++; continue; }
@@ -1808,8 +1830,8 @@ async function applyWindow({ win, parsed, normalizer, factStore, store, settings
         // 聚合的 evidence-max 会挑"证据更多"的旧版本 ⇒ 新写的方面被静默丢掉。
         // 其余 kind 保持真实消息 id —— 它们是"整句替换"，证据多的确实更可信，信号要留住。
         evidenceIds: itemKey ? [`window:${windowId}`] : evidenceIds,
-        provenance: windowReferences(win,windowId),
-        itemProvenance: itemKey ? {...(previous?.itemProvenance || {}),[itemKey]:windowReferences(win,windowId)} : {},
+        provenance: refs,
+        itemProvenance: itemKey ? {...(previous?.itemProvenance || {}),[itemKey]:refs} : {},
         at: new Date(now).toISOString()
       });
       if (r && r.action === 'update') out.slots++;

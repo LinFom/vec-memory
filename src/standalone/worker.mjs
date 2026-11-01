@@ -17,6 +17,9 @@ import {FACT_KINDS} from '../core/facts.mjs';
 import {prepareDiscoveries,applyDiscoveries} from '../core/thing-discovery.mjs';
 import {openSubjectStore} from '../core/subjects.mjs';
 import {SceneMemory} from '../core/scene-memory.mjs';
+import {mentionedPeople} from '../core/person-targets.mjs';
+import {keywordImpressions} from '../core/keyword-impressions.mjs';
+import {resolveProfilePolicy} from '../core/visibility.mjs';
 const root=path.resolve(workerData.root),input=path.join(root,'input'),legacy=path.join(root,'legacy','data');
 fs.mkdirSync(input,{recursive:true});fs.mkdirSync(legacy,{recursive:true});
 if(!fs.existsSync(path.join(input,'source.json'))) fs.writeFileSync(path.join(input,'source.json'),JSON.stringify({version:1,kind:'canonical'}));
@@ -71,7 +74,7 @@ async function remember(p){
  const aliasesFile=path.join(input,'evidence-aliases.json');if(fs.existsSync(aliasesFile)){for(const [alias,target]of Object.entries(JSON.parse(fs.readFileSync(aliasesFile,'utf8')))){if(messages.has(target)&&!messages.has(alias))messages.set(alias,messages.get(target));}}
  if(!['manual','assistant','evidence'].includes(source))throw new MemoryError('INVALID_SOURCE','source must be manual, assistant or evidence');
  if(source!=='manual'&&!ids.length)throw new MemoryError('EVIDENCE_REQUIRED','Non-manual memories require accepted source messages');
- const refs=ids.map(id=>{const m=messages.get(id);if(!m||canonicalChatKey(m.scope)!==chatKey||source!=='manual'&&m.role!=='user')throw new MemoryError('INVALID_EVIDENCE','Evidence must be an accepted user message in the requested scope');return {type:'message',id,chatKey,fromTs:m.timestamp,toTs:m.timestamp};});
+ const refs=ids.map(id=>{const m=messages.get(id);if(!m||canonicalChatKey(m.scope)!==chatKey||source!=='manual'&&m.role!=='user')throw new MemoryError('INVALID_EVIDENCE','Evidence must be an accepted user message in the requested scope');return {type:'message',id,chatKey,fromTs:m.timestamp,toTs:m.timestamp,reporterId:m.actorId,aboutActorId:actorId,attribution:rt.normalizer.resolveKnown(m.actorId)?.label===hit.label?'self-report':'third-party'};});
  if(source==='manual')refs.push({type:'manual',id:operationId,chatKey});
  const scope=rt.normalizer.scopeLabel(chatKey),store=factStoreOf(rt),previous=store.getSlot({speaker:hit.label,target:'',fact_kind:kind,scope}),normalized=rt.normalizer.normalize(text,{register:false}).text;
  const itemKey=itemKeyOf(kind,{attr:p.attr||p.itemKey,aspect:p.aspect||p.itemKey});if(kind==='trait'&&!itemKey)throw new MemoryError('INVALID_ARGUMENT','trait requires attr or itemKey');
@@ -122,26 +125,42 @@ async function recall(p){
  const chatKey=canonicalChatKey(p.scope),rt=await getRuntime();await ensureIdentity(rt);
  const query=typeof p.query==='string'?p.query.trim():'',scope=rt.normalizer.scopeLabel(chatKey),facts=memoryCoreOf(rt,factStoreOf(rt)).manual.readStore();if(facts.readOnlyReason)throw new MemoryError('STORAGE_UNAVAILABLE',facts.readOnlyReason,503);
  const lineage=readLineage(rt.dir);if(!lineage.ok)throw new MemoryError('STORAGE_UNAVAILABLE',lineage.error,503);
- const actorIds=[...new Set((Array.isArray(p.actorIds)?p.actorIds:[...new Set(canonicalMessages(input).filter(m=>canonicalChatKey(m.scope)===chatKey).map(m=>m.actorId))]).flatMap(id=>workspace.accounts(id)))];
+ const messages=canonicalMessages(input).filter(m=>canonicalChatKey(m.scope)===chatKey),entities=canonicalEntities(input);
+ const named=mentionedPeople(query,[...rt.normalizer.entities.values(),...entities]);
+ const latest=messages.filter(m=>m.role==='user'&&(!p.conversationId||m.conversationId===p.conversationId)).sort((a,b)=>b.timestamp-a.timestamp)[0];
+ const actorIds=[...new Set((Array.isArray(p.actorIds)?p.actorIds:[...named.ids,...(latest?.mentions||[]),...messages.map(m=>m.actorId).reverse()]).flatMap(id=>workspace.accounts(id)))];
  const people=actorIds.map(id=>({id,name:canonicalEntities(input).find(e=>e.id===id||e.aliases?.includes(id))?.displayName||id}));
- // All v1 layers use the same explicit scope, including SELF and manual overrides.
+ // Raw evidence and impressions stay scoped; profiles can use explicit administrator sharing below.
  const winners=[...facts.slots.values()].filter(r=>r.scope===scope);
  const candidates=buildInjectCandidates({winners,people,normalizer:rt.normalizer,lineage:lineage.entries,nowScope:scope}),items=[];
  let sims=null,metric='none',degraded=null;
- if(query&&candidates.length){const q=rt.normalizer.normalize(query,{context:'query',register:false}).text;const ep={...endpointOf(rt.settings),signal:AbortSignal.timeout(1800),retries:0};
+ if(p.purpose!=='automatic'&&query&&candidates.length){const q=rt.normalizer.normalize(query,{context:'query',register:false}).text;const ep={...endpointOf(rt.settings),signal:AbortSignal.timeout(1800),retries:0};
   if(checkEndpoint(ep).ok)try{const qv=(await embedQueries([q],{...ep,normalizer:rt.normalizer})).vectors[0],dv=(await embedDocuments(candidates.map(c=>c.line),{...ep,normalizer:rt.normalizer})).vectors;sims=dv.map(v=>cosine(qv,v));metric='vector';}catch(e){degraded={code:'EMBED_FAILED',reason:e.message};}
   else degraded={code:'EMBED_UNCONFIGURED',reason:'Embedding endpoint or model is missing'};
   if(!sims){sims=tokenOverlapSims(candidates.map(c=>c.line),q);metric='keyword';}
  }
  const selected=selectInjectLines({candidates,sims,minScore:metric==='keyword'?DEFAULT_TOKEN_MIN_SCORE:rt.settings.injectThreshold,mode:query?'hard':'boost',perPerson:2,total:8});
- for(const l of selected.lines){const c=candidates.find(c=>c.line===l.line&&c.who===l.who);items.push({id:`fact:${digest(c.rec.key)}`,text:`${l.who}：${l.line}`,layer:'semantic',sourceRefs:c.rec.provenance||[],score:l.score});}
- const profiles=buildProfileCandidates({winners,people,normalizer:rt.normalizer,lineage:lineage.entries,nowScope:scope,profilePolicy:'same-scope',allowCrossScope:false});
- for(const l of selectInjectLines({candidates:profiles,perPerson:1,total:8}).lines){const c=profiles.find(c=>c.line===l.line&&c.who===l.who);items.push({id:`profile:${digest(c.sourceSlots)}`,text:`${l.who}：${l.line}`,layer:'profile',sourceRefs:c.rec.sourceRecords.flatMap(r=>r.provenance||[])});}
+ for(const l of selected.lines){const c=candidates.find(c=>c.line===l.line&&c.who===l.who),refs=c.rec.provenance||[];items.push({id:`fact:${digest(c.rec.key)}`,text:`${refs.some(r=>r.attribution==='third-party')?'【含他人转述】':''}${l.who}：${l.line}`,layer:'semantic',sourceRefs:refs,score:l.score});}
+ const persistedSettings=fs.existsSync(path.join(root,'settings.json'))?JSON.parse(fs.readFileSync(path.join(root,'settings.json'))):{};
+ const profilePolicy=['automatic','query'].includes(p.purpose)&&(named.ids.length||p.actorIds?.length)?resolveProfilePolicy({settings:persistedSettings,existing:false}):{id:'same-scope'};
+ // New spaces stay strict unless an administrator has explicitly configured profile sharing.
+ if(!Object.hasOwn(persistedSettings,'profilePolicy')&&!Object.hasOwn(persistedSettings,'profileCrossScope'))profilePolicy.id='same-scope';
+ const profiles=buildProfileCandidates({winners:profilePolicy.id!=='same-scope'?[...facts.slots.values()]:winners,people,normalizer:rt.normalizer,lineage:lineage.entries,nowScope:scope,profilePolicy:profilePolicy.id,allowCrossScope:profilePolicy.id!=='same-scope'});
+ for(const l of selectInjectLines({candidates:profiles,perPerson:1,total:8}).lines){const c=profiles.find(c=>c.line===l.line&&c.who===l.who),refs=c.rec.sourceRecords.flatMap(r=>r.provenance||[]);items.push({id:`profile:${digest(c.sourceSlots)}`,text:`${refs.some(r=>r.attribution==='third-party')?'【含他人转述】':''}${l.who}：${l.line}`,layer:'profile',sourceRefs:refs});}
+ if(p.purpose==='automatic') {
+   items.length=0;
+   for(const c of keywordImpressions({candidates,profiles,query})){
+     const refs=c.section==='profile'?c.rec.sourceRecords.flatMap(r=>r.itemProvenance?.[c.itemKey]||r.provenance||[]):c.rec.provenance||[];
+     items.push({id:`${c.section==='profile'?'profile':'fact'}:${digest([c.rec.key,c.itemKey||null])}`,text:`${refs.some(r=>r.attribution==='third-party')?'【含他人转述】':''}${c.who}：${c.line}`,layer:c.section,sourceRefs:refs,score:c.keywordScore,matchMethod:'keyword'});
+   }
+   metric='keyword';
+ }
+ for(const item of items)if(item.layer==='profile')item.sourceRefs=item.sourceRefs.filter(r=>r.chatKey===chatKey);
  const hitCounts=readHitLog({libDir:rt.dir}).counts,recent=readRecentEvents({libDir:rt.dir,chatKey,limit:rt.settings.consolidateInjectCount||6,hitCounts}),eventIds=new Set(recent.map(e=>e.id));
  let eventRows=recent;
  if(query){const q=rt.normalizer.normalize(query,{register:false}).text,hits=searchEvents(getEventIndex({libDir:rt.dir}),q,{chatKey,limit:3,minScore:rt.settings.consolidateEventMinScore||0.18,exclude:eventIds});eventRows=[...recent,...readEventsById({libDir:rt.dir,chatKey,ids:hits.map(h=>h.id),hitCounts})];}
  for(const e of eventRows){eventIds.add(e.id);items.push({id:`event:${e.id}`,text:e.summary,layer:e.promotedAt?'long-term':'episodic',sourceRefs:eventRefs(e)});}
- if(query){const r=await router.handle({method:'POST',path:'/search',body:{q:query,chatKey,k:p.limit||8,mode:p.mode||'auto',includeEvents:false}});if(!r.body?.ok)throw new MemoryError(r.body?.code||'SEARCH_FAILED',r.body?.error||'Search failed',r.status);
+ if(query){const r=await router.handle({method:'POST',path:'/search',body:{q:query,chatKey,k:p.limit||8,mode:p.purpose==='automatic'?'keyword':p.mode||'auto',includeEvents:false}});if(!r.body?.ok)throw new MemoryError(r.body?.code||'SEARCH_FAILED',r.body?.error||'Search failed',r.status);
   metric=r.body.mode==='vector'?'vector':metric==='vector'?'hybrid':'keyword';degraded=degraded||r.body.degraded;
   const events=new Map(readEventRows({libDir:rt.dir}).rows.map(e=>[e.id,e]));
   for(const h of r.body.hits||[]){if(h.chatKey!==chatKey)continue;const e=events.get(h.id);if(e&&eventIds.has(e.id))continue;items.push({id:`document:${h.id}`,text:h.text||h.title||'',layer:'long-term',sourceRefs:e?eventRefs(e):[{type:'window',id:h.id,chatKey,matchMethod:'corpus-document'}],score:h.score});if(e)eventIds.add(e.id);}
@@ -210,7 +229,7 @@ async function person(p) {
    await recoverCorrections();receipts.clear();return result;
  }
  const records=manual.records().filter(r=>labels.includes(r.speaker)&&(p.allScopes||r.scope===scope));
- const items=manual.items(records).map(i=>({...i,accountId:accounts.find(a=>rt.normalizer.resolveKnown(a)?.label===records.find(r=>r.key===i.key)?.speaker)}));
+ const items=manual.items(records).map(i=>{const rec=records.find(r=>r.key===i.key);return {...i,accountId:accounts.find(a=>rt.normalizer.resolveKnown(a)?.label===rec?.speaker),sourceRefs:rec?.itemProvenance?.[i.itemKey]||rec?.provenance||[]};});
  return {ok:true,accounts,profiles:items.filter(i=>i.kind==='trait').map(i=>({...i,id:'person:'+digest([i.key,i.itemKey])})),impressions:items.filter(i=>i.kind!=='trait').map(i=>({...i,id:'person:'+digest([i.key,i.itemKey])}))};
 }
 async function recoverCorrections(){

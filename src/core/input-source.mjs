@@ -45,10 +45,12 @@ export function canonicalVocabulary(root, previous=[]) {
   for(const e of canonicalEntities(root)) map.set(e.id,{id:e.id,kind:e.kind||'person',surface:[e.displayName,...(e.surfaces||[])].filter(Boolean),aliases:e.aliases||[]});
   const aliases=new Map();for(const e of map.values())for(const a of e.aliases)if(!aliases.has(a))aliases.set(a,e);
   for(const m of rows) {
-    if(map.has(m.actorId)) continue;
-    const known=aliases.get(m.actorId)||(/^\d+$/.test(m.actorId)?map.get(`qq:${m.actorId}`):null);
-    if(known) {if(!known.aliases.includes(m.actorId))known.aliases.push(m.actorId);aliases.set(m.actorId,known);}
-    else map.set(m.actorId,{id:m.actorId,kind:'person',surface:[],aliases:[]});
+    for(const id of [m.actorId,...(m.mentions||[])]) {
+      if(map.has(id)) continue;
+      const known=aliases.get(id)||(/^\d+$/.test(id)?map.get(`qq:${id}`):null);
+      if(known) {if(!known.aliases.includes(id))known.aliases.push(id);aliases.set(id,known);}
+      else map.set(id,{id,kind:'person',surface:[],aliases:[]});
+    }
   }
   const range=rows.reduce((a,r)=>({start:Math.min(a.start,r.timestamp),end:Math.max(a.end,r.timestamp)}),{start:Infinity,end:0}),start=rows.length?range.start:0,end=range.end;
   return {entities:[...map.values()],horizon:{start:start?new Date(start).toISOString():null,end:end?new Date(end).toISOString():null,days:(end-start)/86400000,messages:rows.length},identity:{source:'protocol',selfId:null},stats:{messages:rows.length,entities:map.size,source:'protocol'}};
