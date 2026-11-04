@@ -1,6 +1,7 @@
+import { standaloneStartArgs } from './service-start.mjs';
 import { createProtocolBridge, scopeOf } from './protocol-v1.mjs';
 import { randomUUID } from 'node:crypto';
-// memory-vec — QQ-Agent 适配层入口（**新树 `refactor/` 版** · 0.32.1）
+// memory-vec — QQ-Agent 适配层入口（**新树 `refactor/` 版** · 0.32.2）
 //
 // ── 这一层是什么 ───────────────────────────────────────────────────────────
 // 一个**薄适配层**：不含任何向量库代码，只持有一个地址（设置里的 `serviceBaseURL`，
@@ -564,6 +565,13 @@ async function autostartService() {
   const base = baseURLOf(cfg);
   if (await serviceAlive(base)) return;                 // 已在跑 ⇒ 不重起
 
+  if(protocolV1()) {
+    const args=standaloneStartArgs(cfg);if(!args)return;
+    const child=spawn(process.execPath,args,{detached:true,windowsHide:true,stdio:'ignore',cwd:repo,env:{...process.env,ELECTRON_RUN_AS_NODE:'1'}});
+    child.on('error',e=>diag({at:'v1-autostart-error',error:String(e.message)}));child.unref();
+    diag({at:'v1-autostart-spawn',port:portOfService(base)});return;
+  }
+
   const tool = path.join(repo, 'tools', 'instances.mjs');
   if (!fs.existsSync(tool)) return;                     // 仓不在这台机器上 ⇒ 静默
 
@@ -767,8 +775,9 @@ export function activate(ctx = {}) {
     deactivate();
     v1Store = ctx.store;
     v1Bridge = createProtocolBridge({config:mvCfg,dataDir:ctx.dataDir || hostDataDir(),store:v1Store});
-    v1Bridge.sync().catch(e=>diag({at:'v1-sync-error',error:String(e.message)}));
-    v1Timer=setInterval(()=>v1Bridge?.sync().catch(()=>{}),15000);v1Timer.unref?.();
+    const sync=async()=>{await autostartService();await v1Bridge?.sync();};
+    sync().catch(e=>diag({at:'v1-sync-error',error:String(e.message)}));
+    v1Timer=setInterval(()=>sync().catch(()=>{}),15000);v1Timer.unref?.();
     return;
   }
   /* 宿主侧唯一的副作用：把数据面服务带起来（异步、静默、可用设置关掉）。 */

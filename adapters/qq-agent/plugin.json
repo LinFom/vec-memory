@@ -1,7 +1,7 @@
 {
   "id": "memory-vec",
   "name": "向量记忆库",
-  "version": "0.32.1",
+  "version": "0.32.2",
   "apiVersion": 1,
   "category": "utility",
   "description": "通过独立记忆服务保存人物档案、新事物与场景记忆，提供有来源的召回和采用确认；兼容旧本机协议。实体假名化可减少已知身份暴露，不能保证未知别名或语境无法识别。默认不运行自动模型任务。",
@@ -81,7 +81,9 @@
     "ops": [],
     "protocolV1": false,
     "spaceId": "",
-    "serviceToken": ""
+    "serviceToken": "",
+    "serviceDataRoot": "",
+    "managementOrigins": []
   },
   "configSchema": {
     "llmEndpointKind": {
@@ -393,6 +395,19 @@
       "type": "string",
       "label": "项目访问令牌",
       "secret": true
+    },
+    "serviceDataRoot": {
+      "type": "string",
+      "label": "独立服务数据目录",
+      "description": "独立协议自动启动时使用的已初始化数据目录。不会创建新库。"
+    },
+    "managementOrigins": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "label": "允许嵌入的控制台地址",
+      "description": "明确允许的界面来源，例如 http://127.0.0.1:3210。管理凭据仍由服务页面验证。"
     }
   }
 }

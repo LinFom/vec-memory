@@ -4,14 +4,24 @@ import { fileURLToPath } from 'node:url';
 import { createService } from './service.mjs';
 
 export function createStandaloneServer(options) {
+  if(options.embedOrigins!=null&&!Array.isArray(options.embedOrigins))throw Error('Embedding origins must be an array');
+  const embedOrigins=[...new Set((options.embedOrigins||[]).map(value=>{
+    let url;try{url=new URL(value);}catch{throw Error('Invalid embedding origin');}
+    if(!['http:','https:'].includes(url.protocol)||url.username||url.password||url.pathname!=='/'||url.search||url.hash)throw Error('Invalid embedding origin');
+    return url.origin;
+  }))];
   const service = createService(options);
   const server = http.createServer(async (req, res) => {
     const send = (status, body) => { res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }); res.end(JSON.stringify(body)); };
     try {
       const url = new URL(req.url, 'http://localhost');
-      if (url.pathname === '/health') return send(200, { status: 'ok', service: 'vec-memory', protocolVersion: 1 });
+      if (url.pathname === '/health') {
+        if(embedOrigins.includes(req.headers.origin)){res.setHeader('access-control-allow-origin',req.headers.origin);res.setHeader('vary','Origin');}
+        return send(200, { status: 'ok', service: 'vec-memory', protocolVersion: 1 });
+      }
       if (['/', '/standalone.html'].includes(url.pathname) && req.method === 'GET') {
-        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'content-security-policy': "default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'" });
+        const ancestors=embedOrigins.length?"'self' "+embedOrigins.join(' '):"'none'";
+        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'content-security-policy': "default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-ancestors "+ancestors });
         res.end(fs.readFileSync(fileURLToPath(new URL('../../web/standalone.html', import.meta.url)))); return;
       }
       if (req.headers.origin) {

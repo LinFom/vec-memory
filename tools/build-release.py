@@ -18,7 +18,7 @@ DIRECTORIES = {'src', 'web', 'tools', 'docs', 'openapi', 'examples', 'test', 'ad
 ROOT_FILES = {'package.json', 'package-lock.json', 'README.md', 'CONTEXT.md',
               'PROTOCOL.md', 'LICENSE', 'LICENSE.md', 'install.cmd', 'init.cmd', 'start.cmd'}
 GUIDE = 'docs/安装与接入手册.md'
-ADAPTER_FILES = ('index.js', 'plugin.json', 'settings-ui.js', 'memory-page.js', 'protocol-v1.mjs')
+ADAPTER_FILES = ('index.js', 'plugin.json', 'settings-ui.js', 'memory-page.js', 'protocol-v1.mjs', 'service-start.mjs')
 
 
 def git(*args):
