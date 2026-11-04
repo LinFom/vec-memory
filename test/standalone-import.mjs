@@ -1,6 +1,31 @@
 import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';
 import {Normalizer} from '../src/core/normalize.mjs';import {openFactStore} from '../src/core/factstore.mjs';import {VecStore} from '../src/core/vecstore.mjs';import {listCorpus} from '../src/core/corpus.mjs';
 import {migrate} from '../tools/standalone-migrate.mjs';import {importSnapshot} from '../tools/standalone-import.mjs';import {createSpaceEngine} from '../src/standalone/engine.mjs';
+
+test('game evidence imports with its original channel ID and survives adapter replay without entering QQ scopes',async()=>{
+ const temp=fs.mkdtempSync(path.join(os.tmpdir(),'vec-game-import-'));let engine;
+ try{
+  const from=path.join(temp,'old'),sourceRoot=path.join(temp,'source'),chatKey='game:world:room',timestamp=Date.now();
+  fs.mkdirSync(path.join(from,'memory-vec'),{recursive:true});fs.mkdirSync(path.join(sourceRoot,'memory'),{recursive:true});
+  const row={id:'game-evidence',speakerId:'player:uuid',chatKey,at:timestamp,text:'这个房间约定不破坏建筑'};
+  const unattributed={id:'game-system',chatKey,at:timestamp,text:'没有作者的历史游戏记录'};
+  fs.writeFileSync(path.join(sourceRoot,'memory/evidence.jsonl'),[row,unattributed].map(r=>JSON.stringify(r)).join('\n')+'\n');
+  const {spaceRoot}=migrate({from,sourceRoot,to:path.join(temp,'new'),spaceId:'game'});
+  assert.throws(()=>importSnapshot({spaceRoot}),/cannot fabricate evidence/);
+  const imported=importSnapshot({spaceRoot,quarantineUnattributedEvidence:true});
+  assert.equal(imported.imported,1);assert.equal(imported.unattributedEvidence,1);
+  const held=JSON.parse(fs.readFileSync(path.join(spaceRoot,'input/unattributed-legacy-evidence.json'),'utf8'));
+  assert.equal(held.usableAsEvidence,false);assert.deepEqual(held.records[0].row.text,unattributed.text);
+  engine=createSpaceEngine({root:spaceRoot});
+  const {scopeOf}=await import('../adapters/qq-agent/protocol-v1.mjs');const scope=scopeOf(chatKey);
+  assert.deepEqual(scope,{kind:'game',id:'world:room'});
+  const replay=await engine.call('ingest',{messages:[{messageId:row.id,actorId:row.speakerId,conversationId:chatKey,role:'user',timestamp,text:row.text,scope,mentions:[]}]});
+  assert.equal(replay.duplicates,1);
+  const game=await engine.call('recall',{scope,query:'房间约定',purpose:'automatic'});assert(game.items.some(i=>i.layer==='working'&&i.text.includes('建筑')));
+  const qq=await engine.call('recall',{scope:{kind:'group',id:'world:room'},purpose:'automatic'});assert.equal(qq.items.length,0);
+  const scene=await engine.call('workspace',{action:'ensureScene',scope,name:'游戏房间'});assert(scene.ok);
+ }finally{await engine?.close();fs.rmSync(temp,{recursive:true,force:true});}
+});
 test('offline import preserves evidence IDs, original labels, facts and indexed documents without a host source',async()=>{
  const temp=fs.mkdtempSync(path.join(os.tmpdir(),'vec-offline-import-'));let engine;
  try{

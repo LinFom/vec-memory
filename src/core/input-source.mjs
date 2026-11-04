@@ -22,7 +22,7 @@ export function canonicalFingerprint(root) {
 }
 
 export function canonicalChatKey(scope) {
-  if (!scope || !['private','group'].includes(scope.kind) || typeof scope.id !== 'string' || !scope.id.trim() || scope.id.length > 180) throw new MemoryError('INVALID_SCOPE','scope requires kind private/group and a stable id');
+  if (!scope || !['private','group','game','channel'].includes(scope.kind) || typeof scope.id !== 'string' || !scope.id.trim() || scope.id.length > 180) throw new MemoryError('INVALID_SCOPE','scope requires kind private/group/game/channel and a stable id');
   return `${scope.kind}:${scope.id.trim()}`;
 }
 export function canonicalEvidence(root) {

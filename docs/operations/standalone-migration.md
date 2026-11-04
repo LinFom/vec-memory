@@ -29,6 +29,8 @@ node tools/standalone-migrate.mjs verify --space-root E:\new-service\spaces\qq-a
 
 ## 将快照转换为通用原料
 
+支持 `group/private/game/channel` 渠道，保留完整稳定渠道 ID。默认仍拒绝缺少作者、消息 ID 或时间的记录。确有无作者的历史上下文时，可显式增加 `--quarantine-unattributed-evidence`：仅将有稳定 ID、时间和合法渠道的无作者证据原样保存到 `input/unattributed-legacy-evidence.json`，报告 `unattributedEvidence` 数量；它们不进入消息或事实证据，不猜测作者。原始快照始终保留。不能精确匹配的旧证据继续保留原 ID，并在报告中列出歧义数量，不自动合并。
+
 核对复制完整性后，保持独立服务停止，执行：
 
 ```powershell

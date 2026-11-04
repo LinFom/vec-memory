@@ -2190,8 +2190,10 @@
         "properties": {
           "kind": {
             "enum": [
+              "group",
               "private",
-              "group"
+              "game",
+              "channel"
             ]
           },
           "id": {

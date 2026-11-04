@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-export const scopeOf = chatKey => { const [kind,...rest]=String(chatKey).split(':'); if(!['private','group'].includes(kind)||!rest.join(':')) throw Error('无效会话'); return {kind,id:rest.join(':')}; };
+export const scopeOf = chatKey => { const [kind,...rest]=String(chatKey).split(':'); if(!['private','group','game','channel'].includes(kind)||!rest.join(':')) throw Error('无效会话'); return {kind,id:rest.join(':')}; };
 export function messageOf(e,chatKey) {
   const id=e.id ?? e.mid; const at=e.ts ?? e.at; const actor=e.senderId ?? e.sender?.id;
   if(id==null || !actor || !Number.isFinite(Number(at))) throw Error('消息缺少稳定 ID、发送者或时间');
