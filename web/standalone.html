@@ -245,6 +245,7 @@ async function api(route,method="GET",body){
     const r=await fetch("/api/v1/"+route,{
       method,
       headers:{...(S.token?{authorization:"Bearer "+S.token}:{}),...(body?{"content-type":"application/json"}:{})},
+      signal:AbortSignal.timeout(route.includes('backups')?180000:30000),
       ...(body?{body:JSON.stringify(body)}:{})
     });
     let data=null; try{data=await r.json();}catch{}
@@ -253,7 +254,7 @@ async function api(route,method="GET",body){
       e.status=r.status;e.code=data&&data.code;e.body=data;throw e;
     }
     return data||{};
-  }finally{busy(false);}
+  }catch(e){if(e.name==="TimeoutError"){const error=new Error("请求超时，请刷新重试；已提交的任务可在任务列表查看。");error.code="REQUEST_TIMEOUT";throw error;}throw e;}finally{busy(false);}
 }
 const sid=()=>encodeURIComponent(S.space);
 const wsAction=(action,body={})=>api("spaces/"+sid()+"/workspace","POST",{action,...body});

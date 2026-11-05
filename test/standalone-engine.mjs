@@ -9,6 +9,17 @@ import {canonicalMessages,canonicalEvidence,canonicalSources} from '../src/core/
 import {readEvidenceRows} from '../src/core/consolidate.mjs';
 const scope={kind:'group',id:'team-dev'};
 const sample=(id='m1',patch={})=>({messageId:id,conversationId:'conversation-A',actorId:'user:alice@example',role:'user',timestamp:Date.now()-600000,text:'周末去露营，记得带绿茶',scope,...patch});
+test('overview and graph stay readable while consolidation waits for its model',async()=>temporary(async root=>{
+ let entered,release;const started=new Promise(r=>entered=r);
+ const model=http.createServer(async(req,res)=>{for await(const _ of req){}entered();await new Promise(r=>release=r);res.setHeader('content-type','application/json');res.end(JSON.stringify({choices:[{message:{content:'{"events":[],"people":[]}'}}]}));});
+ await new Promise(r=>model.listen(0,'127.0.0.1',r));
+ fs.writeFileSync(path.join(root,'settings.json'),JSON.stringify({llmBaseURL:'http://127.0.0.1:'+model.address().port,llmModel:'held-model',consolidateSettleMin:0}));
+ const e=createSpaceEngine({root});let pending;
+ try{await e.call('ingest',{messages:[sample('held')]});await e.call('status');pending=e.call('job',{type:'consolidate'});await started;
+  let written=false;const write=e.call('ingest',{messages:[sample('after-model')]}).then(r=>{written=true;return r;});
+  let timeout;try{const result=await Promise.race([Promise.all([e.call('status'),e.call('workspace',{action:'state',admin:true}),e.call('graph',{admin:true})]),new Promise((_,reject)=>{timeout=setTimeout(()=>reject(Error('Overview is blocked by the model job')),700);})]);assert.equal(result[0].messages,1);assert(result[2].nodes.length>0);assert.equal(written,false);release();assert.equal((await write).accepted,1);}finally{clearTimeout(timeout);}
+ }finally{release?.();await pending?.catch(()=>{});await e.close();await new Promise(r=>model.close(r));}
+}));
 async function temporary(fn){const root=fs.mkdtempSync(path.join(os.tmpdir(),'vec-space-engine-'));try{await fn(root);}finally{fs.rmSync(root,{recursive:true,force:true});}}
 test('standalone engine: durable raw messages, conflicts, arbitrary IDs, evidence, restart and scope isolation',async()=>temporary(async root=>{
  let e=createSpaceEngine({root});const m=sample();try{

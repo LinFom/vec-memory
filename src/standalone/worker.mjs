@@ -1,3 +1,4 @@
+import {createOperationQueue} from './operation-queue.mjs';
 import {graphSimilarity} from '../core/graph-similarity.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -297,7 +298,20 @@ async function recoverCorrections(){
  }
 }
 const operations={graphEvidence,graphIdentity,graph,relationship,graphMemories,relationBackfill,ingest,entity,remember,discover,subjects,subject,subjectRevision,recall,adoption,job,status,workspace:workspaceOp,person,quiesce:async()=>{paused=true;return {ok:true};},audit:async()=>{relationshipGraph.revisions.assertReadable();graphIdentities.assertReadable();log.assertReadable();memoryOperations.assertReadable();workspace.state();const rt=await getRuntime();if(factStoreOf(rt).readOnlyReason)throw new MemoryError('STORAGE_UNAVAILABLE','Fact store damaged',503);memoryCoreOf(rt,factStoreOf(rt)).manual.items();openSubjectStore(rt.dir).snapshot();const lineage=readLineage(rt.dir);if(!lineage.ok)throw new MemoryError('STORAGE_UNAVAILABLE',lineage.error,503);return {ok:true};}};
-let chain=Promise.resolve();parentPort.on('message',m=>{chain=chain.then(async()=>{try{await recoverCorrections();if(!operations[m.operation])throw new MemoryError('INVALID_OPERATION','Unknown engine operation');parentPort.postMessage({id:m.id,result:await operations[m.operation](m.payload||{})});}catch(e){parentPort.postMessage({id:m.id,error:{message:e.message,code:e.code||'ENGINE_FAILED',status:e.status||500,result:e.result}});}});});
+const operationQueue=createOperationQueue(async()=>{await recoverCorrections();await getRuntime();});
+function isReadOnly(operation,p){
+ if(['status','graph','graphMemories','graphEvidence','subjects','subject','recall'].includes(operation))return true;
+ if(operation==='workspace')return ['state','scenes','query','preview'].includes(p?.action);
+ return operation==='person'&&p?.action!=='revision';
+}
+parentPort.on('message',m=>{
+ const payload=m.payload||{};
+ operationQueue.run(async()=>{
+  if(!operations[m.operation])throw new MemoryError('INVALID_OPERATION','Unknown engine operation');
+  return operations[m.operation](payload);
+ },{readOnly:isReadOnly(m.operation,payload),longRunning:['job','relationBackfill'].includes(m.operation)})
+ .then(result=>parentPort.postMessage({id:m.id,result}),e=>parentPort.postMessage({id:m.id,error:{message:e.message,code:e.code||'ENGINE_FAILED',status:e.status||500,result:e.result}}));
+});
 
 const backgroundStatus={lastConsolidateAt:0,lastIndexAt:0,lastError:null};
-setInterval(()=>{if(paused||workerData.maintenance)return;const cfg=configuredSettings(),now=Date.now();for(const [type,enabled,minutes,key] of [['consolidate',cfg.consolidateEnabled,Number(cfg.consolidateIntervalMin)||30,'lastConsolidateAt'],['index',cfg.autoIndexEnabled,Number(cfg.autoIndexIntervalMin)||30,'lastIndexAt']])if(enabled===true&&now-backgroundStatus[key]>=Math.max(60000,minutes*60000)){backgroundStatus[key]=now;chain=chain.then(()=>job({type})).catch(e=>{backgroundStatus.lastError={at:Date.now(),type,code:e.code||'BACKGROUND_FAILED',error:e.message};});}},60000).unref();
+setInterval(()=>{if(paused||workerData.maintenance)return;const cfg=configuredSettings(),now=Date.now();for(const [type,enabled,minutes,key] of [['consolidate',cfg.consolidateEnabled,Number(cfg.consolidateIntervalMin)||30,'lastConsolidateAt'],['index',cfg.autoIndexEnabled,Number(cfg.autoIndexIntervalMin)||30,'lastIndexAt']])if(enabled===true&&now-backgroundStatus[key]>=Math.max(60000,minutes*60000)){backgroundStatus[key]=now;void operationQueue.run(()=>job({type}),{longRunning:true}).catch(e=>{backgroundStatus.lastError={at:Date.now(),type,code:e.code||'BACKGROUND_FAILED',error:e.message};});}},60000).unref();

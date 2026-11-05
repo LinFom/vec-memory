@@ -6,6 +6,17 @@ import path from 'node:path';
 import { initialize, createService } from '../src/standalone/service.mjs';
 import { createStandaloneServer } from '../src/standalone/server.mjs';
 
+test('management reads do not queue behind a running model job in the service',async t=>{
+ const root=fs.mkdtempSync(path.join(os.tmpdir(),'vec-service-read-')),token=initialize(root);let release,entered;
+ const started=new Promise(r=>entered=r);
+ const service=createService({root,engineFactory:()=>({call:async op=>{if(op==='job'){entered();await new Promise(r=>release=r);}return {ok:true,scenes:{},entries:{}};},close:async()=>{}})});
+ t.after(async()=>{release?.();await service.close();fs.rmSync(root,{recursive:true,force:true});});
+ const call=(route,body)=>service.handle({token,path:'/api/v1/'+route,method:'POST',body});
+ await call('admin/projects',{projectId:'p'});await call('admin/spaces',{spaceId:'s',owner:'p'});
+ await call('spaces/s/jobs',{type:'consolidate'});await started;
+ let timer;try{const response=await Promise.race([call('spaces/s/workspace',{action:'state'}),new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error('Workspace blocked by service job queue')),700);})]);assert.equal(response.status,200);}finally{clearTimeout(timer);}
+});
+
 test('credentials, project isolation, explicit sharing, revocation and adoption', async t => {
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'vec-spaces-'));t.after(()=>fs.rmSync(root,{recursive:true,force:true}));
   const admin=initialize(root);const adopted=[];

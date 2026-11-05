@@ -260,11 +260,14 @@ export function createService({ root, engineFactory = createSpaceEngine, localAd
         if (operation === 'workspace' && method === 'POST') {
           permit(access,who,sid,!['query','scenes'].includes(body.action));
           if (['state','scene','link','retract','preview'].includes(body.action) && !who.admin) throw new MemoryError('FORBIDDEN','Administrator credential required',403);
-          return finish(await serial(sid,()=>invoke(sid,'workspace',{...body,admin:who.admin})));
+          const readOnly=['state','scenes','query','preview'].includes(body.action);
+          const call=()=>invoke(sid,'workspace',{...body,admin:who.admin});
+          return finish(await (readOnly?call():serial(sid,call)));
         }
         if (operation === 'people' && method === 'POST') {
           permit(access,who,sid,body.action==='revision');
-          return finish(await serial(sid,()=>invoke(sid,'person',{...body,admin:who.admin})));
+          const call=()=>invoke(sid,'person',{...body,admin:who.admin});
+          return finish(await (body.action==='revision'?serial(sid,call):call()));
         }
         if (operation === 'readers' && method === 'PUT') {
           const space = permit(access, who, sid, true);
