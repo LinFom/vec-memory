@@ -2,6 +2,27 @@ import path from 'node:path';
 import {DurableLog, MemoryError, digest, requireText, copy} from './durable-log.mjs';
 import {canonicalChatKey} from './input-source.mjs';
 
+const NAME_SOURCES = ['manual','adapter','generated'];
+// Stored source of a scene name. A missing source is inferred from history only:
+// a name equal to the scene ID is the placeholder an old ensureScene wrote, so
+// an adapter may claim it; anything else was set by a person and stays human.
+export function sceneNameSource(scene) {
+  if (!scene) return 'generated';
+  const stored = scene.nameSource;
+  if (NAME_SOURCES.includes(stored)) return stored;
+  return typeof scene.name === 'string' && scene.name === scene.sceneId ? 'generated' : 'legacy';
+}
+// Display order only: a person's name beats an adapter sync, which beats the
+// generated ID placeholder. Never used for identity, scope or evidence.
+export const NAME_ORDER = {manual:3, legacy:3, adapter:2, generated:1};
+export function sceneNameOrder(scene) { return NAME_ORDER[sceneNameSource(scene)] || 0; }
+// The name a primary label may show, or null when the scene truly has none.
+export function preferredSceneName(scene) {
+  const source = sceneNameSource(scene), name = typeof scene?.name === 'string' ? scene.name.trim() : '';
+  // Generated or unclassified names equal to the scene ID are placeholders.
+  if (!name || ((source === 'generated' || source === 'legacy') && name === scene?.sceneId)) return null;
+  return {name, source};
+}
 // One journal commit replaces a whole revision, including dependent retractions.
 // Account links are a read projection, never a destructive identity merge.
 export class SceneMemory {
@@ -15,8 +36,16 @@ export class SceneMemory {
     const operationId = requireText(p.operationId, 'operationId', 200), old = this.log.replay(operationId, p);
     if (old) return old;
     const state = this.state(), result = fn(state);
-    return this.log.append(operationId, p, {state}, {ok:true, ...result});
-  }
+    // A no-op (repeated name, human protection, stale cursor) changes no state,
+    // writes no row and bumps no rev. `replayed:true` tells the client the answer
+    // describes stored state, not a name it may record as newly applied.
+    const {noop, ...rest} = result;
+    if (noop) return {ok:true, ...rest, replayed:true};
+    return this.log.append(operationId, p, {state}, {ok:true, ...rest});
+  }  // ── scene names are display metadata, never identity ────────────────────────
+  // Priority is manual > adapter > generated. A stored name that differs from
+  // the scene ID but carries no nameSource was written before this contract: it
+  // is treated as human (legacy) and never auto-refreshed.
   scene(p) { return this.mutate(p, s => {
     const sceneId = requireText(p.sceneId, 'sceneId', 200);
     if (['__proto__','constructor','prototype','toString'].includes(sceneId)) throw new MemoryError('INVALID_ARGUMENT','Reserved scene ID');
@@ -25,9 +54,66 @@ export class SceneMemory {
     const bindings = p.bindings || previous?.bindings || [];
     if (!Array.isArray(bindings) || !bindings.length || bindings.length > 50) throw new MemoryError('INVALID_ARGUMENT', 'Scene bindings required');
     bindings.forEach(canonicalChatKey);
-    const scene = {sceneId, name:requireText(p.name, 'name', 200), type:requireText(p.type || 'channel', 'type', 80), bindings, rev:(previous?.rev || 0)+1};
+    // Explicit management naming is human authority, whatever the old source was.
+    const scene = {sceneId, name:requireText(p.name, 'name', 200), type:requireText(p.type || 'channel', 'type', 80), bindings, rev:(previous?.rev || 0)+1, nameSource:'manual'};
     s.scenes[sceneId] = scene; return {scene};
   }); }
+  // Adapter-submitted structured name for the scene behind this exact scope.
+  // The scene ID stays canonicalChatKey(scope) and the bindings are untouched:
+  // a name update can never move or replace a scene's scope bindings.
+  //
+  // - nameSource 'adapter' may only follow a rename while previousName equals
+  //   the stored name the adapter acknowledged last; otherwise the stored name
+  //   is returned with staleName:true so the client re-cursors on the real name.
+  // - a repeated identical name is a no-op: no journal row, no rev bump.
+  // - human names (explicit, or historical without nameSource) are never
+  //   overwritten; the reply still carries the ACTUAL stored name.
+  // - the returned name is what is stored, never merely what was submitted.
+  ensureScene(p) { return this.mutate(p, s => {
+    const sceneId = requireText(p.sceneId, 'sceneId', 200);
+    if (['__proto__','constructor','prototype','toString'].includes(sceneId)) throw new MemoryError('INVALID_ARGUMENT','Reserved scene ID');
+    const scope = p.scope;
+    canonicalChatKey(scope);
+    const previous = Object.hasOwn(s.scenes,sceneId)?s.scenes[sceneId]:null;
+    // Names arrive as user input to be validated exactly, never pulled from message text.
+    const submitted = p.name === undefined || p.name === null ? null : requireText(p.name, 'name', 200);
+    const type = requireText(p.type || previous?.type || 'channel', 'type', 80);
+    const reply = (scene, extra = {}) => ({sceneId, status:'ensured', name:scene?.name ?? null, nameSource:scene?.name ? sceneNameSource(scene) : null, manualPreserved:false, updated:false, ...extra});
+    if (!previous) {
+      // An unnamed new scene keeps the original-ID name for old readers; a
+      // generated name records that nobody has chosen one yet.
+      const scene = {sceneId, name:submitted ?? sceneId, nameSource:submitted ? 'adapter' : 'generated', type, bindings:[scope], rev:1};
+      s.scenes[sceneId] = scene;
+      return {...reply(scene,{updated:true}), scene};
+    }
+    const source = sceneNameSource(previous);
+    const current = typeof previous.name === 'string' ? previous.name : null;
+    // Historical names were not writable through this contract: manual unless known.
+    const manualPreserved = source === 'manual' || source === 'legacy';
+    const same = submitted === null || submitted === current;
+    // No-op and protection replies change no state; they still journal their own
+    // honest answer so a replay can never claim an update that never happened.
+    if (same) return reply(previous, {manualPreserved, noop:true});
+    if (manualPreserved) return reply(previous, {manualPreserved:true, noop:true});
+    const staleName = (source === 'adapter' || p.previousName !== undefined) && p.previousName !== current;
+    if (staleName) return reply(previous, {manualPreserved:false, staleName:true, noop:true});
+    // A real rename is exactly one journal row and one rev bump.
+    const scene = {...previous, name:submitted, nameSource:'adapter', rev:previous.rev+1};
+    s.scenes[sceneId] = scene;
+    return {...reply(scene,{updated:true}), scene};
+  }); }
+  // Read-only label projection helper shared with the relationship graph. It is
+  // a pure view over already-replayed state: unknown stays unknown, and a name
+  // never renames a scene this contract did not classify.
+  sceneStatus() {
+    const scenes = this.state().scenes || {};
+    const own = id => (Object.hasOwn(scenes,id) ? scenes[id] : null);
+    return {
+      sceneName: id => own(id)?.name ?? null,
+      sceneNameOrder: id => sceneNameOrder(own(id)),
+      preferredName: id => preferredSceneName(own(id))
+    };
+  }
   entry(p, {admin = false, evidence = []} = {}) { return this.mutate(p, s => {
     const scene = s.scenes[p.sceneId];
     if (!scene) throw new MemoryError('NOT_FOUND', 'Scene not found', 404);

@@ -30,3 +30,7 @@
 ## 0.33：关系星图扩展
 
 新增 graph、graph-evidence、graph-memories、relationships、graph-identity、relation-backfill。它们复用 v1 凭据、空间权限与统一错误。项目图查询必须给 scope，显式 sharedSpaceIds 联合读取并在返回前复核授权；维护与全场合展开只开放管理端。本机回环免凭据模式沿用现有选择，项目凭据不因此获得管理权。详见 [关系星图说明](docs/relationship-galaxy-0.33.0.md) 和 [OpenAPI](openapi/standalone-v1.json)。
+
+### 渠道显示名同步（0.33.2）
+
+`ensureScene` 支持可选的 `name`、`nameSource: "adapter"` 和 `previousName`。适配器名称来自平台元数据；服务保留手工命名，适配器改名时按上一次已确认的名称比较更新。响应包含 `nameSyncSupported: true`、实际保存的 `name`、`nameSource`、`updated`、`manualPreserved`，并可含 `staleName`。客户端应记录回执中的名称作为下一轮的 `previousName`。名称不参与空间、账号或渠道身份匹配。

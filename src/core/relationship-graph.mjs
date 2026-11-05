@@ -2,10 +2,24 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {DurableLog, digest, MemoryError, requireText} from './durable-log.mjs';
 import {canonicalChatKey} from './input-source.mjs';
+import {preferredSceneName,sceneNameOrder} from './scene-memory.mjs';
 const instances=new Map();
 export function openRelationshipGraph(root){const key=path.resolve(root);if(!instances.has(key))instances.set(key,new RelationshipGraph(key));return instances.get(key);}
 export const RELATION_PROMPT='可额外输出 relations:[{sourceActorId,targetActorId,kind:"relationship"|"attitude",predicate,statement,reporterId,evidenceIds:[消息ID],quote,negated:false}]。仅提取明确原话表述的人际身份关系或主观态度，不从互动频率、昵称相似、语气推断。quote 必须是表达者原话中的连续原文，不能是你的改写。双方只能使用给定登记账号ID，不确定则不提取。转述保留实际表达者，否认和冲突作为候选，不覆盖旧关系。没有给空数组。';
 
+// ── channel labels ──────────────────────────────────────────────────────────
+// The primary label is a display name, never a scope ID: a person's scene name
+// beats an adapter-synced one, then an exactly registered group entity. A truly
+// unnamed channel shows a generic Chinese label; `group:123` stays available as
+// the raw scope (and inside the sidebar) for traceability, not as the big label.
+export const UNNAMED_CHANNEL = {group:'未命名群聊', private:'未命名私聊', game:'游戏场景', channel:'未命名频道'};
+export function unnamedChannelLabel(kind) { return UNNAMED_CHANNEL[kind] || UNNAMED_CHANNEL.channel; }
+// `name` is the display name the workspace scene prefers for this exact scope
+// (see SceneMemory sceneStatus); `groupEntityName` must be an exact registered
+// entity displayName, never a nickname-similar guess.
+export function channelPrimaryLabel({name, groupEntityName, kind} = {}) {
+  return name || groupEntityName || unnamedChannelLabel(kind);
+}
 // A rebuildable projection. The message journal remains the source of truth.
 export class RelationshipGraph {
   constructor(root) {
@@ -120,10 +134,34 @@ export class RelationshipGraph {
     };
     if(p.admin)for(const e of entities)if(['person','self'].includes(e.kind))addActor(e.id);
     const scenes=Object.values(workspace.scenes||{});
-    for(const s of scenes)for(const scope of s.bindings||[]){const key=canonicalChatKey(scope);if(!allowed||allowed.has(key))nodes.set('channel:'+key,{id:'channel:'+key,type:'channel',label:s.name||key,scope,activity:0});}
+    // Name source rules live in one place (sceneNameSource / preferredSceneName).
+    const sceneName=s=>preferredSceneName(s)?.name||null, sceneOrder=s=>sceneNameOrder(s);
+    // A channel label is a display name: person-chosen scene name, then adapter
+    // sync, then an exactly registered group entity with the same ID. A channel
+    // that is truly unnamed gets a generic Chinese label, never `group:123` as
+    // its primary title; the raw scope stays in scope/scopeId for traceability.
+    const chatLabel=(key,scope)=>{
+      const kind=scope?.kind||String(key).split(':')[0];
+      let best=null;
+      // Bounded to the scenes backing this exact scope, in binding order.
+      for(const s of scenes){
+        if(!s?.bindings?.some(b=>canonicalChatKey(b)===key))continue;
+        const name=sceneName(s);if(!name)continue;
+        const rank=sceneOrder(s);if(!best||rank>best.rank)best={name,rank};
+      }
+      let name=best?.name||null, entityName=null;
+      if(!name)entityName=p.groupEntityName?.(key)||null;
+      // A private channel with neither a scene name nor a registered group
+      // entity shows the exact counterpart account, resolved through the same
+      // resolveAccount mapping used for identity: no nickname search.
+      if(!name&&!entityName&&kind==='private')name=p.counterpartName?.(key)||null;
+      const label=channelPrimaryLabel({name,groupEntityName:entityName,kind});
+      return {label,scope:scope||null,scopeId:key,rootKind:kind,unnamed:!(name||entityName)};
+    };
+    for(const s of scenes)for(const scope of s.bindings||[]){const key=canonicalChatKey(scope);if(!allowed||allowed.has(key))nodes.set('channel:'+key,{id:'channel:'+key,type:'channel',...chatLabel(key,scope),activity:0});}
     for(const ch of Object.values(c.channels))if(!allowed||allowed.has(ch.id)){
-      const scene=scenes.find(s=>s.bindings?.some(b=>canonicalChatKey(b)===ch.id));
-      nodes.set('channel:'+ch.id,{id:'channel:'+ch.id,type:'channel',label:scene?.name||ch.id,scope:ch.scope,activity:0});
+      const known=nodes.get('channel:'+ch.id);
+      nodes.set('channel:'+ch.id,{id:'channel:'+ch.id,type:'channel',...(known?{label:known.label,scope:known.scope,scopeId:known.scopeId,rootKind:known.rootKind,unnamed:known.unnamed}:chatLabel(ch.id,ch.scope)),activity:0});
     }
     for(const e of Object.values(c.edges)){
       if(allowed&&!allowed.has(e.channel)||e.last<from||e.first>to||['mention','reply'].includes(e.type))continue;

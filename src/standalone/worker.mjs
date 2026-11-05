@@ -18,7 +18,7 @@ import {getEventIndex,searchEvents} from '../core/event-index.mjs';
 import {FACT_KINDS} from '../core/facts.mjs';
 import {prepareDiscoveries,applyDiscoveries} from '../core/thing-discovery.mjs';
 import {openSubjectStore} from '../core/subjects.mjs';
-import {SceneMemory} from '../core/scene-memory.mjs';
+import {SceneMemory,sceneNameSource} from '../core/scene-memory.mjs';
 import {mentionedPeople} from '../core/person-targets.mjs';
 import {keywordImpressions} from '../core/keyword-impressions.mjs';
 import {resolveProfilePolicy} from '../core/visibility.mjs';
@@ -41,7 +41,23 @@ function graphIdentity(p){
  if(!/^[a-z][a-z0-9_-]*$/.test(platform)||!nodeId.startsWith('actor:')&&!nodeId.startsWith('channel:'))throw new MemoryError('INVALID_ARGUMENT','Use an exact platform and account/channel ID');
  return graphIdentities.append(operationId,p,{nodeId,identity:p.revoke?null:JSON.stringify([platform,stableId])},{ok:true});
 }
-async function graph(p){log.assertReadable();const rt=await getRuntime();await ensureIdentity(rt);const result=relationshipGraph.project(log.rows,canonicalEntities(input),workspace.state(),{...p,resolveAccount:id=>rt.normalizer.resolveKnown(id)?.id||id,lookupMessage:id=>log.operations.get(digest(id))?.data.message});graphIdentities.assertReadable();const proofs=new Map(graphIdentities.rows.map(r=>[r.data.nodeId,r.data.identity]));for(const n of result.nodes)n.verifiedIdentities=[...new Set((n.accounts?.map(id=>proofs.get('actor:'+id))||[proofs.get(n.id)]).filter(Boolean))];if(p.includeSimilarity&&p.admin){const all=await graphMemories({admin:true});result.edges.push(...graphSimilarity(result.nodes,all.memories,id=>rt.normalizer.resolveKnown(id)?.id||id));}
+// Channel labels are display names resolved from exact registrations only:
+// a group entity whose ID is the very same chat key, and — for a private
+// channel without a scene name — the exact counterpart account. Nothing here
+// can change identity, scope visibility or evidence.
+function graphLabelInputs(entities){
+ const byId=new Map(entities.map(e=>[e.id,e]));
+ const groupEntityName=key=>(byId.get(key)?.kind==='group'?byId.get(key).displayName:null)||null;
+ const counterpartName=key=>{
+  if(!String(key).startsWith('private:'))return null;
+  const ids=[...new Set(canonicalMessages(input).filter(m=>m.role==='user'&&canonicalChatKey(m.scope)===key).map(m=>m.actorId))];
+  if(ids.length!==1)return null; // two-sided DM: no single counterpart, do not guess
+  const id=ids[0];
+  return byId.get(id)?.displayName||byId.get(String(id).replace(/^qq:/,''))?.displayName||null;
+ };
+ return {groupEntityName,counterpartName};
+}
+async function graph(p){log.assertReadable();const rt=await getRuntime();await ensureIdentity(rt);const entities=canonicalEntities(input);const result=relationshipGraph.project(log.rows,entities,workspace.state(),{...p,...graphLabelInputs(entities),resolveAccount:id=>rt.normalizer.resolveKnown(id)?.id||id,lookupMessage:id=>log.operations.get(digest(id))?.data.message});graphIdentities.assertReadable();const proofs=new Map(graphIdentities.rows.map(r=>[r.data.nodeId,r.data.identity]));for(const n of result.nodes)n.verifiedIdentities=[...new Set((n.accounts?.map(id=>proofs.get('actor:'+id))||[proofs.get(n.id)]).filter(Boolean))];if(p.includeSimilarity&&p.admin){const all=await graphMemories({admin:true});result.edges.push(...graphSimilarity(result.nodes,all.memories,id=>rt.normalizer.resolveKnown(id)?.id||id));}
  if(p.includeMemories&&p.admin){const all=await graphMemories({admin:true});for(const m of all.memories){const owner=result.nodes.find(n=>n.accounts?.includes(m.actorId)||n.scope&&canonicalChatKey(n.scope)===m.chatKey);if(!owner)continue;const id='memory:'+m.id;result.nodes.push({id,type:'memory',label:m.text?.slice(0,50)||m.kind,degree:1,activity:0,memory:m});result.edges.push({id:'edge:'+id,source:owner.id,target:id,type:'memory',count:1});}}return result;}
 async function relationship(p){log.assertReadable();return relationshipGraph.revise(p,{messages:log.rows.map(r=>r.data.message),entities:canonicalEntities(input)});}
 function graphEvidence(p){
@@ -243,9 +259,17 @@ async function status(){const rt=await getRuntime();return {ok:true,messages:can
 async function workspaceOp(p) {
  const {action,admin,...request}=p;
  if(action==='state')return {ok:true,...workspace.state(),accounts:canonicalEntities(input)};
- if(action==='scenes') {const state=workspace.state(),chat=canonicalChatKey(request.scope),visible=new Set(workspace.query(request).map(e=>e.sceneId));return {ok:true,scenes:Object.values(state.scenes).filter(s=>s.bindings.some(b=>canonicalChatKey(b)===chat)||visible.has(s.sceneId)).map(s=>({sceneId:s.sceneId,name:s.name,type:s.type}))};}
- if(action==='ensureScene') {const sceneId=canonicalChatKey(request.scope);if(workspace.state().scenes[sceneId])return {ok:true,sceneId};const result=workspace.scene({operationId:'ensure:'+digest(sceneId),sceneId,name:request.name||sceneId,bindings:[request.scope]});return {...result,sceneId};}
- if(action==='scene')return workspace.scene(request);
+ if(action==='scenes') {const state=workspace.state(),chat=canonicalChatKey(request.scope),visible=new Set(workspace.query(request).map(e=>e.sceneId));return {ok:true,scenes:Object.values(state.scenes).filter(s=>s.bindings.some(b=>canonicalChatKey(b)===chat)||visible.has(s.sceneId)).map(s=>({sceneId:s.sceneId,name:s.name,type:s.type,nameSource:sceneNameSource(s)}))};}
+  if(action==='ensureScene') {
+   const sceneId=canonicalChatKey(request.scope);
+   const submitted=request.name===undefined||request.name===null?null:requireText(request.name,'name',200);
+   const previousName=request.previousName===undefined||request.previousName===null?null:requireText(request.previousName,'previousName',200);
+   // A name chosen by a person is never rewritten here: that needs the administrator scene action.
+    const previousCursor=previousName??null,currentRev=workspace.state().scenes?.[sceneId]?.rev??0;
+    const result=workspace.ensureScene({operationId:'ensure:'+digest(['scene-name',sceneId,submitted,previousCursor,currentRev]),sceneId,scope:request.scope,name:submitted??undefined,previousName:previousCursor??undefined});
+   return {ok:true,nameSyncSupported:true,sceneId,status:result.status,name:result.name,nameSource:result.nameSource,manualPreserved:result.manualPreserved===true,updated:result.updated===true,...(result.staleName?{staleName:true}:{})};
+  }
+  if(action==='scene')return workspace.scene(request);
  if(action==='link') {if(!admin)throw new MemoryError('FORBIDDEN','Administrator confirmation required',403);const rt=await getRuntime();await ensureIdentity(rt);for(const key of ['a','b']){const account=request[key],known=rt.normalizer.resolveKnown(account)||(String(account).startsWith('qq:')?rt.normalizer.resolveKnown(account.slice(3)):null);if(!known)throw new MemoryError('UNKNOWN_ENTITY','Register both exact platform accounts before linking');request[key]=known.id;}return workspace.link(request);}
  if(action==='preview')return workspace.preview(request.entryId);
  if(action==='retract') {if(!admin)throw new MemoryError('FORBIDDEN','Administrator correction required',403);return workspace.retract(request);}

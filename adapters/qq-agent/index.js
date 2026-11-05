@@ -1,5 +1,5 @@
 import { standaloneStartArgs } from './service-start.mjs';
-import { createProtocolBridge, scopeOf } from './protocol-v1.mjs';
+import { createProtocolBridge, scopeOf } from './protocol-v1.mjs?v=channel-names-20261105-2';
 import { randomUUID } from 'node:crypto';
 // memory-vec — QQ-Agent 适配层入口（**新树 `refactor/` 版** · 0.32.2）
 //
@@ -770,11 +770,72 @@ function startOutboxTimer() {
   if (typeof outboxTimer.unref === 'function') outboxTimer.unref();
 }
 
+/**
+ * 宿主群名表（**只读**）。给协议桥当 `getChannelNames` 用。
+ *
+ * 契约（已核，别再猜第二遍）：`refactor/modules/platform/onebot.js` 的
+ * `getGroupList()` → `[{id,name}]`，内部就是 `get_group_list` —— **只读**，一条 QQ 消息都不发。
+ * 它**不在** `store.getChatMeta` 里：会话元数据只有条数/时间/最后一句，没有名字，
+ * 所以群名只能从 adapter 取，且**绝不**从消息正文或昵称里猜。
+ *
+ * 五条纪律：
+ *  ① **只交"观察到的"会话**：发哪些 scope 由 `ctx.store.listChats()`（宿主受信接口，返回
+ *    `kind:id` 字符串键）决定，adapter 的群列表**只拿来给这些键配名字**。不过滤就是给机器人
+ *    加入的每个群 `ensureScene` 造一个空场景 —— 记忆库堆一堆从没聊过的群。取不到
+ *    `listChats`（没装配 / 形状不对）⇒ 返回 `null`，桥下一拍再问；绝不猜"什么都能发"。
+ *  ② **惰性取实例**：每次调用现场取 `ctx.onebot`，不在 activate 期存快照。兼容层是惰性
+ *    getter（`apps/server/assembly.js` 的 `extensionContextCompat`），装配晚于 activate
+ *    是常态；存下来的 null 会把这个功能永久钉死到下一次热重载。
+ *  ③ **绝不抛**：没接上 / 断线 / 形状不对 ⇒ 返回 `null`（含义是"这一拍答不上来"，桥既不
+ *    落游标也不记错误，下一拍再问）。名字是显示元数据，坏了不能牵连消息同步；痕迹留给 diag。
+ *  ④ **断线时不发 RPC**：`connected === false` 直接返回 null，别拿一个必定超时的
+ *    `get_group_list` 去撞 15 秒一拍。
+ *  ⑤ **只交名字，不交身份**：返回 `{scope:{kind:'group',id},name}`。ID 只用来定位场景、
+ *    名字只用来显示 —— 两者都不参与任何身份合并（显示名重合 ≠ 同一个群/人）。
+ */
+async function readHostChannelNames(hostCtx) {
+  try {
+     const onebot = hostCtx?.onebot ?? null;
+     if (!onebot || typeof onebot.getGroupList !== 'function') return null;
+     if (onebot.connected === false) return null;              // 纪律④：断线不撞 RPC
+     const store = hostCtx?.store ?? null;
+     if (typeof store?.listChats !== 'function') return null;   // 纪律①：没有观察集就不猜
+     const observed = new Set();
+     for (const chat of store.listChats() || []) observed.add(String(chat));
+     const list = await onebot.getGroupList();
+     const out = [];
+     for (const g of Array.isArray(list) ? list : []) {
+       const id = String(g?.id ?? '').trim();
+       const name = String(g?.name ?? '').trim();
+       if (!id || !name) continue;                            // 没名字就别占位
+       if (!observed.has('group:' + id)) continue;         // 纪律①：没聊过的群不建场景
+       out.push({ scope: { kind: 'group', id }, name });
+     }
+     return out;
+   } catch (e) {
+     diag({ at: 'v1-channel-names-error', err: String(e?.message || e) });
+     return null;                                             // 纪律③：绝不抛
+   }
+}
+
 export function activate(ctx = {}) {
   if (protocolV1()) {
     deactivate();
     v1Store = ctx.store;
-    v1Bridge = createProtocolBridge({config:mvCfg,dataDir:ctx.dataDir || hostDataDir(),store:v1Store});
+    // Bridge import carries a version query `?v=channel-names-20261105-2`: the host hot-reload
+    // only busts the ENTRY (`index.js` + `?t=`, `plugin-loader.js:812`), but
+    // `./protocol-v1.mjs?v=...` is a DIFFERENT module URL => the bridge is re-evaluated too,
+    // no full restart needed. The URL itself is still cached: change this `v=` value
+    // whenever `protocol-v1.mjs` changes, or you get 'code changed, behavior did not'.
+    v1Bridge = createProtocolBridge({
+      config: mvCfg,
+      dataDir: ctx.dataDir || hostDataDir(),
+      store: v1Store,
+      // 通道名同步的来源：宿主只读的群列表。名字只做场景显示名，与身份无关；
+      // 回执没有 nameSyncSupported 就什么都不落：把旧服务的"收下了"当成功，等于永久记下
+      // 服务从没采用过的名字 —— 之后连"名字改了"都判不出来。
+      getChannelNames: () => readHostChannelNames(ctx)
+    });
     const sync=async()=>{await autostartService();await v1Bridge?.sync();};
     sync().catch(e=>diag({at:'v1-sync-error',error:String(e.message)}));
     v1Timer=setInterval(()=>sync().catch(()=>{}),15000);v1Timer.unref?.();
