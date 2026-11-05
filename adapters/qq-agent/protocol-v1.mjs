@@ -49,9 +49,9 @@ export function createProtocolBridge({config,dataDir,fetcher=(...args)=>fetch(..
   const save=()=>{fs.mkdirSync(path.dirname(file),{recursive:true});fs.writeFileSync(file+'.tmp',JSON.stringify(state));fs.renameSync(file+'.tmp',file);};
   let running=null, syncing=null, stopped=false;
   const queuedIds=new Set(state.queue.map(m=>m.messageId)); const controllers=new Set();
-  async function request(route,body,method='POST') {
+  async function request(route,body,method='POST',timeoutMs=2500) {
     if(stopped)throw Error('适配层已停用');
-    const ac=new AbortController();controllers.add(ac);const timer=setTimeout(()=>ac.abort(),2500);
+    const ac=new AbortController();controllers.add(ac);const timer=setTimeout(()=>ac.abort(),timeoutMs);
     try {const token=String(config().serviceToken||'');if(!target.space||!token)throw Error('请配置 spaceId 和 serviceToken');
       const r=await fetcher(`${target.base}/api/v1/spaces/${encodeURIComponent(target.space)}/${route}`,{method,headers:{'Content-Type':'application/json',Authorization:`Bearer ${token}`},body:JSON.stringify(body),signal:ac.signal});const p=await r.json();if(!r.ok||p.ok===false)throw Error(p.error?.message||p.error||`HTTP ${r.status}`);return p;
     }finally{clearTimeout(timer);controllers.delete(ac);}
@@ -160,7 +160,7 @@ export function createProtocolBridge({config,dataDir,fetcher=(...args)=>fetch(..
       if(stopped)return;
       const key=`${item.scope.kind}:${item.scope.id}`, previous=state.channelNames?.[key];
       try {
-        const ack=await request('workspace',{action:'ensureScene',scope:item.scope,name:item.name,nameSource:'adapter',...(previous?{previousName:previous}:{})});
+        const ack=await request('workspace',{action:'ensureScene',scope:item.scope,name:item.name,nameSource:'adapter',...(previous?{previousName:previous}:{})},'POST',8000);
         if(stopped)return;
         // 旧服务只回 {ok:true,sceneId}：**不能**当成"名字已被采用"（纪律②）。
         if(ack?.nameSyncSupported!==true){unsupported=true;failures.push(`${key} 服务未声明 nameSyncSupported`);continue;}
@@ -178,6 +178,8 @@ export function createProtocolBridge({config,dataDir,fetcher=(...args)=>fetch(..
       } catch(e) {
         if(stopped)return;
         failures.push(`${key} ${String(e?.message||e)}`);
+        // Abort ⇒ 服务忙/不可达：这一个名字已记进 failures，别再挨个等满超时（纪律①）。
+        if(e?.name==='AbortError')break;
       }
     }
     if(stopped)return;
@@ -195,13 +197,19 @@ export function createProtocolBridge({config,dataDir,fetcher=(...args)=>fetch(..
     if(syncing)return syncing;
     syncing=Promise.resolve().then(async()=>{
       try {
-        await flush();
-        // 队列还压着 / 上一轮有错 ⇒ 这一轮只做消息；名字留到"可靠的那一拍"。
-        if(stopped||state.queue.length||state.lastError)return;
-        await syncChats();
-        if(stopped||state.queue.length||state.lastError)return;
-        await syncChannelNames();          // 自己吞掉全部异常，走到这里也不会抛出去
-      }catch(e){if(!stopped){state.lastError=String(e.message);save();}}
+        try {
+          await flush();
+          // 队列还压着 / 上一轮有错 ⇒ 这一拍只做消息；名字留到可靠的那一拍。
+          if(stopped||state.queue.length||state.lastError)return;
+          await syncChats();
+          if(stopped||state.queue.length||state.lastError)return;
+        }catch(e){if(!stopped){state.lastError=String(e.message);save();}}
+      }finally{
+        // 名字只是元数据，不是消息：只要没停用就**总给一拍**，队列压着也不能漏（finally）。
+        // 它的异常绝不回写 state.lastError —— 那是消息队列的闸；只留在自己的错误字段里。
+        if(!stopped)try {await syncChannelNames();}
+        catch(e) {if(!stopped){state.channelSyncError=`通道名同步异常：${String(e?.message||e)}`;try{save();}catch{}}}
+      }
     }).finally(()=>{syncing=null;});
     return syncing;
   }

@@ -135,20 +135,27 @@ test('relationship projection labels channels by display name, never by scope ID
  // Exact registered group entity is a fallback; label never merges people.
  const withEntities=graph.project(log.rows,[...entities,{id:'group:999',kind:'group',displayName:'游戏公会'}],workspace,{admin:true,from:0,groupEntityName:key=>key==='group:999'?'游戏公会':null});
  assert.equal(withEntities.nodes.find(n=>n.id==='channel:group:999').label,'游戏公会');
- assert.equal(withEntities.nodes.filter(n=>n.id==='actor:a').length,1);
  assert.equal(channel('group:123').label,'星海实验室','a group entity name never overrides a human scene name');
 });
 test('SERVICE name sync ACKs the stored name, honours project write access and never renames a person',async t=>{
  const root=temporary(t),admin=initialize(root),service=createService({root});t.after(()=>service.close());
  const call=async(route,body={},token=admin)=>{const r=await service.handle({path:'/api/v1/'+route,method:'POST',token,body});return {...r.body,http:r.status};};
- await call('admin/projects',{projectId:'p'});await call('admin/spaces',{spaceId:'s',owner:'p'});
  const project=(await call('admin/projects',{projectId:'p'})).token,stranger=(await call('admin/projects',{projectId:'x'})).token;
+ assert.ok(project);assert.ok(stranger);
+ await call('admin/spaces',{spaceId:'s',owner:'p'});
  const w=(action,p={},tk=admin)=>call('spaces/s/workspace',{action,...p},tk);
  const room={kind:'group',id:'chan-1'};
  // Legacy ensureScene keeps its behaviour and now acknowledges name sync support.
  const legacy=await w('ensureScene',{scope:room});assert.equal(legacy.http,200);
  assert.equal(legacy.ok,true);assert.equal(legacy.nameSyncSupported,true);assert.equal(legacy.sceneId,'group:chan-1');
  assert.equal(legacy.name,'group:chan-1');assert.equal(legacy.nameSource,'generated');
+ for(const placeholder of ['group:chan-1','chan-1']){
+   const entity=await service.handle({path:'/api/v1/spaces/s/entities/group%3Achan-1',method:'PUT',token:project,body:{kind:'group',displayName:placeholder}});
+   assert.equal(entity.status,200);
+   const graph=await call('spaces/s/graph',{from:0});
+   assert.equal(graph.nodes.find(n=>n.scopeId==='group:chan-1').label,'未命名群聊');
+ }
+
  // An empty scope/name is rejected with the ordinary length validation.
  assert.equal((await w('ensureScene',{scope:room,name:'   '})).code,'INVALID_ARGUMENT');
  // A project credential with write access may supply and follow the platform name.

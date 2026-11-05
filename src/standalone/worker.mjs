@@ -47,7 +47,7 @@ function graphIdentity(p){
 // can change identity, scope visibility or evidence.
 function graphLabelInputs(entities){
  const byId=new Map(entities.map(e=>[e.id,e]));
- const groupEntityName=key=>(byId.get(key)?.kind==='group'?byId.get(key).displayName:null)||null;
+ const groupEntityName=key=>{const e=byId.get(key);if(e?.kind!=='group')return null;const n=e.displayName;return n&&n!==key&&n!==String(key).slice(6)?n:null;};
  const counterpartName=key=>{
   if(!String(key).startsWith('private:'))return null;
   const ids=[...new Set(canonicalMessages(input).filter(m=>m.role==='user'&&canonicalChatKey(m.scope)===key).map(m=>m.actorId))];

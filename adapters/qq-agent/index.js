@@ -1,5 +1,5 @@
 import { standaloneStartArgs } from './service-start.mjs';
-import { createProtocolBridge, scopeOf } from './protocol-v1.mjs?v=channel-names-20261105-2';
+import { createProtocolBridge, scopeOf } from './protocol-v1.mjs?v=channel-names-20261105-3';
 import { randomUUID } from 'node:crypto';
 // memory-vec — QQ-Agent 适配层入口（**新树 `refactor/` 版** · 0.32.2）
 //
@@ -770,59 +770,115 @@ function startOutboxTimer() {
   if (typeof outboxTimer.unref === 'function') outboxTimer.unref();
 }
 
+const LOCAL_HOST = '127.0.0.1';
+/** 兜底 HTTP 的硬超时（宿主控制台可能在忙着重启，给足 3s 但仍必须有上限）。 */
+const CONSOLE_TIMEOUT_MS = 3000;
+
+/** 只接受 1..65535 的整数端口；字符串数字也认（配置里存成 "3210" 很常见）。 */
+function validPort(v) {
+  const n = typeof v === 'string' && v.trim() ? Number(v.trim()) : v;
+  return Number.isInteger(n) && n > 0 && n <= 65535 ? n : null;
+}
+
 /**
- * 宿主群名表（**只读**）。给协议桥当 `getChannelNames` 用。
- *
- * 契约（已核，别再猜第二遍）：`refactor/modules/platform/onebot.js` 的
- * `getGroupList()` → `[{id,name}]`，内部就是 `get_group_list` —— **只读**，一条 QQ 消息都不发。
- * 它**不在** `store.getChatMeta` 里：会话元数据只有条数/时间/最后一句，没有名字，
- * 所以群名只能从 adapter 取，且**绝不**从消息正文或昵称里猜。
- *
- * 五条纪律：
- *  ① **只交"观察到的"会话**：发哪些 scope 由 `ctx.store.listChats()`（宿主受信接口，返回
- *    `kind:id` 字符串键）决定，adapter 的群列表**只拿来给这些键配名字**。不过滤就是给机器人
- *    加入的每个群 `ensureScene` 造一个空场景 —— 记忆库堆一堆从没聊过的群。取不到
- *    `listChats`（没装配 / 形状不对）⇒ 返回 `null`，桥下一拍再问；绝不猜"什么都能发"。
- *  ② **惰性取实例**：每次调用现场取 `ctx.onebot`，不在 activate 期存快照。兼容层是惰性
- *    getter（`apps/server/assembly.js` 的 `extensionContextCompat`），装配晚于 activate
- *    是常态；存下来的 null 会把这个功能永久钉死到下一次热重载。
- *  ③ **绝不抛**：没接上 / 断线 / 形状不对 ⇒ 返回 `null`（含义是"这一拍答不上来"，桥既不
- *    落游标也不记错误，下一拍再问）。名字是显示元数据，坏了不能牵连消息同步；痕迹留给 diag。
- *  ④ **断线时不发 RPC**：`connected === false` 直接返回 null，别拿一个必定超时的
- *    `get_group_list` 去撞 15 秒一拍。
- *  ⑤ **只交名字，不交身份**：返回 `{scope:{kind:'group',id},name}`。ID 只用来定位场景、
- *    名字只用来显示 —— 两者都不参与任何身份合并（显示名重合 ≠ 同一个群/人）。
+ * 控制台端口：ctx.cfg.get('server.port') 优先，其次 ctx.config.get()?.server?.port。
+ * 两条都是宿主受信接口（assembly.js 的 extensionContextCompat）；取不到 ⇒ null（= 不猜）。
  */
+function consolePortOf(hostCtx) {
+  for (const reader of [hostCtx?.cfg, hostCtx?.config]) {
+    if (!reader || typeof reader.get !== 'function') continue;
+    try {
+      const port = validPort(reader.get('server.port'));
+      if (port) return port;
+    } catch { /* 读不动就当没有这个出口 */ }
+    try {
+      const port = validPort(reader.get()?.server?.port);
+      if (port) return port;
+    } catch { /* 同上 */ }
+  }
+  return null;
+}
+
+function normDir(p) {
+  const s = typeof p === 'string' ? p.trim() : '';
+  if (!s || !path.isAbsolute(s)) return '';
+  const abs = path.resolve(s);
+  return process.platform === 'win32' ? abs.toLowerCase() : abs;
+}
+
+// The host console is a fallback for QQ builds without a native group directory.
+// Verify the instance before reading names: the configured port can be reassigned.
+async function readConsoleChannelNames(hostCtx) {
+  const port = consolePortOf(hostCtx);
+  if (!port) return null;                                   // ② 没有可信端口就不猜
+  const mine = normDir(hostCtx?.dataDir);
+  if (!mine) return null;                                   // ④ 没有自己的目录就无法自证
+  const base = `http://${LOCAL_HOST}:${port}`;            // ② 只有本机
+  const getJson = async (route) => {
+    const r = await fetch(base + route, {
+      method: 'GET',
+      redirect: 'error',                                    // ② 不跟随跳转
+      signal: AbortSignal.timeout(CONSOLE_TIMEOUT_MS),      // ② 3s 硬超时
+      headers: { accept: 'application/json' }               // ② 不带 Authorization
+    });
+    if (!r || r.ok !== true) return null;
+    try { return await r.json(); } catch { return null; }
+  };
+
+  const instances = await getJson('/api/instances');
+  const self = Array.isArray(instances?.list) ? instances.list[0] : null;
+  if (!self || self.self !== true || self.app !== 'qq-agent') return null;   // ③ 不是我自己
+  const theirs = normDir(self.dataDir);
+  if (theirs !== mine) {                                    // ④ 那是另一个账号的实例
+    diag({ at: 'v1-channel-names-console-other-profile', port, want: mine, got: theirs });
+    return null;
+  }
+
+  const groups = await getJson('/api/onebot/groups');
+  if (!Array.isArray(groups?.groups)) return null;          // 形状不对 = 这一拍答不上来
+  return groups.groups;
+}
+
+// Resolve the directory lazily and name only conversations observed by this host.
 async function readHostChannelNames(hostCtx) {
   try {
-     const onebot = hostCtx?.onebot ?? null;
-     if (!onebot || typeof onebot.getGroupList !== 'function') return null;
-     if (onebot.connected === false) return null;              // 纪律④：断线不撞 RPC
-     const store = hostCtx?.store ?? null;
-     if (typeof store?.listChats !== 'function') return null;   // 纪律①：没有观察集就不猜
-     const observed = new Set();
-     for (const chat of store.listChats() || []) observed.add(String(chat));
-     const list = await onebot.getGroupList();
-     const out = [];
-     for (const g of Array.isArray(list) ? list : []) {
-       const id = String(g?.id ?? '').trim();
-       const name = String(g?.name ?? '').trim();
-       if (!id || !name) continue;                            // 没名字就别占位
-       if (!observed.has('group:' + id)) continue;         // 纪律①：没聊过的群不建场景
-       out.push({ scope: { kind: 'group', id }, name });
-     }
-     return out;
-   } catch (e) {
-     diag({ at: 'v1-channel-names-error', err: String(e?.message || e) });
-     return null;                                             // 纪律③：绝不抛
-   }
+    const store = hostCtx?.store ?? null;
+    if (typeof store?.listChats !== 'function') return null;   // 纪律①：没有观察集就不猜
+    const observed = new Set();
+    for (const chat of store.listChats() || []) observed.add(String(chat));
+
+    // 纪律②：现场取，不缓存。纪律④：原生优先，有它就绝不到兜底。
+    const onebot = hostCtx?.onebot ?? null;
+    let list;
+    if (onebot && typeof onebot.getGroupList === 'function') {
+      if (onebot.connected === false) return null;            // 纪律④：断线不撞 RPC，也不外溢到兜底
+      list = await onebot.getGroupList();
+    } else {
+      list = await readConsoleChannelNames(hostCtx);          // 兼容层恒 null ⇒ 本机控制台兜底
+    }
+
+    if (!Array.isArray(list)) return null;
+    const out = [];
+    for (const g of list) {
+      const id = String(g?.id ?? '').trim();
+      const name = String(g?.name ?? '').trim();
+      if (!id || !name) continue;                             // 没名字就别占位
+      if (name === id || name === 'group:' + id) continue;    // 纪律⑥：ID 形状的占位名不是名字
+      if (!observed.has('group:' + id)) continue;             // 纪律①：没聊过的群不建场景
+      out.push({ scope: { kind: 'group', id }, name });
+    }
+    return out;
+  } catch (e) {
+    diag({ at: 'v1-channel-names-error', err: String(e?.message || e) });
+    return null;                                              // 纪律③：绝不抛
+  }
 }
 
 export function activate(ctx = {}) {
   if (protocolV1()) {
     deactivate();
     v1Store = ctx.store;
-    // Bridge import carries a version query `?v=channel-names-20261105-2`: the host hot-reload
+    // Bridge import carries a version query `?v=channel-names-20261105-3`: the host hot-reload
     // only busts the ENTRY (`index.js` + `?t=`, `plugin-loader.js:812`), but
     // `./protocol-v1.mjs?v=...` is a DIFFERENT module URL => the bridge is re-evaluated too,
     // no full restart needed. The URL itself is still cached: change this `v=` value
