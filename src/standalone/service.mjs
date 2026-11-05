@@ -1,3 +1,4 @@
+import {unionGraphs} from '../core/graph-union.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 import { randomBytes, createHash, randomUUID } from 'node:crypto';
@@ -28,7 +29,7 @@ export function initialize(root) {
   return token;
 }
 
-export function createService({ root, engineFactory = createSpaceEngine } = {}) {
+export function createService({ root, engineFactory = createSpaceEngine, localAdmin = false } = {}) {
   root = path.resolve(root);
   const accessFile = path.join(root, 'access.json');
   if (!fs.existsSync(accessFile)) throw new Error('Initialize the standalone service first');
@@ -89,8 +90,14 @@ export function createService({ root, engineFactory = createSpaceEngine } = {}) 
     const next = (queues.get(sid) || Promise.resolve()).catch(() => {}).then(fn);
     queues.set(sid, next); return next;
   };
-  function principal(token, access) {
-    if (!token) throw new MemoryError('UNAUTHENTICATED', 'Bearer credential required', 401);
+  // localAdmin（0.32.2 起）：仅当请求来自回环地址且**没有**携带凭据时才放行为管理员。
+  // 带错凭据仍然拒绝 —— 免凭据是"没给钥匙就开门"，不是"钥匙错了也开门"。
+  // 绑定非回环地址时由 server.mjs 直接拒绝启动，避免这个开关被暴露到局域网。
+  function principal(token, access, local) {
+    if (!token) {
+      if (localAdmin && local) return { admin: true, projectId: null, anonymous: true };
+      throw new MemoryError('UNAUTHENTICATED', 'Bearer credential required', 401);
+    }
     const fingerprint = hash(token);
     if (fingerprint === access.adminHash) return { admin: true, projectId: null };
     const match = Object.entries(access.projects).find(([, p]) => p.tokenHash === fingerprint);
@@ -108,14 +115,18 @@ export function createService({ root, engineFactory = createSpaceEngine } = {}) 
     await serial(sid, async () => {
       const current = state(sid), job = current.jobs[jobId];
       if (!job || !['queued', 'running'].includes(job.status)) return;
+      if(job.pauseRequested){job.status='paused';saveJson(stateFile(sid),current);return;}
       job.status = 'running'; job.startedAt = new Date().toISOString(); saveJson(stateFile(sid), current);
       try {
-        const result = await engine(sid).call('job', { type: job.type, ...job.options });
+        const result = await engine(sid).call(job.type==='relations'?'relationBackfill':'job', { type: job.type, ...job.options,jobId:job.id });
         if (result?.ok === false) throw new MemoryError(result.code || 'JOB_FAILED', result.error || 'Job failed', 503);
-        Object.assign(job, { status: 'completed', result });
+        Object.assign(job, { status: job.type==='relations'&&!result.done?'queued':'completed', result });
+        if(job.type==='relations')job.options.offset=result.offset;
       } catch (error) { Object.assign(job, { status: 'failed', error: { code: error.code || 'JOB_FAILED', message: error.message } }); }
       job.finishedAt = new Date().toISOString();
-      const latest = state(sid); latest.jobs[jobId] = job; saveJson(stateFile(sid), latest);
+      const latest = state(sid);if(latest.jobs[jobId]?.pauseRequested&&job.status==='queued'){job.pauseRequested=true;job.status='paused';}
+      latest.jobs[jobId] = job; saveJson(stateFile(sid), latest);
+      if(job.status==='queued')setImmediate(()=>void runJob(sid,jobId));
     });
   }
   const access = read(accessFile);
@@ -123,17 +134,17 @@ export function createService({ root, engineFactory = createSpaceEngine } = {}) 
     if (['queued', 'running'].includes(job.status)) setImmediate(() => void runJob(sid, job.id));
   }
   return {
-    async handle({ method = 'GET', path: requestPath, token, body = {} }) {
+    async handle({ method = 'GET', path: requestPath, token, body = {}, local = false }) {
       if (maintenance) return {status:503,body:{ok:false,code:'MAINTENANCE',error:'Backup or import in progress; retry shortly'}};
       active++;
       try {
         if (closed) throw new MemoryError('UNAVAILABLE', 'Service is closed', 503);
-        const access = read(accessFile), who = principal(token, access);
+        const access = read(accessFile), who = principal(token, access, local);
         const url = new URL(requestPath, 'http://localhost');
         const parts = url.pathname.split('/').filter(Boolean).map(decodeURIComponent);
         if (parts[0] !== 'api' || parts[1] !== 'v1') throw new MemoryError('NOT_FOUND', 'Unknown route', 404);
         const finish = value => ({ status: 200, body: { ok: true, ...value } });
-        if (parts[2] === 'version' && method === 'GET') return finish({ protocolVersion: 1, implementationVersion: IMPLEMENTATION_VERSION, capabilities: ['spaces', 'messages', 'entities', 'memories', 'recall', 'adoptions', 'jobs', 'sharing', 'subjects', 'discoveries', 'subject-revisions','backups','scenes','account-links','person-revisions'] });
+        if (parts[2] === 'version' && method === 'GET') return finish({ protocolVersion: 1, implementationVersion: IMPLEMENTATION_VERSION, capabilities: ['spaces', 'messages', 'entities', 'memories', 'recall', 'adoptions', 'jobs', 'sharing', 'subjects', 'discoveries', 'subject-revisions','backups','scenes','account-links','person-revisions','relationship-graph','relationship-revisions','relation-backfill'] });
         if (parts[2] === 'admin') {
           if (!who.admin) throw new MemoryError('FORBIDDEN', 'Administrator credential required', 403);
           if (parts[3] === 'backups') {
@@ -210,6 +221,42 @@ export function createService({ root, engineFactory = createSpaceEngine } = {}) 
         }
         if (parts[2] !== 'spaces') throw new MemoryError('NOT_FOUND', 'Unknown route', 404);
         const sid = id(parts[3]), operation = parts[4];
+        if(operation==='graph'&&method==='POST') {
+          if(!Array.isArray(body.sharedSpaceIds??[])||(body.sharedSpaceIds||[]).length>20)throw new MemoryError('INVALID_ARGUMENT','sharedSpaceIds must be an array (maximum 20)');
+          const sources=[...new Set([sid,...(body.sharedSpaceIds||[])])];sources.forEach(s=>permit(access,who,id(s)));
+          const results=await Promise.all(sources.map(async source=>({source,result:await invoke(source,'graph',{...body,admin:who.admin})})));
+          const fresh=read(accessFile,null);sources.forEach(s=>permit(fresh,principal(token,fresh,local),s));
+          return finish({...unionGraphs(results),sources:results.map(r=>({spaceId:r.source,stats:r.result.stats})),range:results[0]?.result.range});
+        }
+        if(operation==='relationships'&&method==='POST'){
+          permit(access,who,sid,true);if(!who.admin)throw new MemoryError('FORBIDDEN','Relationship maintenance requires administration',403);
+          return finish(await serial(sid,()=>invoke(sid,'relationship',body)));
+        }
+        if(operation==='graph-identity'&&method==='POST'){
+          permit(access,who,sid,true);if(!who.admin)throw new MemoryError('FORBIDDEN','Identity verification requires administration',403);
+          return finish(await serial(sid,()=>invoke(sid,'graphIdentity',body)));
+        }
+        if(operation==='graph-evidence'&&method==='POST'){
+          permit(access,who,sid);return finish(await invoke(sid,'graphEvidence',{...body,admin:who.admin}));
+        }
+        if(operation==='graph-memories'&&method==='POST'){
+          permit(access,who,sid);if(!who.admin)throw new MemoryError('FORBIDDEN','Memory expansion requires administration',403);
+          return finish(await invoke(sid,'graphMemories',{...body,admin:true}));
+        }
+        if(operation==='relation-backfill'&&method==='POST'){
+          permit(access,who,sid,true);if(!who.admin)throw new MemoryError('FORBIDDEN','Historical backfill requires administration',403);
+          if(body.action==='preview')return finish(await invoke(sid,'relationBackfill',{...body,preview:true}));
+          if(['pause','resume'].includes(body.action)){
+            const current=state(sid),job=current.jobs[body.jobId];if(!job||job.type!=='relations')throw new MemoryError('NOT_FOUND','Backfill job not found',404);
+            if(body.action==='pause')job.pauseRequested=true;else{if(!['paused','failed'].includes(job.status))throw new MemoryError('INVALID_JOB','Only paused or failed jobs can resume');job.pauseRequested=false;job.status='queued';delete job.error;}
+            saveJson(stateFile(sid),current);if(body.action==='resume')setImmediate(()=>void runJob(sid,job.id));return finish({job});
+          }
+          if(body.action==='start'){
+            const preview=await invoke(sid,'relationBackfill',{...body,preview:true});if(!preview.modelConfigured)throw new MemoryError('LLM_UNCONFIGURED','Configure a model before starting historical backfill');
+            const current=state(sid),job={id:randomUUID(),type:'relations',options:{from:body.from,to:body.to,scope:body.scope,snapshotCount:preview.total,offset:0},status:'queued',createdAt:new Date().toISOString()};current.jobs[job.id]=job;saveJson(stateFile(sid),current);setImmediate(()=>void runJob(sid,job.id));return finish({job});
+          }
+          throw new MemoryError('INVALID_OPERATION','Use preview/start/pause/resume');
+        }
         if (operation === 'workspace' && method === 'POST') {
           permit(access,who,sid,!['query','scenes'].includes(body.action));
           if (['state','scene','link','retract','preview'].includes(body.action) && !who.admin) throw new MemoryError('FORBIDDEN','Administrator credential required',403);
@@ -242,7 +289,7 @@ export function createService({ root, engineFactory = createSpaceEngine } = {}) 
           for (const source of sources) permit(access, who, source);
           const results = await Promise.all(sources.map(async source => ({ source, result: await invoke(source, 'recall', { ...body, sharedSpaceIds: [] }) })));
           // Permissions may have been revoked while an embedding call was in flight.
-          const latestAccess = read(accessFile); const latestWho = principal(token, latestAccess);
+          const latestAccess = read(accessFile); const latestWho = principal(token, latestAccess, local);
           for (const source of sources) permit(latestAccess, latestWho, source);
           let items = results.flatMap(({source, result}) => (result.items || []).map(item => ({ ...item, id: `${source}:${item.id}`, localId: item.id, spaceId: source })));
           if(body.purpose==='automatic') {
@@ -257,7 +304,7 @@ export function createService({ root, engineFactory = createSpaceEngine } = {}) 
             current.receipts[receiptId] = { projectId: who.projectId, expiresAt: Date.now() + 60000, items, sources: results.map(({source,result}) => ({ spaceId: source, receiptId: result.receiptId })), adopted: [] };
             saveJson(stateFile(sid), current);
           });
-          const finalAccess = read(accessFile), finalWho = principal(token, finalAccess);
+          const finalAccess = read(accessFile), finalWho = principal(token, finalAccess, local);
           for (const source of sources) permit(finalAccess, finalWho, source);
           const block=body.purpose==='automatic'?(items.length?'<!--mv-inject-->\n'+items.map(i=>`[${i.spaceId}]【${i.layer}】${i.text}`).join('\n'):''):results.map(({source,result}) => result.block ? `[${source}]\n${result.block}` : '').filter(Boolean).join('\n\n');
           return finish({ items, block, receiptId, actualMode: Object.fromEntries(results.map(({source,result}) => [source,result.actualMode])), degraded:Object.fromEntries(results.filter(({result})=>result.degraded).map(({source,result})=>[source,result.degraded])), sources });
@@ -266,7 +313,7 @@ export function createService({ root, engineFactory = createSpaceEngine } = {}) 
           const current = state(sid), receipt = current.receipts[body.receiptId];
           if (!receipt || receipt.expiresAt <= Date.now()) throw new MemoryError('INVALID_RECEIPT', 'Receipt missing or expired', 409);
           if (receipt.projectId !== who.projectId) throw new MemoryError('FORBIDDEN', 'Receipt belongs to another project', 403);
-          const fresh = read(accessFile), actor = principal(token, fresh);
+          const fresh = read(accessFile), actor = principal(token, fresh, local);
           for (const source of receipt.sources) permit(fresh, actor, source.spaceId);
           const selected = body.itemIds ?? receipt.items.map(item => item.id);
           if (!Array.isArray(selected) || selected.some(itemId => !receipt.items.some(item => item.id === itemId))) throw new MemoryError('INVALID_ARGUMENT', 'Unknown item in receipt');

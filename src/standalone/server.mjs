@@ -3,6 +3,16 @@ import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { createService } from './service.mjs';
 
+const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1']);
+const LOOPBACK_ADDR = address => {
+  const value = String(address || '').replace(/^::ffff:/, '');
+  return value === '127.0.0.1' || value === '::1';
+};
+/** 免凭据模式只能挂在回环地址上；否则开关等于把管理面交给局域网。 */
+export function isLoopbackHost(host) {
+  return LOOPBACK_HOSTS.has(String(host || '').toLowerCase());
+}
+
 export function createStandaloneServer(options) {
   if(options.embedOrigins!=null&&!Array.isArray(options.embedOrigins))throw Error('Embedding origins must be an array');
   const embedOrigins=[...new Set((options.embedOrigins||[]).map(value=>{
@@ -10,8 +20,9 @@ export function createStandaloneServer(options) {
     if(!['http:','https:'].includes(url.protocol)||url.username||url.password||url.pathname!=='/'||url.search||url.hash)throw Error('Invalid embedding origin');
     return url.origin;
   }))];
-  const service = createService(options);
+  const service = createService({...options, localAdmin: options.localAdmin === true});
   const server = http.createServer(async (req, res) => {
+    const local = LOOPBACK_ADDR(req.socket.remoteAddress);
     const send = (status, body) => { res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }); res.end(JSON.stringify(body)); };
     try {
       const url = new URL(req.url, 'http://localhost');
@@ -19,10 +30,15 @@ export function createStandaloneServer(options) {
         if(embedOrigins.includes(req.headers.origin)){res.setHeader('access-control-allow-origin',req.headers.origin);res.setHeader('vary','Origin');}
         return send(200, { status: 'ok', service: 'vec-memory', protocolVersion: 1 });
       }
-      if (['/', '/standalone.html'].includes(url.pathname) && req.method === 'GET') {
+      // Static pages live on a fixed allowlist so no arbitrary file is reachable.
+      const ASSETS=['galaxy-page.mjs','galaxy-renderer.mjs','galaxy-layout.mjs','galaxy.css','vendor/three/three.module.js','vendor/three/three.core.js','vendor/three/OrbitControls.js'];
+      const asset=ASSETS.find(a=>url.pathname==='/'+a);
+      if(asset&&req.method==='GET'){res.writeHead(200,{'content-type':asset.endsWith('.css')?'text/css; charset=utf-8':'text/javascript; charset=utf-8','cache-control':'no-cache'});res.end(fs.readFileSync(fileURLToPath(new URL('../../web/'+asset,import.meta.url))));return;}
+      const PAGES = {'/': 'standalone.html', '/standalone.html': 'standalone.html', '/standalone-raw.html': 'standalone-raw.html'};
+      if (PAGES[url.pathname] && req.method === 'GET') {
         const ancestors=embedOrigins.length?"'self' "+embedOrigins.join(' '):"'none'";
-        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'content-security-policy': "default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-ancestors "+ancestors });
-        res.end(fs.readFileSync(fileURLToPath(new URL('../../web/standalone.html', import.meta.url)))); return;
+        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'content-security-policy': "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors "+ancestors });
+        res.end(fs.readFileSync(fileURLToPath(new URL('../../web/' + PAGES[url.pathname], import.meta.url)))); return;
       }
       if (req.headers.origin) {
         const expected = `${req.headers['x-forwarded-proto'] === 'https' ? 'https' : 'http'}://${req.headers.host}`;
@@ -31,12 +47,12 @@ export function createStandaloneServer(options) {
       let body = {};
       if (req.method === 'POST' && url.pathname === '/api/v1/admin/backups' && String(req.headers['content-type']).startsWith('application/octet-stream')) {
         const token = /^Bearer (\S+)$/i.exec(req.headers.authorization || '')?.[1];
-        const auth = await service.handle({method:'GET',path:'/api/v1/admin/spaces',token});
+        const auth = await service.handle({method:'GET',path:'/api/v1/admin/spaces',token,local});
         if (auth.status !== 200) return send(auth.status,auth.body);
         const chunks=[];let size=0;
         for await (const chunk of req) {size+=chunk.length;if(size>1024*1024*1024) return send(413,{ok:false,code:'BODY_TOO_LARGE',error:'Maximum backup size is 1 GiB'});chunks.push(chunk);}
         // Passwords travel in a request header, never in a URL or access log.
-        const result=await service.handle({method:'POST',path:url.pathname,token,body:{upload:Buffer.concat(chunks),password:req.headers['x-backup-password']?Buffer.from(req.headers['x-backup-password'],'base64').toString('utf8'):undefined}});
+        const result=await service.handle({method:'POST',path:url.pathname,token,local,body:{upload:Buffer.concat(chunks),password:req.headers['x-backup-password']?Buffer.from(req.headers['x-backup-password'],'base64').toString('utf8'):undefined}});
         return send(result.status,result.body);
       }
       if (['POST', 'PUT', 'PATCH'].includes(req.method)) {
@@ -47,7 +63,7 @@ export function createStandaloneServer(options) {
         if (!body || typeof body !== 'object' || Array.isArray(body)) return send(400, { ok: false, code: 'INVALID_ARGUMENT', error: 'JSON object required' });
       }
       const token = /^Bearer (\S+)$/i.exec(req.headers.authorization || '')?.[1];
-      const result = await service.handle({ method: req.method, path: req.url, body, token });
+      const result = await service.handle({ method: req.method, path: req.url, body, token, local });
       if (result.binary) {res.writeHead(result.status,{'content-type':'application/octet-stream','content-disposition':`attachment; filename="${result.filename}"`,'cache-control':'no-store'});return res.end(result.binary);}
       send(result.status, result.body);
     } catch { if (!res.headersSent) send(500, { ok: false, code: 'INTERNAL_ERROR', error: 'Internal service error' }); else res.end(); }

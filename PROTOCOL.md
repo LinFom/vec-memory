@@ -2,7 +2,7 @@
 
 正式对接契约为 [独立协议 v1](docs/standalone-protocol.md)，机器可读版本见 [OpenAPI](openapi/standalone-v1.json)。
 
-业务前缀 `/api/v1`；所有业务与管理请求均要求 Bearer 凭据。接入者无需提供 QQ-Agent 目录、配置或存档格式。
+业务前缀 `/api/v1`；业务与管理请求按凭据判定权限。本机回环地址上**未携带**凭据的请求自 0.32.2 起按管理员处理（默认免凭据，便于本机单人使用），携带了无效凭据仍返回 401；非回环来源一律要求 Bearer。要强制鉴权，用 `--require-auth` 启动服务（见 [0.32.2 说明](docs/console-embedding-0.32.2.md)）。接入者无需提供 QQ-Agent 目录、配置或存档格式。
 
 场合 `scope.kind` 支持 `group/private/game/channel`，`scope.id` 是渠道稳定标识，可包含冒号。迁移保留原 `game:...` 等渠道键；内部既有不透明场合标签保持兼容，不改写历史事实键。原料、来源引用和场景绑定仍按完整渠道键隔离。
 
@@ -26,3 +26,7 @@
 账号绑定使用 workspace `action:link`，管理员提供已登记的 `a/b/confirmed:true`；解绑另传 `active:false/expectedRev`。稳定 ID 保留，昵称不作自动绑定证据，绑定不扩大空间或场合权限。`recall` 省略 `sceneId` 时只自动注入当前场景；显式指定其他场景时仍按 shareable 过滤。
 
 管理员备份接口：`POST /api/v1/admin/backups`（完整服务需至少 8 位 password，指定 spaceId 为可携带空间备份），`GET .../backups/{backupId}` 下载；二进制上传到集合入口用 `application/octet-stream`，`X-Backup-Password` 为密码 UTF-8 的 base64，最大 1 GiB；普通 JSON 仍限 4 MiB。`POST .../{backupId}/preview` 验证密码/版本/校验和，`POST .../{backupId}/restore` 必须带预览的 `expectedChecksum`。完整恢复生成新旁置目录；空间恢复提供 spaceId、owner，替换必须 replace:true 并保留旧目录。备份期间新请求返回 `503 MAINTENANCE`，客户端保留原 operationId/messageId 后重试。恢复清空收据并暂停自动任务，导入不自动继承共享授权。
+
+## 0.33：关系星图扩展
+
+新增 graph、graph-evidence、graph-memories、relationships、graph-identity、relation-backfill。它们复用 v1 凭据、空间权限与统一错误。项目图查询必须给 scope，显式 sharedSpaceIds 联合读取并在返回前复核授权；维护与全场合展开只开放管理端。本机回环免凭据模式沿用现有选择，项目凭据不因此获得管理权。详见 [关系星图说明](docs/relationship-galaxy-0.33.0.md) 和 [OpenAPI](openapi/standalone-v1.json)。

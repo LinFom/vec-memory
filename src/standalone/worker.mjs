@@ -1,3 +1,4 @@
+import {graphSimilarity} from '../core/graph-similarity.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 import {parentPort,workerData} from 'node:worker_threads';
@@ -20,6 +21,9 @@ import {SceneMemory} from '../core/scene-memory.mjs';
 import {mentionedPeople} from '../core/person-targets.mjs';
 import {keywordImpressions} from '../core/keyword-impressions.mjs';
 import {resolveProfilePolicy} from '../core/visibility.mjs';
+import {openRelationshipGraph} from '../core/relationship-graph.mjs';
+import {RELATION_PROMPT} from '../core/relationship-graph.mjs';
+import {callLlmOpenAI} from '../core/backend.mjs';
 const root=path.resolve(workerData.root),input=path.join(root,'input'),legacy=path.join(root,'legacy','data');
 fs.mkdirSync(input,{recursive:true});fs.mkdirSync(legacy,{recursive:true});
 if(!fs.existsSync(path.join(input,'source.json'))) fs.writeFileSync(path.join(input,'source.json'),JSON.stringify({version:1,kind:'canonical'}));
@@ -28,6 +32,56 @@ bindCanonicalMessages(input,()=>{log.assertReadable();return log.rows.map(r=>r.d
 const memoryOperations=new DurableLog(path.join(input,'memory-operations.jsonl'),()=>{});
 const corrections=new DurableLog(path.join(input,'correction-intents.jsonl'),()=>{});
 const workspace=new SceneMemory(input);let paused=false;
+const relationshipGraph=openRelationshipGraph(input);
+const graphIdentities=new DurableLog(path.join(input,'graph-identities.jsonl'),()=>{});
+function graphIdentity(p){
+ const operationId=requireText(p.operationId,'operationId',200),old=graphIdentities.replay(operationId,p);if(old)return old;
+ const nodeId=requireText(p.nodeId,'nodeId',400),platform=requireText(p.platform,'platform',80).toLowerCase(),stableId=requireText(p.stableId,'stableId',200);
+ if(!/^[a-z][a-z0-9_-]*$/.test(platform)||!nodeId.startsWith('actor:')&&!nodeId.startsWith('channel:'))throw new MemoryError('INVALID_ARGUMENT','Use an exact platform and account/channel ID');
+ return graphIdentities.append(operationId,p,{nodeId,identity:p.revoke?null:JSON.stringify([platform,stableId])},{ok:true});
+}
+async function graph(p){log.assertReadable();const rt=await getRuntime();await ensureIdentity(rt);const result=relationshipGraph.project(log.rows,canonicalEntities(input),workspace.state(),{...p,resolveAccount:id=>rt.normalizer.resolveKnown(id)?.id||id,lookupMessage:id=>log.operations.get(digest(id))?.data.message});graphIdentities.assertReadable();const proofs=new Map(graphIdentities.rows.map(r=>[r.data.nodeId,r.data.identity]));for(const n of result.nodes)n.verifiedIdentities=[...new Set((n.accounts?.map(id=>proofs.get('actor:'+id))||[proofs.get(n.id)]).filter(Boolean))];if(p.includeSimilarity&&p.admin){const all=await graphMemories({admin:true});result.edges.push(...graphSimilarity(result.nodes,all.memories,id=>rt.normalizer.resolveKnown(id)?.id||id));}
+ if(p.includeMemories&&p.admin){const all=await graphMemories({admin:true});for(const m of all.memories){const owner=result.nodes.find(n=>n.accounts?.includes(m.actorId)||n.scope&&canonicalChatKey(n.scope)===m.chatKey);if(!owner)continue;const id='memory:'+m.id;result.nodes.push({id,type:'memory',label:m.text?.slice(0,50)||m.kind,degree:1,activity:0,memory:m});result.edges.push({id:'edge:'+id,source:owner.id,target:id,type:'memory',count:1});}}return result;}
+async function relationship(p){log.assertReadable();return relationshipGraph.revise(p,{messages:log.rows.map(r=>r.data.message),entities:canonicalEntities(input)});}
+function graphEvidence(p){
+ log.assertReadable();if(!Array.isArray(p.ids)||p.ids.length>30)throw new MemoryError('INVALID_ARGUMENT','Up to 30 message IDs required');
+ const scope=p.admin?null:canonicalChatKey(p.scope),messages=[];
+ for(const id of p.ids){const m=log.operations.get(digest(id))?.data.message;if(m&&(!scope||canonicalChatKey(m.scope)===scope))messages.push(m);}
+ return {ok:true,messages};
+}
+async function graphMemories(p){
+ if(!p.admin)throw new MemoryError('FORBIDDEN','Memory expansion requires management access',403);
+ const rt=await getRuntime();await ensureIdentity(rt);const manual=memoryCoreOf(rt,factStoreOf(rt)).manual,records=manual.records();
+ const entities=canonicalEntities(input),byLabel=new Map(entities.map(e=>[rt.normalizer.resolveKnown(e.id)?.label,e.id]));
+ const filtered=records.filter(r=>(!p.actorIds?.length||p.actorIds.includes(byLabel.get(r.speaker)))&&(!p.scope||r.scope===rt.normalizer.scopeLabel(canonicalChatKey(p.scope))));
+ const memories=manual.items(filtered).filter(i=>!i.hidden).map(i=>({id:digest([i.key,i.itemKey]),actorId:byLabel.get(filtered.find(r=>r.key===i.key)?.speaker),kind:i.kind,text:i.value||i.text||'',sourceRefs:i.sourceRefs}));
+ for(const e of Object.values(workspace.state().entries))if(!p.actorIds?.length&&e.status!=='retracted'&&(!p.scope||workspace.state().scenes[e.sceneId]?.bindings?.some(b=>canonicalChatKey(b)===canonicalChatKey(p.scope))))memories.push({id:e.id,kind:e.kind,text:e.text,chatKey:workspace.state().scenes[e.sceneId]?.bindings?.[0]?canonicalChatKey(workspace.state().scenes[e.sceneId].bindings[0]):null});
+ for(const e of readEventRows({libDir:rt.dir}).rows||[])if(!e.retiredAt&&(!p.scope||e.chatKey===canonicalChatKey(p.scope))&&(!p.actorIds?.length||p.actorIds.some(id=>(e.people||[]).includes(rt.normalizer.resolveKnown(id)?.label))))memories.push({id:e.id,kind:'event',text:e.summary||e.text||'',chatKey:e.chatKey});
+ return {ok:true,memories};
+}
+function backfillMessages(p){
+ const from=Number(p.from),to=Number(p.to);if(!Number.isFinite(from)||!Number.isFinite(to)||from>to||!p.scope)throw new MemoryError('INVALID_ARGUMENT','Explicit scope/from/to required');
+ const chat=canonicalChatKey(p.scope);log.assertReadable();return log.rows.map(r=>r.data.message).filter(m=>m.role==='user'&&canonicalChatKey(m.scope)===chat&&m.timestamp>=from&&m.timestamp<=to);
+}
+async function relationBackfill(p){
+ const all=backfillMessages(p).slice(0,p.snapshotCount??Infinity),offset=Number(p.offset||0),messages=all.slice(offset,offset+50),total=all.length;
+ if(p.preview)return {ok:true,total,batches:Math.ceil(total/50),modelConfigured:!!(configuredSettings().llmBaseURL&&configuredSettings().llmModel)};
+ if(!messages.length)return {ok:true,done:true,offset,total};
+ const cfg=configuredSettings();
+ const entities=canonicalEntities(input),ids=new Set(messages.flatMap(m=>[m.actorId,...(m.mentions||[])]));
+ const batchId=digest([p.jobId||'legacy',messages.map(m=>m.messageId)]),pendingFile=path.join(input,'relation-backfill-results',batchId+'.json');
+ let parsed;
+ if(fs.existsSync(pendingFile))parsed=JSON.parse(fs.readFileSync(pendingFile,'utf8'));
+ else {
+ if(!cfg.llmBaseURL||!cfg.llmModel)throw new MemoryError('LLM_UNCONFIGURED','Configure a model before starting relation backfill');
+ const raw=await callLlmOpenAI({baseURL:cfg.llmBaseURL,apiKey:cfg.llmApiKey,model:cfg.llmModel,system:'仅返回JSON对象。'+RELATION_PROMPT,user:JSON.stringify({accounts:entities.filter(e=>ids.has(e.id)).map(e=>({id:e.id,name:e.displayName})),messages}),temperature:.1,maxTokens:2500,timeoutMs:60000});
+ try{parsed=JSON.parse(String(raw).replace(/^```(?:json)?\s*|\s*```$/g,''));}catch{throw new MemoryError('MODEL_OUTPUT_INVALID','Invalid relationship JSON',502);}
+  if(!parsed||typeof parsed!=='object'||!Array.isArray(parsed.relations||[])||(parsed.relations||[]).length>100)throw new MemoryError('MODEL_OUTPUT_INVALID','Invalid relationship candidates',502);
+  atomic(pendingFile,parsed);
+ }
+ const result=relationshipGraph.extract(parsed.relations||[],{rows:messages,entities,windowId:'backfill:'+digest(messages.map(m=>m.messageId))});
+ return {ok:true,...result,offset:offset+messages.length,total,done:offset+messages.length>=total};
+}
 const appliedCorrections=new Set();
 function configuredSettings(){const file=path.join(root,'settings.json');return {...DEFAULT_SETTINGS,...workerData.settings,...(fs.existsSync(file)?JSON.parse(fs.readFileSync(file,'utf8')):{})};}
 // Background work is serialized by this worker rather than by legacy global timers.
@@ -242,7 +296,7 @@ async function recoverCorrections(){
    appliedCorrections.add(d.request.operationId);
  }
 }
-const operations={ingest,entity,remember,discover,subjects,subject,subjectRevision,recall,adoption,job,status,workspace:workspaceOp,person,quiesce:async()=>{paused=true;return {ok:true};},audit:async()=>{log.assertReadable();memoryOperations.assertReadable();workspace.state();const rt=await getRuntime();if(factStoreOf(rt).readOnlyReason)throw new MemoryError('STORAGE_UNAVAILABLE','Fact store damaged',503);memoryCoreOf(rt,factStoreOf(rt)).manual.items();openSubjectStore(rt.dir).snapshot();const lineage=readLineage(rt.dir);if(!lineage.ok)throw new MemoryError('STORAGE_UNAVAILABLE',lineage.error,503);return {ok:true};}};
+const operations={graphEvidence,graphIdentity,graph,relationship,graphMemories,relationBackfill,ingest,entity,remember,discover,subjects,subject,subjectRevision,recall,adoption,job,status,workspace:workspaceOp,person,quiesce:async()=>{paused=true;return {ok:true};},audit:async()=>{relationshipGraph.revisions.assertReadable();graphIdentities.assertReadable();log.assertReadable();memoryOperations.assertReadable();workspace.state();const rt=await getRuntime();if(factStoreOf(rt).readOnlyReason)throw new MemoryError('STORAGE_UNAVAILABLE','Fact store damaged',503);memoryCoreOf(rt,factStoreOf(rt)).manual.items();openSubjectStore(rt.dir).snapshot();const lineage=readLineage(rt.dir);if(!lineage.ok)throw new MemoryError('STORAGE_UNAVAILABLE',lineage.error,503);return {ok:true};}};
 let chain=Promise.resolve();parentPort.on('message',m=>{chain=chain.then(async()=>{try{await recoverCorrections();if(!operations[m.operation])throw new MemoryError('INVALID_OPERATION','Unknown engine operation');parentPort.postMessage({id:m.id,result:await operations[m.operation](m.payload||{})});}catch(e){parentPort.postMessage({id:m.id,error:{message:e.message,code:e.code||'ENGINE_FAILED',status:e.status||500,result:e.result}});}});});
 
 const backgroundStatus={lastConsolidateAt:0,lastIndexAt:0,lastError:null};

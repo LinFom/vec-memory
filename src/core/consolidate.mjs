@@ -1,3 +1,5 @@
+import {openRelationshipGraph,RELATION_PROMPT} from './relationship-graph.mjs';
+import {canonicalEntities} from './input-source.mjs';
 import { isCanonicalSource, canonicalEvidence } from './input-source.mjs';
 import { openSubjectStore } from './subjects.mjs';
 import { DISCOVERY_PROMPT, prepareDiscoveries, applyDiscoveries } from './thing-discovery.mjs';
@@ -502,7 +504,8 @@ function normalizeConsolidateJson(obj, genericIds = false) {
   }
   if (Object.hasOwn(obj,'observations') && !Array.isArray(obj.observations)) return {ok:false,error:'observations must be an array',events:[],people:[]};
   if (Object.hasOwn(obj,'discoveries') && !Array.isArray(obj.discoveries)) return {ok:false,error:'discoveries must be an array',events:[],people:[]};
-  return { ok: true, events, people, ...(Array.isArray(obj.observations) ? {observations:obj.observations} : {}), ...(Array.isArray(obj.discoveries) ? {discoveries:obj.discoveries} : {}) };
+  if(Object.hasOwn(obj,'relations')&&!Array.isArray(obj.relations))return {ok:false,error:'relations must be an array',events:[],people:[]};
+  return { ok: true, events, people, ...(Array.isArray(obj.relations)?{relations:obj.relations}:{}), ...(Array.isArray(obj.observations) ? {observations:obj.observations} : {}), ...(Array.isArray(obj.discoveries) ? {discoveries:obj.discoveries} : {}) };
 }
 
 // ── 落库：事件 ───────────────────────────────────────────────────────────
@@ -1526,6 +1529,10 @@ async function runConsolidateOnce(deps = {}, opts = {}) {
         prompt.system += '\n'+DISCOVERY_PROMPT;
         prompt.user += '\n新事物发现可使用的消息与引用：\n'+win.rows.filter(r=>!r.self&&(!r.role||r.role==='user')).map(r=>JSON.stringify({evidenceId:String(r.id),text:String(r.text||'').slice(0,2000)})).join('\n');
       }
+      if(!resume&&isCanonicalSource(sourceRoot)){
+        prompt.system+='\n'+RELATION_PROMPT;
+        prompt.user+='\n关系提取登记账号：'+JSON.stringify(canonicalEntities(sourceRoot).filter(e=>['person','self'].includes(e.kind)).filter(e=>windowPeople(win,normalizer).includes(e.id)).map(e=>({id:e.id,name:e.displayName})))+'\n关系证据：'+JSON.stringify(win.rows.map(r=>({id:r.id,actorId:r.speakerId,text:r.text})));
+      }
       raw = resume ? JSON.stringify(resume.parsed) : await callLlm(prompt);
     } catch (err) {
       const msg = `LLM 调用失败：${String(err?.message ?? err)}`;
@@ -1592,6 +1599,12 @@ async function runConsolidateOnce(deps = {}, opts = {}) {
       const discoveryRequests = pending[win.chatKey]?.discoveryRequests || [];
       if (parsed.discoveries?.length && !discoveryRequests.length) throw new Error('Pending discoveries have no prepared requests');
       if (discoveryRequests.length) applyDiscoveries(openSubjectStore(libDir),discoveryRequests,win,normalizer.scopeLabel(win.chatKey));
+      if(parsed.relations?.length&&isCanonicalSource(sourceRoot)){
+        const frozenIds=new Set(win.rows.map(r=>String(r.id)));
+        const relationRows=resume?evidence.rows.filter(r=>frozenIds.has(String(r.id))):win.rows;
+        if(resume&&relationRows.length!==frozenIds.size)throw new Error('Frozen relationship evidence is unavailable');
+        openRelationshipGraph(sourceRoot).extract(parsed.relations,{rows:relationRows,entities:canonicalEntities(sourceRoot),windowId:eventIdOf(win)});
+      }
       advanceCursor({ libDir, state, chatKey: win.chatKey, toTs: win.toTs });
       delete pending[win.chatKey];
       try { savePending(libDir, pending); } catch (e) { say('warn', `已提交窗口的重试记录清理失败：${e.message}`); }

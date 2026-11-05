@@ -128,6 +128,8 @@ def main():
             '# vec-memory ' + version + ' 分享包\n\n'
             '直接使用：解压 vec-memory-' + version + '.zip，先阅读“安装与接入手册.md”。\n'
             'Windows 用户依次运行 install.cmd、init.cmd（仅新库）、start.cmd。\n'
+            '本机默认免凭据：服务只监听回环地址，浏览器打开 /standalone.html 直接可用管理页；\n'
+            '要恢复“必须给凭据”，用 --require-auth 启动（管理员凭据在 init 时打印过一次，也可在数据目录重置）。\n'
             '需要自行安装 Node.js >=22.5，首次 npm ci 需要联网。本包不含 Node、依赖、模型或个人记忆。\n'
             '升级已有实例时保留原数据目录，不要重新初始化；先做备份。\n\n'
             'QQ-Agent：另外的适配器压缩包只包含插件，必须先启动服务，再按手册配置项目凭据与空间。\n\n'

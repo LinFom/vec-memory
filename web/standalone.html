@@ -1,59 +1,1035 @@
-<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>独立记忆库</title>
-<style>body{font:16px system-ui;background:#f5f6f8;color:#243047;max-width:960px;margin:32px auto;padding:0 20px}section{background:white;border:1px solid #dbe0e8;border-radius:12px;padding:20px;margin:18px 0}input,textarea,select,button{font:inherit;padding:9px;margin:5px;border:1px solid #aab5c7;border-radius:6px}textarea{display:block;width:90%;height:140px}button{background:#203f78;color:white;cursor:pointer}pre{white-space:pre-wrap;overflow-wrap:anywhere}label{display:block}h1{font-size:26px}</style>
-<h1>独立混合记忆库</h1><p>管理项目、记忆空间和授权。凭据仅保留在本页内存，关闭页面后清除。</p>
-<section><label>管理员凭据 <input id="token" type="password" autocomplete="off"></label><button id="load">连接并刷新</button><pre id="spaces"></pre></section>
-<section><h2>项目与空间</h2><input id="project" placeholder="项目 ID"><button id="projectCreate">创建项目</button><pre id="credential"></pre><input id="space" placeholder="空间 ID"><input id="owner" placeholder="所属项目 ID"><button id="spaceCreate">创建空间</button><label>允许读取此空间的项目（逗号分隔，留空撤销全部）<input id="readers"></label><button id="grant">保存共享授权</button></section>
-<section><h2>模型与记忆</h2><p>以下操作使用上方空间 ID。模型密钥不会通过读取接口返回。</p><button id="settingsLoad">读取设置</button><textarea id="settings" aria-label="模型设置 JSON" placeholder='{"embedBaseURL":"http://localhost:8081/v1","embedModel":"your-model"}'></textarea><button id="settingsSave">保存设置</button><button id="status">记忆状态</button><button id="consolidate">整理记忆</button><button id="index">构建索引</button><button id="jobs">任务进度</button><input id="query" placeholder="搜索记忆"><button id="recall">检索</button></section><section><h2>人工记忆</h2><p>人工声明会明确标记来源。先登记主体，再写入具体场合的记忆。</p><input id="entityId" placeholder="主体 ID"><input id="entityName" placeholder="显示名称"><button id="entitySave">登记主体</button><textarea id="manual" aria-label="人工记忆 JSON" placeholder='{"operationId":"unique-operation-id","actorId":"alice","kind":"preference","text":"喜欢绿茶","scope":{"kind":"private","id":"alice"}}'></textarea><button id="manualSave">写入人工声明</button></section><pre id="result" role="status"></pre>
-<section><h2>新事物与人工纠正</h2><p>选择上方空间及下方场合。待确认候选有来源，但尚无明确解释；来源观察也不表示客观定论。纠正和撤回保留历史。</p><label>场合 <select id="scopeKind"><option value="group">群组</option><option value="private">私聊</option><option value="game">游戏房间</option><option value="channel">频道</option></select><input id="scopeId" placeholder="场合 ID"></label><input id="subjectQuery" placeholder="名称或别名"><button id="subjectsLoad">查找条目</button><select id="subjectChoice" aria-label="新事物条目"></select><button id="subjectLoad">查看来源与历史</button><pre id="subjectDetail"></pre><label>要修改的观察 <select id="observationChoice"></select></label><textarea id="correction" aria-label="纠正后的内容" placeholder="纠正后的内容"></textarea><input id="correctionReason" placeholder="修改原因"><button id="subjectCorrect">保存人工纠正</button><button id="subjectRetract">撤回该观察</button></section>
-<section><h2>人物档案与印象</h2><p>选择当前空间和场合，再选择账号。档案优先展示；绑定只汇总当前场合中可见的记录。</p><datalist id="accountOptions"></datalist><input list="accountOptions" id="personId" placeholder="平台:账号 ID"><button id="personLoad">查看人物</button><label><input id="personAllScopes" type="checkbox">管理视图：汇总此人在本空间各场合的档案，保留来源</label><div id="profileCards" style="display:flex;flex-wrap:wrap;gap:8px"></div><div id="personImpressions"></div><select id="personItem"></select><input id="personValue" placeholder="纠正后的内容"><input id="personReason" placeholder="修改原因"><button id="personPreview">预览关联影响</button><pre id="personImpact"></pre><button id="personReplace">纠正</button><button id="personHide">撤回</button><button id="personRestore">恢复原值</button><label>跨平台账号关联 <input list="accountOptions" id="accountA" placeholder="qq:稳定账号"><input list="accountOptions" id="accountB" placeholder="game:稳定账号"></label><button id="linkAccounts">确认同一人并绑定</button><select id="linkChoice"></select><button id="unlinkAccounts">解绑所选账号</button></section>
-<section><h2>场景档案</h2><p>群、频道、游戏房间均可单独建档。外部补充先作为候选。勾选允许跨渠道使用只开放摘要，原话仍限来源场合。</p><button id="workspaceLoad">刷新场景与账号</button><select id="sceneChoice"></select><input id="sceneName" placeholder="场景名称"><input id="newSceneId" placeholder="新场景 ID"><button id="sceneSave">新建场景并绑定当前场合</button><select id="sceneEntry"></select><button id="sceneRead">查看来源与历史</button><pre id="sceneHistory"></pre><input id="sceneKind" placeholder="类型：rule / meme / term / topic"><textarea id="sceneText" aria-label="场景条目内容" placeholder="定位、规矩、梗、约定或补充意见"></textarea><label><input type="checkbox" id="sceneShare">允许跨渠道使用</label><button id="sceneCandidate">提交候选</button><button id="sceneConfirm">确认并保存</button><button id="scenePreview">预览纠正影响</button><pre id="sceneImpact"></pre><button id="sceneEdit">按预览纠正此条目</button><button id="sceneDelete">按预览撤回明确关联</button><button id="sceneRestore">恢复所选条目</button></section>
-<section><h2>备份与导入</h2><p>完整备份至少使用 8 位密码。单空间导出不带模型密钥和授权。请将下载文件另存到其他磁盘；短暂停写时聊天可继续。</p><input id="backupPassword" type="password" autocomplete="new-password" placeholder="备份密码"><button id="backupFull">完整服务备份</button><button id="backupSpace">导出当前空间</button><input id="backupFile" type="file" accept=".vmb"><button id="backupUpload">上传备份</button><input id="backupId" placeholder="备份 ID"><button id="backupDownload">下载备份</button><button id="backupPreview">检查并预览</button><pre id="backupImpact"></pre><input id="importSpace" placeholder="导入的新空间 ID"><input id="importOwner" placeholder="所属项目 ID"><label><input type="checkbox" id="importReplace">显式替换同名空间并保留回退目录</label><button id="backupRestore">按预览导入到旁置目录或目标空间</button><p>完整服务恢复后返回新目录。检查后停止服务，用新目录启动；旧目录保留用于回退。恢复后的自动任务需要重新启用。</p></section>
+<!doctype html>
+<html lang="zh-CN" data-theme="auto">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>记忆库 · 本机工作台</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23203f78'/%3E%3Ccircle cx='16' cy='16' r='6' fill='%23fff' opacity='.9'/%3E%3C/svg%3E">
+<style>
+:root{
+  --bg:#f4f6f9; --card:#fff; --card-2:#fbfcfe; --line:#dfe4ec; --line-2:#eaeef4;
+  --text:#1d2733; --muted:#5d6b7d; --faint:#8b97a8;
+  --accent:#203f78; --accent-2:#2f5aa8; --accent-soft:#e8eef9;
+  --chip:#eef2f8; --green:#1a7f4b; --green-soft:#e6f4ec; --red:#b4342a; --red-soft:#fceae8;
+  --orange:#9a5f14; --orange-soft:#fbf1e0; --shadow:0 1px 2px rgba(16,26,42,.05),0 8px 24px rgba(16,26,42,.05);
+  --radius:12px; --radius-sm:8px;
+  color-scheme:light;
+}
+html[data-theme=dark]{
+  --bg:#111419; --card:#191d24; --card-2:#1d222a; --line:#2b323c; --line-2:#242a33;
+  --text:#e7ebf1; --muted:#a3aebd; --faint:#7b8798;
+  --accent:#86aaf0; --accent-2:#a8c3f6; --accent-soft:#1e2836;
+  --chip:#232a34; --green:#63c68f; --green-soft:#16281f; --red:#ef8b80; --red-soft:#2c1a19;
+  --orange:#e0b070; --orange-soft:#2a2217; --shadow:0 1px 2px rgba(0,0,0,.4),0 10px 30px rgba(0,0,0,.28);
+  color-scheme:dark;
+}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{margin:0;background:var(--bg);color:var(--text);font:14px/1.6 "Segoe UI","Microsoft YaHei",system-ui,-apple-system,sans-serif;-webkit-font-smoothing:antialiased}
+h1,h2,h3{margin:0;font-weight:650;letter-spacing:-.01em}
+h1{font-size:20px}h2{font-size:15px}h3{font-size:13px}
+p{margin:0}
+a{color:var(--accent-2);text-decoration:none}
+code,.mono{font-family:ui-monospace,"Cascadia Mono",Consolas,monospace;font-size:12px}
+button{font:inherit;color:inherit;cursor:pointer}
+input,select,textarea{font:inherit;color:inherit}
+input,select,textarea,button{outline-offset:2px}
+
+/* ---------- gate ---------- */
+#gate{height:100%;display:flex;align-items:center;justify-content:center;padding:24px}
+#boot-screen{height:100%;display:grid;place-items:center;color:var(--muted);font-size:13px;letter-spacing:.02em}
+.gate{width:100%;max-width:430px;background:var(--card);border:1px solid var(--line);border-radius:16px;padding:26px;box-shadow:var(--shadow)}
+.gate h1{font-size:19px;display:flex;align-items:center;gap:9px}
+.gate .sub{color:var(--muted);font-size:13px;margin-top:8px;line-height:1.65}
+.gate form{margin-top:20px;display:grid;gap:12px}
+.gate .row{display:flex;gap:10px;align-items:center}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--green);flex:0 0 auto;box-shadow:0 0 0 3px var(--green-soft)}
+.dot.off{background:var(--red);box-shadow:0 0 0 3px var(--red-soft)}
+
+.field{display:grid;gap:6px}
+.field>label{font-size:12px;color:var(--muted);font-weight:600;letter-spacing:.02em}
+.inp{width:100%;background:var(--card-2);border:1px solid var(--line);border-radius:var(--radius-sm);padding:8px 10px;transition:border-color .15s,box-shadow .15s}
+.inp:focus{border-color:var(--accent-2);box-shadow:0 0 0 3px var(--accent-soft);outline:none}
+textarea.inp{resize:vertical;min-height:88px;line-height:1.6}
+select.inp{appearance:none;background-image:linear-gradient(45deg,transparent 49%,var(--faint) 50%),linear-gradient(-45deg,transparent 49%,var(--faint) 50%);background-position:calc(100% - 15px) 52%,calc(100% - 10px) 52%;background-size:5px 5px,5px 5px;background-repeat:no-repeat;padding-right:28px}
+
+.btn{display:inline-flex;align-items:center;gap:6px;background:var(--card-2);border:1px solid var(--line);border-radius:var(--radius-sm);padding:7px 12px;font-size:13px;font-weight:600;transition:background .15s,border-color .15s,transform .06s}
+.btn:hover{background:var(--accent-soft);border-color:var(--accent-2)}
+.btn:active{transform:translateY(1px)}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+html[data-theme=dark] .btn.primary{color:#0d1117}
+.btn.primary:hover{filter:brightness(1.08)}
+.btn.ghost{background:transparent}
+.btn.danger{color:var(--red);border-color:var(--red-soft);background:var(--red-soft)}
+.btn:disabled{opacity:.5;cursor:not-allowed;transform:none}
+.btn.sm{padding:4px 9px;font-size:12px}
+
+/* ---------- app shell ---------- */
+#app{height:100%;display:flex;flex-direction:column}
+header{display:flex;align-items:center;gap:14px;padding:10px 16px;background:var(--card);border-bottom:1px solid var(--line);flex:0 0 auto;z-index:5}
+.brand{display:flex;align-items:baseline;gap:8px;font-weight:650;font-size:15px;white-space:nowrap}
+.brand span{font-size:11px;font-weight:500;color:var(--faint);letter-spacing:.06em;text-transform:uppercase}
+header .spacer{flex:1}
+header .hp{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted);white-space:nowrap}
+header select{background:var(--card-2);border:1px solid var(--line);border-radius:var(--radius-sm);padding:5px 8px;font-size:12.5px}
+.layout{flex:1;display:flex;min-height:0}
+nav{width:172px;flex:0 0 auto;padding:12px 10px;border-right:1px solid var(--line);background:var(--card);overflow:auto}
+nav a{display:flex;align-items:center;gap:9px;padding:8px 10px;border-radius:var(--radius-sm);color:var(--muted);font-size:13px;font-weight:550;margin-bottom:2px}
+nav a:hover{background:var(--accent-soft);color:var(--text)}
+nav a[aria-current]{background:var(--accent-soft);color:var(--accent-2);font-weight:650}
+nav a i{width:6px;height:6px;border-radius:2px;background:currentColor;opacity:.45;flex:0 0 auto}
+nav a[aria-current] i{opacity:1}
+nav .grp{font-size:11px;color:var(--faint);padding:14px 10px 6px;letter-spacing:.08em;text-transform:uppercase}
+main{flex:1;overflow:auto;padding:20px 22px 40px;min-width:0}
+.page{max-width:1120px;margin:0 auto;display:grid;gap:16px}
+.page>.head{display:flex;align-items:flex-end;gap:14px;flex-wrap:wrap}
+.page>.head p{color:var(--muted);font-size:13px;flex:1;min-width:180px}
+
+/* ---------- cards ---------- */
+.card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:16px;box-shadow:var(--shadow)}
+.card.tight{padding:13px 15px}
+.card.alert{border-color:var(--red);background:var(--red-soft)}
+.card>h2{display:flex;align-items:center;gap:8px;margin-bottom:12px}
+.card>h2 .hint{font-weight:500;font-size:12px;color:var(--faint);margin-left:auto}
+.grid{display:grid;gap:12px}
+.grid.stats{grid-template-columns:repeat(auto-fit,minmax(140px,1fr))}
+.stat{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:14px 16px}
+.stat b{display:block;font-size:24px;font-weight:650;letter-spacing:-.02em;line-height:1.25}
+.stat small{color:var(--muted);font-size:12px}
+.split{display:grid;grid-template-columns:1.15fr .85fr;gap:16px;align-items:start}
+@media(max-width:900px){.split{grid-template-columns:1fr}nav{width:56px}nav a{justify-content:center;padding:9px 0}nav a span{display:none}nav .grp{display:none}}
+
+.toolbar{display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end}
+.toolbar .field{flex:1 1 160px;min-width:130px}
+.toolbar .field.narrow{flex:0 0 118px}
+.toolbar .acts{display:flex;gap:8px;flex:0 0 auto}
+
+.chip{display:inline-flex;align-items:center;gap:5px;padding:2px 8px;border-radius:999px;background:var(--chip);color:var(--muted);font-size:11.5px;font-weight:600;white-space:nowrap}
+.chip.ok{background:var(--green-soft);color:var(--green)}
+.chip.warn{background:var(--orange-soft);color:var(--orange)}
+.chip.bad{background:var(--red-soft);color:var(--red)}
+.chip.acc{background:var(--accent-soft);color:var(--accent-2)}
+
+.plist{display:grid;grid-template-columns:repeat(auto-fill,minmax(196px,1fr));gap:10px}
+.pcard{display:flex;gap:10px;align-items:flex-start;background:var(--card-2);border:1px solid var(--line);border-radius:var(--radius-sm);padding:10px 11px}
+.pcard:hover{border-color:var(--accent-2)}
+.av{width:30px;height:30px;border-radius:9px;flex:0 0 auto;display:grid;place-items:center;background:var(--accent-soft);color:var(--accent-2);font-weight:700;font-size:13px}
+.pcard .nm{font-weight:600;font-size:13px;overflow-wrap:anywhere;line-height:1.35}
+.pcard .meta{font-size:11px;color:var(--faint);overflow-wrap:anywhere}
+
+.rows{display:grid;gap:8px}
+.row{display:flex;gap:10px;align-items:flex-start;background:var(--card-2);border:1px solid var(--line);border-radius:var(--radius-sm);padding:9px 11px}
+.row .body{flex:1;min-width:0}
+.row .body .t{font-size:13px;overflow-wrap:anywhere}
+.row .body .m{font-size:11.5px;color:var(--faint);margin-top:3px;overflow-wrap:anywhere}
+.row.sel{border-color:var(--accent-2);background:var(--accent-soft)}
+.row .ops{display:flex;gap:6px;flex-wrap:wrap;flex:0 0 auto}
+.row.hidden{opacity:.55}
+
+.empty{color:var(--faint);font-size:13px;padding:18px 4px;text-align:center}
+details{border-top:1px dashed var(--line-2);margin-top:10px;padding-top:8px}
+details>summary{cursor:pointer;font-size:12px;color:var(--muted);font-weight:600;list-style:none}
+details>summary::-webkit-details-marker{display:none}
+details>summary::before{content:"▸ ";color:var(--faint)}
+details[open]>summary::before{content:"▾ "}
+pre{margin:8px 0 0;padding:10px;background:var(--card-2);border:1px solid var(--line);border-radius:var(--radius-sm);overflow:auto;max-height:320px;font-size:11.5px;line-height:1.55;color:var(--muted)}
+.hr{height:1px;background:var(--line-2);margin:14px 0}
+.kv{display:grid;grid-template-columns:auto 1fr;gap:6px 14px;font-size:12.5px}
+.kv dt{color:var(--muted)}
+.kv dd{margin:0;overflow-wrap:anywhere}
+
+/* starmap */
+#star{width:100%;height:auto;display:block;border-radius:var(--radius-sm);background:radial-gradient(circle at 50% 45%,var(--accent-soft),transparent 62%)}
+.legend{display:flex;gap:14px;flex-wrap:wrap;font-size:11.5px;color:var(--muted);margin-top:8px}
+.legend b{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:5px}
+
+/* toast */
+#toasts{position:fixed;right:16px;bottom:16px;display:grid;gap:8px;z-index:40;max-width:min(420px,80vw)}
+.toast{background:var(--card);border:1px solid var(--line);border-left:3px solid var(--accent);border-radius:10px;padding:10px 13px;box-shadow:var(--shadow);font-size:12.5px;animation:in .18s ease-out}
+.toast.err{border-left-color:var(--red)}
+.toast.ok{border-left-color:var(--green)}
+@keyframes in{from{opacity:0;transform:translateY(6px)}}
+.busy{position:fixed;left:50%;top:12px;transform:translateX(-50%);background:var(--text);color:var(--bg);font-size:12px;padding:5px 12px;border-radius:999px;z-index:50}
+[hidden]{display:none!important}
+</style>
+<link rel="stylesheet" href="/galaxy.css">
+</head>
+<body>
+
+<div id="boot-screen">正在连接记忆库…</div>
+
+<div id="gate" hidden>
+  <div class="gate">
+    <h1><span class="dot" id="gate-dot"></span>记忆库 · 本机工作台</h1>
+    <p class="sub">服务端要求凭据时才会出现这一步：填入后进入。凭据只保存在本页内存；勾选下方选项才记在本机浏览器，关闭页面即清除。</p>
+    <form id="gate-form">
+      <div class="field">
+        <label for="token">管理员凭据</label>
+        <input class="inp" id="token" type="password" autocomplete="current-password" placeholder="粘贴管理凭据">
+      </div>
+      <div class="row" style="font-size:12.5px;color:var(--muted)">
+        <input type="checkbox" id="remember"><label for="remember">在本机记住（仅此设备）</label>
+      </div>
+      <div class="row">
+        <button class="btn primary" type="submit" id="gate-go">连接</button>
+        <span id="gate-msg" style="font-size:12px;color:var(--muted)"></span>
+      </div>
+    </form>
+    <p class="sub" style="margin-top:16px;font-size:12px;border-top:1px dashed var(--line-2);padding-top:12px">
+      需要原始排障表单时用 <a href="/standalone-raw.html" target="_blank" rel="noopener">原始页</a>（同样的凭据，逐字段 JSON 操作）。
+    </p>
+  </div>
+</div>
+
+<div id="app" hidden>
+  <header>
+    <div class="brand">记忆库<span>本机工作台</span></div>
+    <label class="hp">空间
+      <select id="space"><option value="">（未读取）</option></select>
+    </label>
+    <span class="hp" id="hp-ver"></span>
+    <div class="spacer"></div>
+    <span class="hp" id="hp-state"><span class="dot"></span>已连接</span>
+    <label class="hp">主题
+      <select id="theme">
+        <option value="auto">跟随环境</option>
+        <option value="light">浅色</option>
+        <option value="dark">深色</option>
+      </select>
+    </label>
+    <button class="btn sm ghost" id="logout">退出</button>
+  </header>
+  <div class="layout">
+    <nav id="nav"></nav>
+    <main id="main"></main>
+  </div>
+</div>
+
+<div id="toasts"></div>
+<div id="busybox"></div>
+
 <script>
-const $=id=>document.getElementById(id);let adminToken='';
-async function api(route,method='GET',body){const r=await fetch('/api/v1/'+route,{method,headers:{Authorization:'Bearer '+adminToken,...(body?{'Content-Type':'application/json'}:{})},...(body?{body:JSON.stringify(body)}:{})});const data=await r.json();if(!r.ok)throw new Error(data.code+': '+data.error);return data}
-function bind(id,fn){$(id).onclick=async()=>{try{$('result').textContent=JSON.stringify(await fn(),null,2)}catch(e){$('result').textContent=e.message}}}
-const sid=()=>encodeURIComponent($('space').value.trim());
-bind('load',async()=>{adminToken=$('token').value;$('token').value='';const d=await api('admin/spaces');$('spaces').textContent=JSON.stringify(d,null,2);return{ok:true}});
-bind('projectCreate',async()=>{const d=await api('admin/projects','POST',{projectId:$('project').value.trim()});$('credential').textContent='请保存项目凭据（仅显示一次）：'+d.token;return{ok:true,projectId:d.projectId}});
-bind('spaceCreate',()=>api('admin/spaces','POST',{spaceId:$('space').value.trim(),owner:$('owner').value.trim()}));
-bind('grant',()=>api('admin/spaces/'+sid()+'/readers','PUT',{projectIds:$('readers').value.split(',').map(x=>x.trim()).filter(Boolean)}));
-bind('settingsLoad',async()=>{const d=await api('admin/spaces/'+sid()+'/settings');$('settings').value=JSON.stringify(d.values,null,2);return d});
-bind('settingsSave',()=>api('admin/spaces/'+sid()+'/settings','PUT',{patch:JSON.parse($('settings').value)}));
-bind('status',()=>api('spaces/'+sid()+'/status'));bind('jobs',()=>api('spaces/'+sid()+'/jobs'));
-for(const type of ['consolidate','index'])bind(type,()=>api('spaces/'+sid()+'/jobs','POST',{type}));
-bind('entitySave',()=>api('spaces/'+sid()+'/entities/'+encodeURIComponent($('entityId').value.trim()),'PUT',{displayName:$('entityName').value.trim()}));
-bind('manualSave',()=>api('spaces/'+sid()+'/memories','POST',{...JSON.parse($('manual').value),source:'manual'}));
-const scope=()=>({kind:$('scopeKind').value,id:$('scopeId').value.trim()});
-const scopeQuery=()=>'?'+new URLSearchParams({scopeKind:scope().kind,scopeId:scope().id});
-const workspace=(action,body={})=>api('spaces/'+sid()+'/workspace','POST',{action,...body});
-let ws=null,wsSpace='',personData=null,personContext='',personPreview=null,scenePreview=null,backupPreview=null;
-function options(id,rows,label){$(id).replaceChildren();for(const row of rows){const o=document.createElement('option');o.value=row.id||row.sceneId;o.textContent=label(row);$(id).append(o)}}
-async function loadWorkspace(){ws=await workspace('state');wsSpace=sid();options('accountOptions',(ws.accounts||[]).map(a=>({...a,name:a.displayName})),a=>a.name+' · '+a.id);options('sceneChoice',Object.values(ws.scenes),s=>s.name+' · '+s.sceneId);options('linkChoice',Object.values(ws.links).filter(l=>l.active),l=>l.a+' ↔ '+l.b);renderEntries();return {scenes:Object.keys(ws.scenes).length}}
-function renderEntries(){scenePreview=null;const rows=Object.values(ws?.entries||{}).filter(e=>e.sceneId===$('sceneChoice').value);options('sceneEntry',rows,e=>'【'+e.status+'】'+e.kind+'：'+e.text)}
-$('sceneChoice').onchange=renderEntries;
-bind('workspaceLoad',loadWorkspace);
-function selectedEntry(){if(wsSpace!==sid())throw Error('空间已改变，请刷新');const e=ws?.entries[$('sceneEntry').value];if(!e)throw Error('请选择条目');return e}
-bind('sceneSave',async()=>{const r=await workspace('scene',{operationId:crypto.randomUUID(),sceneId:$('newSceneId').value.trim(),name:$('sceneName').value.trim(),bindings:[scope()]});await loadWorkspace();return r});
-bind('sceneRead',()=>{const e=selectedEntry();$('sceneHistory').textContent=JSON.stringify(e,null,2);$('sceneText').value=e.text;$('sceneKind').value=e.kind;$('sceneShare').checked=e.shareable;return {ok:true}});
-const entryPayload=()=>({operationId:crypto.randomUUID(),sceneId:$('sceneChoice').value,scope:scope(),kind:$('sceneKind').value||'impression',text:$('sceneText').value,shareable:$('sceneShare').checked});
-for(const [button,confirm]of [['sceneCandidate',false],['sceneConfirm',true]])bind(button,async()=>{const r=await workspace('entry',{...entryPayload(),confirm});await loadWorkspace();return r});
-bind('scenePreview',async()=>{const e=selectedEntry();scenePreview=await workspace('preview',{entryId:e.id});$('sceneImpact').textContent=JSON.stringify(scenePreview,null,2);return {ok:true}});
-for(const button of ['sceneEdit','sceneDelete','sceneRestore'])bind(button,async()=>{const e=selectedEntry();if(!scenePreview||scenePreview.entryId!==e.id)throw Error('请先预览关联影响');const r=button==='sceneDelete'?await workspace('retract',{operationId:crypto.randomUUID(),entryId:e.id,previewToken:scenePreview.previewToken,reason:$('correctionReason').value||'管理员撤回'}):await workspace('entry',{...entryPayload(),entryId:e.id,expectedRev:e.rev,previewToken:scenePreview.previewToken,confirm:true});await loadWorkspace();return r});
-async function loadPerson(){personData=await api('spaces/'+sid()+'/people','POST',{actorId:$('personId').value.trim(),scope:scope(),allScopes:$('personAllScopes').checked});personContext=JSON.stringify([sid(),scope(),$('personId').value,$('personAllScopes').checked]);$('profileCards').replaceChildren();$('personImpressions').replaceChildren();for(const [container,rows]of [['profileCards',personData.profiles],['personImpressions',personData.impressions]])for(const i of rows.filter(i=>!i.hidden)){const node=document.createElement('div');node.style.cssText='padding:10px;border:1px solid #dbe0e8;border-radius:9px;background:#f5f7fb';node.textContent=(i.itemKey||i.kind)+'：'+i.value+' · '+i.accountId+' / '+i.scope;$(container).append(node)}options('personItem',[...personData.profiles,...personData.impressions].map((i,n)=>({...i,id:String(n)})),i=>(i.hidden?'【已撤回】':'')+(i.itemKey||i.kind)+'：'+i.value);return {accounts:personData.accounts}}
-bind('personLoad',loadPerson);
-bind('personPreview',async()=>{if(personContext!==JSON.stringify([sid(),scope(),$('personId').value,$('personAllScopes').checked]))throw Error('请重新读取人物');const i=[...personData.profiles,...personData.impressions][Number($('personItem').value)];personPreview=await api('spaces/'+sid()+'/people','POST',{actorId:$('personId').value.trim(),scope:scope(),allScopes:$('personAllScopes').checked,action:'preview',target:{key:i.key,itemKey:i.itemKey}});$('personImpact').textContent=JSON.stringify(personPreview,null,2);return {ok:true}});
-for(const [button,op]of [['personReplace','replace'],['personHide','hide'],['personRestore','restore']])bind(button,async()=>{if(personContext!==JSON.stringify([sid(),scope(),$('personId').value,$('personAllScopes').checked]))throw Error('请重新读取人物');const i=[...personData.profiles,...personData.impressions][Number($('personItem').value)];if(!i)throw Error('请选择记忆');const r=await api('spaces/'+sid()+'/people','POST',{actorId:$('personId').value.trim(),scope:scope(),allScopes:$('personAllScopes').checked,action:'revision',operationId:crypto.randomUUID(),target:{key:i.key,itemKey:i.itemKey},expectedEtag:i.etag,previewToken:personPreview?.previewToken,op,...(op==='replace'?{value:$('personValue').value}:{}),reason:$('personReason').value||'管理员修订'});await loadPerson();return r});
-bind('linkAccounts',async()=>{const r=await workspace('link',{operationId:crypto.randomUUID(),a:$('accountA').value.trim(),b:$('accountB').value.trim(),confirmed:true});await loadWorkspace();return r});
-bind('unlinkAccounts',async()=>{if(wsSpace!==sid())throw Error('请刷新空间');const l=ws.links[$('linkChoice').value];if(!l)throw Error('请选择绑定');const r=await workspace('link',{...l,operationId:crypto.randomUUID(),expectedRev:l.rev,active:false,confirmed:true});await loadWorkspace();return r});
-for(const [button,space]of [['backupFull',false],['backupSpace',true]])bind(button,async()=>{const r=await api('admin/backups','POST',{...(space?{spaceId:$('space').value.trim()}:{}),password:$('backupPassword').value||undefined});$('backupId').value=r.backupId;return r});
-bind('backupDownload',async()=>{const r=await fetch('/api/v1/admin/backups/'+encodeURIComponent($('backupId').value),{headers:{Authorization:'Bearer '+adminToken}});if(!r.ok)throw Error('下载失败');const url=URL.createObjectURL(await r.blob()),a=document.createElement('a');a.href=url;a.download=$('backupId').value+'.vmb';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);return {downloaded:true}});
-bind('backupUpload',async()=>{const f=$('backupFile').files[0];if(!f)throw Error('请选择文件');const password=btoa(String.fromCharCode(...new TextEncoder().encode($('backupPassword').value)));const r=await fetch('/api/v1/admin/backups',{method:'POST',headers:{Authorization:'Bearer '+adminToken,'Content-Type':'application/octet-stream','X-Backup-Password':password},body:f});const d=await r.json();if(!r.ok)throw Error(d.error);$('backupId').value=d.backupId;return d});
-bind('backupPreview',async()=>{backupPreview=await api('admin/backups/'+encodeURIComponent($('backupId').value)+'/preview','POST',{password:$('backupPassword').value});backupPreview.id=$('backupId').value;$('backupImpact').textContent=JSON.stringify(backupPreview,null,2);return {ok:true}});
-bind('backupRestore',async()=>{if(!backupPreview||backupPreview.id!==$('backupId').value)throw Error('请先检查并预览此备份');return api('admin/backups/'+encodeURIComponent(backupPreview.id)+'/restore','POST',{password:$('backupPassword').value,expectedChecksum:backupPreview.checksum,spaceId:$('importSpace').value.trim(),owner:$('importOwner').value.trim(),replace:$('importReplace').checked})});
-let selectedSubject=null,selectedSpace='',selectedScope='';
-bind('recall',()=>api('spaces/'+sid()+'/recall','POST',{query:$('query').value,scope:scope()}));
-bind('subjectsLoad',async()=>{const d=await api('spaces/'+sid()+'/subjects'+scopeQuery()+'&q='+encodeURIComponent($('subjectQuery').value));$('subjectChoice').replaceChildren();for(const s of d.subjects){const option=document.createElement('option');option.value=s.id;option.textContent=s.label+(s.knowledgeStatus==='candidate'?'（待确认）':'');$('subjectChoice').append(option)}selectedSubject=null;return d});
-async function readSubject(){const id=$('subjectChoice').value;if(!id)throw Error('请先查找并选择条目');const d=await api('spaces/'+sid()+'/subjects/'+encodeURIComponent(id)+scopeQuery());selectedSubject=d;selectedSpace=sid();selectedScope=JSON.stringify(scope());$('subjectDetail').textContent=JSON.stringify(d,null,2);$('observationChoice').replaceChildren();for(const o of d.observations.filter(o=>o.status==='active')){const option=document.createElement('option');option.value=o.id;option.textContent=(o.authority==='manual'?'【人工】':o.knowledgeStatus==='candidate'?'【待确认】':'【来源观察】')+o.aspect+'：'+o.statement;$('observationChoice').append(option)}return d}
-bind('subjectLoad',readSubject);
-for(const [id,action] of [['subjectCorrect','correct'],['subjectRetract','retract']])bind(id,async()=>{if(!selectedSubject||selectedSpace!==sid()||selectedScope!==JSON.stringify(scope())||selectedSubject.subject.id!==$('subjectChoice').value)throw Error('空间、场合或条目已改变，请重新查看来源');const o=selectedSubject.observations.find(o=>o.id===$('observationChoice').value);if(!o)throw Error('请选择观察');const result=await api('spaces/'+sid()+'/subjects/'+encodeURIComponent(selectedSubject.subject.id)+'/revisions','POST',{operationId:crypto.randomUUID(),scope:scope(),action,observationId:o.id,expectedRev:o.rev,statement:$('correction').value,reason:$('correctionReason').value});await readSubject();return result});
-</script></html>
+"use strict";
+const $=(s,r=document)=>r.querySelector(s),$$=(s,r=document)=>Array.from(r.querySelectorAll(s));
+const esc=v=>String(v==null?"":v).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const S={
+  token:"", spaces:null, space:"", ws:null, status:null, ver:null,
+  page:"overview", scope:{kind:"group",id:""},
+  person:null, personCtx:"", personSel:null, entry:null, entryPreview:null,
+  scene:"", subject:null, subjectSel:null, recall:null, jobs:null,
+  settings:null, backupPreview:null, busy:0
+};
+const LS_THEME="memory-console-theme", LS_TOKEN="memory-console-token";
+const NAV=[
+  ["概览","overview"],["人物记忆","people"],["场景记忆","scene"],["关系星图","star"],
+  ["记忆检索","recall"],["主体与纠正","subject"],["备份与导入","backup"],["设置","settings"]
+];
+const kindName={trait:"档案",speaker_profile:"画像",event:"事件",topic:"话题",promise:"承诺",joke:"梗",preference:"偏好",grudge:"芥蒂",pattern:"模式",impression:"印象",rule:"规矩",meme:"梗",term:"术语",opinion:"意见",fact:"事实"};
+const scopeName={group:"群",private:"私聊",game:"游戏",channel:"频道",work:"作品",project:"项目"};
+
+/* ---------------- infra ---------------- */
+function toast(msg,kind){
+  const el=document.createElement("div");
+  el.className="toast"+(kind?" "+kind:"");
+  el.textContent=String(msg);
+  $("#toasts").append(el);
+  setTimeout(()=>el.remove(),kind==="err"?7000:3600);
+}
+function busy(on){
+  S.busy+=on?1:-1; if(S.busy<0)S.busy=0;
+  const box=$("#busybox"); box.innerHTML=S.busy?'<div class="busy">处理中…</div>':"";
+}
+async function api(route,method="GET",body){
+  busy(true);
+  try{
+    const r=await fetch("/api/v1/"+route,{
+      method,
+      headers:{...(S.token?{authorization:"Bearer "+S.token}:{}),...(body?{"content-type":"application/json"}:{})},
+      ...(body?{body:JSON.stringify(body)}:{})
+    });
+    let data=null; try{data=await r.json();}catch{}
+    if(!r.ok){
+      const e=new Error((data&&(data.code?data.code+": ":"")+(data.error||""))||("HTTP "+r.status));
+      e.status=r.status;e.code=data&&data.code;e.body=data;throw e;
+    }
+    return data||{};
+  }finally{busy(false);}
+}
+const sid=()=>encodeURIComponent(S.space);
+const wsAction=(action,body={})=>api("spaces/"+sid()+"/workspace","POST",{action,...body});
+const opId=()=>crypto.randomUUID();
+
+function applyTheme(){
+  const v=$("#theme")?$("#theme").value:"auto";
+  const dark=v==="dark"||(v!=="light"&&matchMedia("(prefers-color-scheme: dark)").matches);
+  document.documentElement.dataset.theme=dark?"dark":"light";
+}
+function initTheme(){
+  const saved=localStorage.getItem(LS_THEME)||"auto";
+  $("#theme").value=saved; applyTheme();
+  $("#theme").onchange=()=>{localStorage.setItem(LS_THEME,$("#theme").value);applyTheme();renderStar();};
+  matchMedia("(prefers-color-scheme: dark)").addEventListener("change",()=>{if($("#theme").value==="auto"){applyTheme();renderStar();}});
+}
+
+/* ---------------- gate ---------------- */
+$("#gate-form").onsubmit=async e=>{
+  e.preventDefault();
+  const tok=$("#token").value.trim();
+  if(!tok){$("#gate-msg").textContent="先填凭据";return;}
+  $("#gate-go").disabled=true; $("#gate-msg").textContent="正在验证…";
+  S.token=tok;
+  try{
+    S.spaces=await api("admin/spaces");
+    if($("#remember").checked)localStorage.setItem(LS_TOKEN,tok); else localStorage.removeItem(LS_TOKEN);
+    await enter();
+  }catch(err){
+    S.token="";
+    $("#gate-msg").textContent="凭据无效或服务未就绪："+err.message;
+    $("#gate-dot").classList.add("off");
+  }finally{$("#gate-go").disabled=false;}
+};
+
+async function enter(){
+  hideBoot();
+  $("#gate").hidden=true; $("#app").hidden=false;
+  initTheme(); buildNav();
+  if(S.anonymous){
+    const st=$("#hp-state");
+    if(st)st.innerHTML='<span class="dot"></span>本机 · 免凭据';
+    const out=$("#logout"); if(out)out.hidden=true;
+  }
+  const spaces=Object.keys(S.spaces?.spaces||{});
+  const sel=$("#space");
+  sel.innerHTML=spaces.length
+    ? spaces.map(k=>`<option value="${esc(k)}">${esc(k)}${S.spaces.spaces[k]?.owner&&S.spaces.spaces[k].owner!==k?" · "+esc(S.spaces.spaces[k].owner):""}</option>`).join("")
+    : '<option value="">（没有已登记的空间）</option>';
+  S.space=spaces[0]||"";
+  sel.onchange=async()=>{S.space=sel.value;S.ws=null;S.status=null;S.scene="";S.person=null;await refreshBase();render();};
+  await refreshBase();
+  render();
+}
+function buildNav(){
+  $("#nav").innerHTML='<div class="grp">日常</div>'+
+    NAV.slice(0,5).map(([l,id])=>`<a href="#/${id}" data-page="${id}"><i></i><span>${l}</span></a>`).join("")+
+    '<div class="grp">管理</div>'+
+    NAV.slice(5).map(([l,id])=>`<a href="#/${id}" data-page="${id}"><i></i><span>${l}</span></a>`).join("");
+  addEventListener("hashchange",()=>render());
+}
+async function refreshBase(){
+  if(!S.space){S.ws=null;return;}
+  // 服务刚重启时会有几秒冷启动（要读整库索引），这时打过去会全部失败。
+  // 不重试的后果是页面静默显示成一屏 0 —— 所以这里重试一次，仍失败就明确报出来。
+  const attempt=async(fn)=>{
+    try{return {ok:true,value:await fn()};}
+    catch(e){
+      if(e.status&&e.status<500&&e.status!==429)return {ok:false,error:e};
+      await new Promise(r=>setTimeout(r,1200));
+      try{return {ok:true,value:await fn()};}catch(e2){return {ok:false,error:e2};}
+    }
+  };
+  const [wsR,stR,verR]=await Promise.all([
+    attempt(()=>api("spaces/"+sid()+"/workspace","POST",{action:"state"})),
+    attempt(()=>api("spaces/"+sid()+"/status")),
+    attempt(()=>api("version"))
+  ]);
+  if(wsR.ok)S.ws=wsR.value;
+  if(stR.ok)S.status=stR.value;
+  if(verR.ok)S.ver=verR.value;
+  const failed=[wsR,stR].filter(r=>!r.ok);
+  S.degraded=failed.length?String(failed[0].error?.message||"读取失败"):"";
+  if(S.degraded)toast("读取失败："+S.degraded+"（可点概览里的重试）","err");
+  if(S.ver)$("#hp-ver").textContent="v"+(S.ver.implementationVersion||"?");
+  if(!S.scene){
+    const first=Object.values(S.ws?.scenes||{})[0];
+    if(first)S.scene=first.sceneId;
+  }
+  if(S.scene&&S.ws?.scenes?.[S.scene]){
+    const b=S.ws.scenes[S.scene].bindings?.[0];
+    if(b&&!S.scope.id){S.scope={kind:b.kind,id:b.id};}
+  }
+}
+
+$("#logout").onclick=()=>{
+  localStorage.removeItem(LS_TOKEN); S.token="";
+  $("#app").hidden=true; $("#gate").hidden=false; $("#token").value="";
+  $("#gate-msg").textContent="已退出";
+};
+
+/* ---------------- render root ---------------- */
+function render(){
+  galaxyGeneration++;galaxyPage?.dispose();galaxyPage=null;
+  const page=(location.hash.slice(2)||"overview").split("/")[0]||"overview";
+  S.page=NAV.some(n=>n[1]===page)?page:"overview";
+  $$("#nav a").forEach(a=>{
+    if(a.dataset.page===S.page)a.setAttribute("aria-current","page"); else a.removeAttribute("aria-current");
+  });
+  const view={overview:viewOverview,people:viewPeople,scene:viewScene,star:viewStar,recall:viewRecall,subject:viewSubject,backup:viewBackup,settings:viewSettings}[S.page];
+  $("#main").innerHTML=`<div class="page">${view()}</div>`;
+  $("#main").scrollTop=0;
+  if(S.page==="overview")loadOverviewExtra();
+  if(S.page==="scene"&&S.ws)bindSceneSelect();
+  if(S.page==="star")renderStar();
+}
+function head(title,desc,right=""){
+  return `<div class="head"><h1>${esc(title)}</h1><p>${esc(desc)}</p>${right}</div>`;
+}
+function scopeOptions(){
+  const seen=new Map();
+  Object.values(S.ws?.scenes||{}).forEach(s=>(s.bindings||[]).forEach(b=>seen.set(b.kind+":"+b.id,b)));
+  if(S.scope.id)seen.set(S.scope.kind+":"+S.scope.id,S.scope);
+  return Array.from(seen.values());
+}
+function accountOptions(){
+  return (S.ws?.accounts||[]).map(a=>`<option value="${esc(a.id)}">${esc(a.displayName||a.id)}</option>`).join("");
+}
+/** 场景显示名：库里的 name 常常就等于 id，直接铺出来会一屏 "group:1051103978"。
+ *  有真名用真名，否则去掉渠道前缀、只留可读部分；副标题在两者相同时省略。 */
+function sceneLabel(s){
+  const name=String(s?.name||""), scid=String(s?.sceneId||"");
+  if(name&&name!==scid)return name;
+  const bare=scid.replace(/^(group|private|game|channel|work|project):/,"");
+  return bare?("#"+bare):scid;
+}
+function sceneSub(s){
+  const label=sceneLabel(s), scid=String(s?.sceneId||"");
+  return label===scid?"":scid;
+}
+
+/* ---------------- overview ---------------- */
+function viewOverview(){
+  const st=S.status||{},ws=S.ws||{};
+  const scenes=Object.keys(ws.scenes||{}).length, entries=Object.keys(ws.entries||{}).length;
+  const stat=(n,l)=>`<div class="stat"><b>${n}</b><small>${l}</small></div>`;
+  return head("概览","当前空间的规模、模型接入与后台任务。数据来自服务的 v1 协议实时读取。")+
+  (S.degraded?`<div class="card alert"><h2>读取失败</h2>
+    <p style="font-size:13px">${esc(S.degraded)}</p>
+    <p style="font-size:12px;color:var(--muted);margin-top:6px">服务可能正在启动（冷启动要读整库索引，约数秒）。下面的数字不代表真实规模。</p>
+    <div class="acts" style="margin-top:10px"><button class="btn primary" data-act="refresh">重试</button></div></div>`:"")+
+  `<div class="grid stats">
+    ${stat(st.messages??"—","消息")}
+    ${stat(st.entities??"—","实体")}
+    ${stat(scenes,"场景")}
+    ${stat(entries,"场景条目")}
+  </div>
+  <div class="split">
+    <div class="card">
+      <h2>服务与模型<span class="hint">${esc(S.space||"未选空间")}</span></h2>
+      <dl class="kv">
+        <dt>协议版本</dt><dd>${esc(S.ver?.protocolVersion??"?")} · 实现 ${esc(S.ver?.implementationVersion??"?")}</dd>
+        <dt>向量模型</dt><dd>${st.embeddingConfigured?'<span class="chip ok">已配置</span>':'<span class="chip warn">未配置</span>'} 索引任务需要它</dd>
+        <dt>整理模型</dt><dd>${st.llmConfigured?'<span class="chip ok">已配置</span>':'<span class="chip warn">未配置</span>'} 自动整理需要它</dd>
+        <dt>数据目录</dt><dd class="mono">${esc(st.dataRoot||"—")}</dd>
+        <dt>来源目录</dt><dd class="mono">${esc(st.sourceRoot||"—")}</dd>
+        <dt>后台任务</dt><dd id="bg">读取中…</dd>
+      </dl>
+      <div class="hr"></div>
+      <div class="toolbar">
+        <div class="acts">
+          <button class="btn primary" data-act="job" data-type="consolidate">立即整理记忆</button>
+          <button class="btn" data-act="job" data-type="index">构建索引</button>
+          <button class="btn ghost" data-act="refresh">刷新</button>
+        </div>
+      </div>
+      <div id="jobbox"></div>
+    </div>
+    <div class="card">
+      <h2>场景速览<span class="hint">${scenes} 个</span></h2>
+      ${scenes? `<div class="rows">${Object.values(ws.scenes).slice(0,12).map(s=>{
+        const n=Object.values(ws.entries||{}).filter(e=>e.sceneId===s.sceneId).length;
+        return `<div class="row"><div class="body"><div class="t">${esc(sceneLabel(s))}</div>
+          ${sceneSub(s)?`<div class="m mono">${esc(sceneSub(s))}</div>`:""}</div>
+          <div class="ops"><span class="chip">${n} 条</span></div></div>`;
+      }).join("")}</div>`: '<div class="empty">这个空间还没有场景。到「场景记忆」新建。</div>'}
+    </div>
+  </div>`;
+}
+async function loadOverviewExtra(){
+  try{
+    const jobs=await api("spaces/"+sid()+"/jobs");
+    S.jobs=jobs;
+    const st=S.status||{};
+    const bg=$("#bg");
+    if(bg){
+      const parts=[];
+      if(st.background?.lastConsolidateAt)parts.push("整理 "+new Date(st.background.lastConsolidateAt).toLocaleString());
+      if(st.background?.lastIndexAt)parts.push("索引 "+new Date(st.background.lastIndexAt).toLocaleString());
+      if(!parts.length)parts.push("尚未运行");
+      bg.innerHTML=esc(parts.join(" · "))+(st.background?.lastError?` <span class="chip bad">最近失败：${esc(st.background.lastError.code||"")}</span>`:"");
+    }
+    const box=$("#jobbox");
+    if(box&&jobs){
+      const rows=[].concat(jobs.jobs||jobs.items||[]);
+      box.innerHTML=rows.length
+        ? `<div class="rows" style="margin-top:12px">${rows.slice(-6).reverse().map(j=>`<div class="row"><div class="body"><div class="t">${esc(j.type||"任务")} <span class="chip">${esc(j.status||j.state||"")}</span></div><div class="m">${esc(j.startedAt?new Date(j.startedAt).toLocaleString():"")} ${j.error?"· "+esc(j.error):""}</div></div></div>`).join("")}</div>`
+        : "";
+    }
+  }catch(e){const bg=$("#bg");if(bg)bg.innerHTML=`<span class="chip bad">${esc(e.message)}</span>`;}
+}
+
+/* ---------------- people ---------------- */
+function viewPeople(){
+  const sc=scopeOptions();
+  const p=S.person;
+  return head("人物记忆","按账号读取人物档案与动态印象。档案是稳定项，印象随场合变化；纠正会保留历史。")+
+  `<div class="card">
+    <div class="toolbar">
+      <div class="field"><label for="actor">账号</label>
+        <input class="inp" id="actor" list="accounts" placeholder="qq:123456" value="${esc(S.personSel&&S.personSel.actorId||"")}">
+        <datalist id="accounts">${accountOptions()}</datalist></div>
+      <div class="field narrow"><label for="skind">场合</label>
+        <select class="inp" id="skind">${Object.entries(scopeName).map(([k,v])=>`<option value="${k}" ${S.scope.kind===k?"selected":""}>${v}</option>`).join("")}</select></div>
+      <div class="field"><label for="sid2">场合 ID</label>
+        <input class="inp" id="sid2" list="scopes" placeholder="群号 / 频道 / 房间" value="${esc(S.scope.id)}">
+        <datalist id="scopes">${sc.map(b=>`<option value="${esc(b.id)}">${esc(scopeName[b.kind]||b.kind)} ${esc(b.id)}</option>`).join("")}</datalist></div>
+      <label class="hp" style="padding-bottom:9px"><input type="checkbox" id="allsc" ${S.personSel?.allScopes?"checked":""}> 汇总本空间各场合</label>
+      <div class="acts"><button class="btn primary" data-act="person-load">读取</button></div>
+    </div>
+  </div>`+
+  (!p? `<div class="card"><div class="empty">填账号后点「读取」。账号可从右上「关系星图」或场景里的发言人复制。</div></div>`
+  : `<div class="card">
+      <h2>档案<span class="hint">${p.profiles.length} 项</span></h2>
+      ${p.profiles.length? `<div class="plist">${p.profiles.map(i=>`
+        <div class="pcard ${i.hidden?"hidden":""}" data-act="pick-person" data-key="${esc(i.key)}" data-item="${esc(i.itemKey)}">
+          <div class="av">${esc((kindName[i.itemKey]||i.itemKey||"档").slice(0,1))}</div>
+          <div style="min-width:0">
+            <div class="nm">${esc(i.value)}</div>
+            <div class="meta">${esc(kindName[i.itemKey]||i.itemKey)} · ${esc(i.accountId||"")}${i.hidden?" · 已撤回":""}</div>
+          </div>
+        </div>`).join("")}</div>`: '<div class="empty">没有档案项。</div>'}
+    </div>
+    <div class="card">
+      <h2>印象<span class="hint">${p.impressions.length} 项</span></h2>
+      ${p.impressions.length? `<div class="rows">${p.impressions.map(i=>`
+        <div class="row ${i.hidden?"hidden":""}" data-act="pick-person" data-key="${esc(i.key)}" data-item="${esc(i.itemKey)}">
+          <span class="chip">${esc(kindName[i.kind]||i.kind)}</span>
+          <div class="body"><div class="t">${esc(i.value)}</div>
+          <div class="m">${esc(i.itemKey||i.kind)} · ${esc(i.accountId||"")}${i.hidden?" · 已撤回":""}</div></div>
+        </div>`).join("")}</div>`: '<div class="empty">没有印象项。</div>'}
+    </div>
+    <div class="card">
+      <h2>纠正此人物</h2>
+      <div id="pedit">${personEditor()}</div>
+    </div>`);
+}
+function personEditor(){
+  const p=S.person; if(!p)return "";
+  const all=[...p.profiles,...p.impressions];
+  const sel=S.personSel?.item;
+  const item=all.find(i=>i.itemKey===sel?.itemKey&&i.key===sel?.key);
+  return `<div class="toolbar">
+      <div class="field" style="flex:1 1 260px"><label>选择要修改的项</label>
+        <select class="inp" id="pitem" data-change="pick-item">
+          ${all.map(i=>`<option value="${esc(i.key)}||${esc(i.itemKey)}" ${item&&item.key===i.key&&item.itemKey===i.itemKey?"selected":""}>${i.hidden?"【已撤回】":""}${esc(i.itemKey||i.kind)}：${esc(String(i.value).slice(0,40))}</option>`).join("")}
+        </select></div>
+      <div class="field" style="flex:1 1 220px"><label>改为</label><input class="inp" id="pvalue" placeholder="留空表示只撤回/恢复" value="${esc(item?item.value:"")}"></div>
+      <div class="field" style="flex:1 1 180px"><label>原因</label><input class="inp" id="preason" placeholder="管理员修订"></div>
+    </div>
+    <div class="toolbar" style="margin-top:10px"><div class="acts">
+      <button class="btn" data-act="person-preview" ${item?"":"disabled"}>预览关联影响</button>
+      <button class="btn primary" data-act="person-op" data-op="replace" ${item?"":"disabled"}>保存纠正</button>
+      <button class="btn" data-act="person-op" data-op="hide" ${item?"":"disabled"}>撤回</button>
+      <button class="btn ghost" data-act="person-op" data-op="restore" ${item?"":"disabled"}>恢复原值</button>
+    </div></div>
+    <div id="pimpact"></div>`;
+}
+
+/* ---------------- scene ---------------- */
+function viewScene(){
+  const ws=S.ws||{}, scenes=Object.values(ws.scenes||{});
+  if(!scenes.length)return head("场景记忆","按场合沉淀的规矩、梗、术语与约定。")+
+    `<div class="card"><div class="empty">还没有场景。先新建一个并绑定当前场合。</div>
+     ${sceneCreateForm()}</div>`;
+  const scene=ws.scenes[S.scene]||scenes[0];
+  const entries=Object.values(ws.entries||{}).filter(e=>e.sceneId===scene.sceneId);
+  const chips=(st)=>{
+    const t=String(st||"");
+    if(/candidate|pending|suspected/.test(t))return `<span class="chip warn">待确认</span>`;
+    if(/retract|removed|tombstone/.test(t))return `<span class="chip bad">已撤回</span>`;
+    return `<span class="chip ok">已生效</span>`;
+  };
+  return head("场景记忆","条目都挂在具体场合上；候选需要原话支持才能确认，撤回保留墓碑。",
+    `<div class="acts"><button class="btn" data-act="scene-new">＋ 新建场景</button></div>`)+
+  `<div class="card tight">
+    <div class="toolbar">
+      <div class="field" style="flex:2 1 260px"><label>场景</label>
+        <select class="inp" id="scenesel" data-change="scene-pick">
+          ${scenes.map(s=>`<option value="${esc(s.sceneId)}" ${s.sceneId===scene.sceneId?"selected":""}>${esc(sceneLabel(s))}</option>`).join("")}
+        </select></div>
+      <div class="field"><label>绑定场合</label>
+        <input class="inp" value="${esc((scene.bindings||[]).map(b=>(scopeName[b.kind]||b.kind)+":"+b.id).join("  ")||"—")}" readonly></div>
+      <div class="field narrow"><label>条目</label><input class="inp" value="${entries.length}" readonly></div>
+    </div>
+  </div>
+  <div class="split">
+    <div class="card">
+      <h2>条目<span class="hint">${entries.length} 条</span></h2>
+      ${entries.length?`<div class="rows">${entries.map(e=>`
+        <div class="row ${S.entry&&S.entry.id===e.id?"sel":""}" data-act="pick-entry" data-id="${esc(e.id)}">
+          ${chips(e.status)}
+          <div class="body"><div class="t">${esc(e.text)}</div>
+            <div class="m">${esc(kindName[e.kind]||e.kind)}${e.evidence?.length?" · "+e.evidence.length+" 条原话证据":""}${e.shareable?" · 可跨渠道":""}</div></div>
+        </div>`).join("")}</div>`:'<div class="empty">这个场景还没有条目。</div>'}
+    </div>
+    <div class="card">
+      <h2>写条目</h2>
+      <div class="grid" style="gap:10px">
+        <div class="field"><label>类型</label>
+          <input class="inp" id="ekind" placeholder="rule / meme / term / topic" value="rule"></div>
+        <div class="field"><label>内容</label>
+          <textarea class="inp" id="etext" placeholder="这个场合的定位、规矩、梗或约定"></textarea></div>
+        <label class="hp"><input type="checkbox" id="eshare"> 允许跨渠道使用（只开放摘要，原话仍限本场合）</label>
+        <div class="acts">
+          <button class="btn" data-act="entry-add" data-confirm="0">提交候选</button>
+          <button class="btn primary" data-act="entry-add" data-confirm="1">直接确认</button>
+        </div>
+      </div>
+      <div class="hr"></div>
+      <div id="edetail">${entryDetail()}</div>
+    </div>
+  </div>`;
+}
+function sceneCreateForm(){
+  return `<div class="hr"></div>
+  <div class="toolbar">
+    <div class="field"><label>场景 ID</label><input class="inp" id="nscene" placeholder="从当前场合自动生成可留空"></div>
+    <div class="field"><label>名称</label><input class="inp" id="nname" placeholder="群名 / 房间名"></div>
+    <div class="field narrow"><label>类型</label><select class="inp" id="nkind">${Object.entries(scopeName).map(([k,v])=>`<option value="${k}" ${S.scope.kind===k?"selected":""}>${v}</option>`).join("")}</select></div>
+    <div class="field"><label>场合 ID</label><input class="inp" id="nbid" placeholder="群号 / 频道 / 房间" value="${esc(S.scope.id)}"></div>
+    <div class="acts"><button class="btn primary" data-act="scene-create">新建并绑定</button></div>
+  </div>`;
+}
+function entryDetail(){
+  const e=S.entry; if(!e)return '<div class="empty">左侧选一条条目查看来源与操作。</div>';
+  return `<h3>${esc(e.text)}</h3>
+    <div class="m" style="font-size:11.5px;color:var(--faint);margin-top:4px">${esc(kindName[e.kind]||e.kind)} · rev ${esc(e.rev??"?")} · ${esc(e.status||"")}</div>
+    <div class="toolbar" style="margin-top:10px"><div class="acts">
+      <button class="btn" data-act="entry-preview">预览影响</button>
+      <button class="btn" data-act="entry-correct">按预览纠正</button>
+      <button class="btn danger" data-act="entry-retract">撤回</button>
+    </div></div>
+    <div class="field" style="margin-top:10px"><label>纠正后的内容 / 撤回原因</label>
+      <textarea class="inp" id="efix" placeholder="纠正内容放到这里；只撤回可留空">${esc(e.text)}</textarea></div>
+    <div class="field" style="margin-top:8px"><label>原因</label><input class="inp" id="ereason" placeholder="管理员纠正"></div>
+    <div id="eimpact"></div>
+    <details><summary>来源与历史</summary><pre>${esc(JSON.stringify(e,null,2))}</pre></details>`;
+}
+function bindSceneSelect(){}
+
+/* ---------------- star map ---------------- */
+function viewStar(){
+  return head("关系星图","人物与渠道构成真实三维星海。点击点亮关系，双击进入局部。")+'<div id="galaxy-host"></div>';
+}
+let galaxyPage=null,galaxyGeneration=0;
+async function renderStar(){
+  const host=document.querySelector('#galaxy-host');if(!host)return;
+  const generation=++galaxyGeneration;
+  galaxyPage?.dispose();galaxyPage=null;
+  try{const {mountGalaxy}=await import('/galaxy-page.mjs');if(generation!==galaxyGeneration||!host.isConnected)return;
+    const mounted=await mountGalaxy(host,{api,spaceId:S.space,spaces:S.spaces?.spaces||{}});
+    if(generation!==galaxyGeneration||!host.isConnected)mounted.dispose();else galaxyPage=mounted;
+  }catch(e){host.textContent='星图加载失败：'+e.message;}
+}
+
+/* ---------------- recall ---------------- */
+function viewRecall(){
+  const r=S.recall;
+  const list=r?(r.results||r.hits||[]):null;
+  return head("记忆检索","走完整检索路径：向量＋关键词＋结构化事实，结果按相关度排序。")+
+  `<div class="card">
+    <div class="toolbar">
+      <div class="field" style="flex:3 1 320px"><label>查询</label><input class="inp" id="q" placeholder="她喜欢喝什么？" value="${esc(S.lastQuery||"")}"></div>
+      <div class="field narrow"><label>场合</label><select class="inp" id="rk">${Object.entries(scopeName).map(([k,v])=>`<option value="${k}" ${S.scope.kind===k?"selected":""}>${v}</option>`).join("")}</select></div>
+      <div class="field"><label>场合 ID</label><input class="inp" id="ri" placeholder="可留空" value="${esc(S.scope.id)}"></div>
+      <div class="acts"><button class="btn primary" data-act="recall">检索</button></div>
+    </div>
+  </div>`+
+  (!list?`<div class="card"><div class="empty">输入查询后回车或点检索。</div></div>`
+  :`<div class="card"><h2>结果<span class="hint">${list.length} 条</span></h2>
+    ${list.length?`<div class="rows">${list.map(h=>`
+      <div class="row"><div class="body">
+        <div class="t">${esc(h.text||h.content||h.statement||"")}</div>
+        <div class="m">${esc(h.kind||h.layer||h.source||"")}${h.score!=null?" · 得分 "+Number(h.score).toFixed(3):""}${h.actor?" · "+esc(h.actor):""}${h.at?" · "+esc(String(h.at).slice(0,10)):""}</div>
+      </div></div>`).join("")}</div>`:'<div class="empty">没有命中。</div>'}
+    <details><summary>原始响应</summary><pre>${esc(JSON.stringify(r,null,2))}</pre></details>
+  </div>`);
+}
+
+/* ---------------- subject ---------------- */
+function viewSubject(){
+  const sc=scopeOptions(), s=S.subject;
+  const obs=s?(s.observations||[]):[];
+  return head("主体与纠正","人物／事物的来源观察与人工声明。纠正与撤回都留历史，可疑项不会被写成肯定事实。")+
+  `<div class="card">
+    <div class="toolbar">
+      <div class="field narrow"><label>场合</label><select class="inp" id="kscope">${Object.entries(scopeName).map(([k,v])=>`<option value="${k}" ${S.scope.kind===k?"selected":""}>${v}</option>`).join("")}</select></div>
+      <div class="field"><label>场合 ID</label><input class="inp" id="iscope" list="scopes2" value="${esc(S.scope.id)}"><datalist id="scopes2">${sc.map(b=>`<option value="${esc(b.id)}">${esc(b.id)}</option>`).join("")}</datalist></div>
+      <div class="field" style="flex:2 1 180px"><label>名称或别名</label><input class="inp" id="sq" placeholder="输入姓名查找条目"></div>
+      <div class="acts"><button class="btn primary" data-act="subjects">查找</button></div>
+    </div>
+    <div id="slist"></div>
+  </div>`+
+  (s?`<div class="split">
+    <div class="card"><h2>来源观察<span class="hint">${obs.length} 条</span></h2>
+      ${obs.length?`<div class="rows">${obs.filter(o=>o.status==="active").map(o=>`
+        <div class="row ${S.subjectSel&&S.subjectSel.id===o.id?"sel":""}" data-act="pick-obs" data-id="${esc(o.id)}">
+          <span class="chip ${o.authority==="manual"?"acc":o.knowledgeStatus==="candidate"?"warn":""}">${o.authority==="manual"?"人工":o.knowledgeStatus==="candidate"?"待确认":"来源"}</span>
+          <div class="body"><div class="t">${esc(o.statement)}</div><div class="m">${esc(o.aspect||"")} · rev ${esc(o.rev??"?")}</div></div>
+        </div>`).join("")}</div>`:'<div class="empty">没有生效中的观察。</div>'}
+    </div>
+    <div class="card"><h2>人工纠正</h2>
+      <div class="field"><label>纠正后的内容</label><textarea class="inp" id="sfix" placeholder="选择左侧观察后填写">${esc(S.subjectSel?.statement||"")}</textarea></div>
+      <div class="field" style="margin-top:8px"><label>原因</label><input class="inp" id="sreason" placeholder="管理员纠正"></div>
+      <div class="toolbar" style="margin-top:10px"><div class="acts">
+        <button class="btn primary" data-act="subject-rev" data-mode="correct" ${S.subjectSel?"":"disabled"}>保存纠正</button>
+        <button class="btn danger" data-act="subject-rev" data-mode="retract" ${S.subjectSel?"":"disabled"}>撤回该观察</button>
+      </div></div>
+      <details><summary>条目原始信息</summary><pre>${esc(JSON.stringify(s,null,2))}</pre></details>
+    </div>
+  </div>`:"");
+}
+
+/* ---------------- backup ---------------- */
+function viewBackup(){
+  const p=S.backupPreview;
+  return head("备份与导入","完整备份含模型设置与授权，空间导出不含模型密钥。恢复前必须预览校验和。")+
+  `<div class="split">
+    <div class="card">
+      <h2>导出</h2>
+      <div class="field"><label>备份密码（完整备份至少 8 位）</label><input class="inp" id="bpass" type="password" autocomplete="new-password"></div>
+      <div class="toolbar" style="margin-top:10px"><div class="acts">
+        <button class="btn" data-act="backup-full">完整服务备份</button>
+        <button class="btn" data-act="backup-space">导出当前空间</button>
+      </div></div>
+      <div class="hr"></div>
+      <div class="field"><label>备份 ID</label><input class="inp" id="bid" value="${esc(S.backupId||"")}" placeholder="生成或待恢复的备份 ID"></div>
+      <div class="toolbar" style="margin-top:10px"><div class="acts">
+        <button class="btn" data-act="backup-download">下载</button>
+        <button class="btn primary" data-act="backup-preview">检查并预览</button>
+      </div></div>
+    </div>
+    <div class="card">
+      <h2>导入 / 恢复</h2>
+      <div class="field"><label>本地备份文件（.vmb）</label><input class="inp" id="bfile" type="file" accept=".vmb"></div>
+      <div class="toolbar" style="margin-top:10px"><div class="acts"><button class="btn" data-act="backup-upload">上传到服务</button></div></div>
+      <div class="hr"></div>
+      <div class="toolbar">
+        <div class="field"><label>导入为新空间 ID</label><input class="inp" id="bnew" placeholder="留空则按完整恢复"></div>
+        <div class="field"><label>所属项目</label><input class="inp" id="bowner" placeholder="qq-main"></div>
+      </div>
+      <label class="hp" style="margin-top:8px"><input type="checkbox" id="breplace"> 替换同名空间（保留回退目录）</label>
+      <div class="toolbar" style="margin-top:10px"><div class="acts">
+        <button class="btn primary" data-act="backup-restore" ${p?"":"disabled"}>按预览恢复</button>
+      </div></div>
+      ${p?`<div class="hr"></div><dl class="kv">
+        <dt>类型</dt><dd>${esc(p.kind)}</dd>
+        <dt>文件</dt><dd>${esc(p.files)} 个 · ${esc((p.totalBytes/1048576).toFixed(2))} MB</dd>
+        <dt>校验和</dt><dd class="mono">${esc(p.checksum)}</dd>
+      </dl>`:""}
+      <p class="sub" style="font-size:12px;color:var(--muted);margin-top:12px">恢复会短暂停写（请求返回 503 MAINTENANCE），聊天可继续、稍后重试；完整恢复生成新目录，需用新目录启动。</p>
+    </div>
+  </div>`;
+}
+
+/* ---------------- settings ---------------- */
+const SETTING_FIELDS=[
+  ["embedBaseURL","向量服务地址","text"],["embedModel","向量模型","text"],["embedApiKey","向量密钥（留空不改）","password"],
+  ["embedBatchSize","批大小","number"],["embedTimeoutMs","超时(ms)","number"],["topK","检索条数","number"],
+  ["llmBaseURL","整理服务地址","text"],["llmModel","整理模型","text"],["llmApiKey","整理密钥（留空不改）","password"],
+  ["consolidateEnabled","自动整理","bool"],["consolidateIntervalMin","整理间隔(分)","number"],
+  ["autoIndexEnabled","自动索引","bool"],["autoIndexIntervalMin","索引间隔(分)","number"],
+  ["injectEnabled","自动注入","bool"],["rememberEnabled","允许写入","bool"],["profileCrossScope","跨渠道人物档案","bool"]
+];
+function viewSettings(){
+  const s=S.settings, vals=s?.values||{}, sec=s?.secrets||{};
+  return head("设置","模型接入、后台任务节奏与空间授权。密钥只显示是否已设置，不会回传明文。")+
+  `<div class="card">
+    <h2>模型与任务<span class="hint">${esc(S.space||"")}</span></h2>
+    ${s?`<div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(230px,1fr))">
+      ${SETTING_FIELDS.map(([k,label,type])=>{
+        const v=vals[k];
+        if(type==="bool")return `<label class="hp" style="padding:6px 0"><input type="checkbox" data-setting="${k}" ${v?"checked":""}> ${esc(label)}</label>`;
+        const hint=type==="password"?(sec[k]?"已设置":""):"";
+        return `<div class="field"><label for="st-${k}">${esc(label)} ${hint?`<span class="chip">${hint}</span>`:""}</label>
+          <input class="inp" id="st-${k}" data-setting="${k}" type="${type==="number"?"number":type==="password"?"password":"text"}" value="${esc(v??"")}" placeholder="${type==="password"?"留空表示不修改":""}"></div>`;
+      }).join("")}
+    </div>
+    <div class="toolbar" style="margin-top:14px"><div class="acts">
+      <button class="btn primary" data-act="settings-save">保存改动</button>
+      <button class="btn ghost" data-act="settings-load">重新读取</button>
+    </div></div>`
+    :`<div class="empty">点下方按钮读取当前设置。</div>
+      <div class="acts"><button class="btn primary" data-act="settings-load">读取设置</button></div>`}
+  </div>
+  <div class="card">
+    <h2>空间与授权<span class="hint">${Object.keys(S.spaces?.spaces||{}).length} 个空间 · ${(S.spaces?.projects||[]).length} 个项目</span></h2>
+    <div class="toolbar">
+      <div class="field"><label>新项目 ID</label><input class="inp" id="nproj" placeholder="qq-third"></div>
+      <div class="acts"><button class="btn" data-act="project-create">创建项目</button></div>
+    </div>
+    <div class="toolbar" style="margin-top:10px">
+      <div class="field"><label>新空间 ID</label><input class="inp" id="nspace" placeholder="space-x"></div>
+      <div class="field"><label>所属项目</label><input class="inp" id="nowner" list="projs" placeholder="qq-main"><datalist id="projs">${(S.spaces?.projects||[]).map(p=>`<option value="${esc(p)}">`).join("")}</datalist></div>
+      <div class="acts"><button class="btn" data-act="space-create">创建空间</button></div>
+    </div>
+    <div class="hr"></div>
+    <div class="field"><label>允许读取「${esc(S.space||"")}」的项目（逗号分隔，留空撤销全部）</label>
+      <input class="inp" id="readers" value="${esc((S.spaces?.spaces?.[S.space]?.readers||[]).join(","))}"></div>
+    <div class="acts" style="margin-top:10px"><button class="btn" data-act="readers-save">保存共享授权</button></div>
+    <details><summary>空间清单原始响应</summary><pre>${esc(JSON.stringify(S.spaces,null,2))}</pre></details>
+  </div>`;
+}
+
+/* ---------------- actions ---------------- */
+$("#main").addEventListener("click",async e=>{
+  const el=e.target.closest("[data-act]"); if(!el||el.disabled)return;
+  const act=el.dataset.act;
+  try{
+    if(act==="refresh"){await refreshBase();render();toast("已刷新","ok");}
+    else if(act==="job"){
+      const type=el.dataset.type;
+      const r=await api("spaces/"+sid()+"/jobs","POST",{type});
+      toast("任务已提交："+type,"ok");
+      const box=$("#jobbox"); if(box)box.innerHTML=`<pre>${esc(JSON.stringify(r,null,2))}</pre>`;
+    }
+    else if(act==="person-load"){
+      const actorId=$("#actor").value.trim(), kind=$("#skind").value, idv=$("#sid2").value.trim(), allScopes=$("#allsc").checked;
+      if(!actorId)throw new Error("先填账号");
+      S.scope={kind,id:idv}; S.personSel={actorId,allScopes,item:null};
+      S.person=await api("spaces/"+sid()+"/people","POST",{actorId,scope:S.scope,allScopes});
+      render(); toast("已读取 "+actorId,"ok");
+    }
+    else if(act==="pick-person"){
+      S.personSel=S.personSel||{}; S.personSel.item={key:el.dataset.key,itemKey:el.dataset.item};
+      render();
+    }
+    else if(act==="person-preview"){
+      const item=curPersonItem(); if(!item)throw new Error("先选一项");
+      const r=await api("spaces/"+sid()+"/people","POST",{actorId:S.personSel.actorId,scope:S.scope,allScopes:S.personSel.allScopes,action:"preview",target:{key:item.key,itemKey:item.itemKey}});
+      S.personPreview=r;
+      const box=$("#pimpact"); if(box)box.innerHTML=`<details open><summary>预览：影响 ${(r.proven||[]).length} 处已确证关联</summary><pre>${esc(JSON.stringify(r,null,2))}</pre></details>`;
+      toast("已预览影响","ok");
+    }
+    else if(act==="person-op"){
+      const item=curPersonItem(); if(!item)throw new Error("先选一项");
+      const op=el.dataset.op, value=$("#pvalue").value.trim(), reason=$("#preason").value.trim()||"管理员修订";
+      if(!S.personPreview||S.personPreview.item?.itemKey!==item.itemKey){
+        S.personPreview=await api("spaces/"+sid()+"/people","POST",{actorId:S.personSel.actorId,scope:S.scope,allScopes:S.personSel.allScopes,action:"preview",target:{key:item.key,itemKey:item.itemKey}});
+      }
+      const body={actorId:S.personSel.actorId,scope:S.scope,allScopes:S.personSel.allScopes,action:"revision",operationId:opId(),
+        target:{key:item.key,itemKey:item.itemKey},expectedEtag:item.etag,previewToken:S.personPreview.previewToken,op};
+      if(op==="replace")body.value=value;
+      if(op!=="replace"&&!reason)throw new Error("填原因");
+      body.reason=reason;
+      await api("spaces/"+sid()+"/people","POST",body);
+      S.personPreview=null;
+      S.person=await api("spaces/"+sid()+"/people","POST",{actorId:S.personSel.actorId,scope:S.scope,allScopes:S.personSel.allScopes});
+      render(); toast(op==="replace"?"已保存纠正":op==="hide"?"已撤回":"已恢复","ok");
+    }
+    else if(act==="scene-new"){
+      const box=$("#main .page");
+      if(box&&!$("#nscene"))box.insertAdjacentHTML("beforeend",`<div class="card">${sceneCreateForm()}</div>`);
+    }
+    else if(act==="scene-create"){
+      const typed=$("#nscene").value.trim(), name=$("#nname").value.trim(), kind=$("#nkind").value, idv=$("#nbid").value.trim();
+      if(!idv)throw new Error("填场合 ID");
+      const sceneId=typed||((kind||"group")+":"+idv);
+      await wsAction("scene",{operationId:opId(),sceneId,name:name||sceneId,bindings:[{kind,id:idv}]});
+      S.scene=sceneId; await refreshBase(); render(); toast("场景已新建","ok");
+    }
+    else if(act==="pick-entry"){
+      S.entry=(S.ws?.entries||{})[el.dataset.id]||null; S.entryPreview=null; render();
+    }
+    else if(act==="entry-add"){
+      const confirm=el.dataset.confirm==="1";
+      const text=$("#etext").value.trim(); if(!text)throw new Error("填内容");
+      const scope={kind:(S.ws?.scenes?.[S.scene]?.bindings?.[0]?.kind)||S.scope.kind,id:(S.ws?.scenes?.[S.scene]?.bindings?.[0]?.id)||S.scope.id};
+      if(!scope.id)throw new Error("这个场景没有绑定场合，先在设置里确认");
+      await wsAction("entry",{operationId:opId(),sceneId:S.scene,scope,kind:$("#ekind").value.trim()||"impression",text,shareable:$("#eshare").checked,confirm});
+      await refreshBase(); render(); toast(confirm?"已确认并生效":"已提交候选","ok");
+    }
+    else if(act==="entry-preview"){
+      if(!S.entry)throw new Error("先选条目");
+      S.entryPreview=await wsAction("preview",{entryId:S.entry.id});
+      const box=$("#eimpact"); if(box)box.innerHTML=`<details open><summary>影响：已确证 ${(S.entryPreview.proven||[]).length} · 可疑 ${(S.entryPreview.suspected||[]).length}</summary><pre>${esc(JSON.stringify(S.entryPreview,null,2))}</pre></details>`;
+      toast("已预览","ok");
+    }
+    else if(act==="entry-correct"){
+      if(!S.entry)throw new Error("先选条目");
+      if(!S.entryPreview)S.entryPreview=await wsAction("preview",{entryId:S.entry.id});
+      const scope=(S.ws?.scenes?.[S.scene]?.bindings?.[0])||S.scope;
+      await wsAction("entry",{operationId:opId(),sceneId:S.scene,scope,kind:S.entry.kind,text:$("#efix").value.trim(),shareable:!!S.entry.shareable,
+        entryId:S.entry.id,expectedRev:S.entry.rev,previewToken:S.entryPreview.previewToken,confirm:true});
+      await refreshBase(); S.entry=null;S.entryPreview=null; render(); toast("已按预览纠正","ok");
+    }
+    else if(act==="entry-retract"){
+      if(!S.entry)throw new Error("先选条目");
+      if(!S.entryPreview)S.entryPreview=await wsAction("preview",{entryId:S.entry.id});
+      await wsAction("retract",{operationId:opId(),entryId:S.entry.id,previewToken:S.entryPreview.previewToken,reason:$("#ereason").value.trim()||"管理员撤回"});
+      await refreshBase(); S.entry=null;S.entryPreview=null; render(); toast("已撤回（保留墓碑）","ok");
+    }
+    else if(act==="recall"){
+      const query=$("#q").value.trim(); if(!query)throw new Error("填查询");
+      S.lastQuery=query; S.scope={kind:$("#rk").value,id:$("#ri").value.trim()};
+      S.recall=await api("spaces/"+sid()+"/recall","POST",{query,scope:S.scope});
+      render();
+    }
+    else if(act==="subjects"){
+      S.scope={kind:$("#kscope").value,id:$("#iscope").value.trim()};
+      const q=$("#sq").value.trim();
+      const d=await api("spaces/"+sid()+"/subjects?"+new URLSearchParams({scopeKind:S.scope.kind,scopeId:S.scope.id,q}));
+      const subs=d.subjects||[];
+      const box=$("#slist");
+      box.innerHTML=subs.length?`<div class="rows" style="margin-top:12px">${subs.map(s=>`
+        <div class="row" data-act="pick-subject" data-id="${esc(s.id)}">
+          <span class="chip ${s.knowledgeStatus==="candidate"?"warn":"ok"}">${s.knowledgeStatus==="candidate"?"待确认":"已建档"}</span>
+          <div class="body"><div class="t">${esc(s.label)}</div><div class="m mono">${esc(s.id)}</div></div>
+        </div>`).join("")}</div>`:'<div class="empty">没有匹配的条目。</div>';
+      if(!subs.length)toast("没有匹配","err");
+    }
+    else if(act==="pick-subject"){
+      const d=await api("spaces/"+sid()+"/subjects/"+encodeURIComponent(el.dataset.id)+"?"+new URLSearchParams({scopeKind:S.scope.kind,scopeId:S.scope.id}));
+      S.subject=d; S.subjectSel=null; render();
+    }
+    else if(act==="pick-obs"){
+      S.subjectSel=(S.subject.observations||[]).find(o=>o.id===el.dataset.id)||null; render();
+    }
+    else if(act==="subject-rev"){
+      if(!S.subject||!S.subjectSel)throw new Error("先选观察");
+      const mode=el.dataset.mode;
+      await api("spaces/"+sid()+"/subjects/"+encodeURIComponent(S.subject.subject.id)+"/revisions","POST",{
+        operationId:opId(),scope:S.scope,action:mode,observationId:S.subjectSel.id,expectedRev:S.subjectSel.rev,
+        statement:$("#sfix").value.trim(),reason:$("#sreason").value.trim()||"管理员纠正"});
+      const d=await api("spaces/"+sid()+"/subjects/"+encodeURIComponent(S.subject.subject.id)+"?"+new URLSearchParams({scopeKind:S.scope.kind,scopeId:S.scope.id}));
+      S.subject=d;S.subjectSel=null;render(); toast(mode==="correct"?"已纠正":"已撤回","ok");
+    }
+    else if(act==="backup-full"||act==="backup-space"){
+      const password=$("#bpass").value||undefined;
+      const r=await api("admin/backups","POST",{...(act==="backup-space"?{spaceId:S.space}:{}),password});
+      S.backupId=r.backupId; render(); toast("备份已生成："+r.backupId,"ok");
+    }
+    else if(act==="backup-download"){
+      const idv=$("#bid").value.trim(); if(!idv)throw new Error("填备份 ID");
+      const r=await fetch("/api/v1/admin/backups/"+encodeURIComponent(idv),{headers:{authorization:"Bearer "+S.token}});
+      if(!r.ok){const d=await r.json().catch(()=>({}));throw new Error(d.error||("HTTP "+r.status));}
+      const url=URL.createObjectURL(await r.blob()),a=document.createElement("a");
+      a.href=url;a.download=idv+".vmb";a.click();setTimeout(()=>URL.revokeObjectURL(url),1500);
+      toast("开始下载","ok");
+    }
+    else if(act==="backup-preview"){
+      const idv=$("#bid").value.trim(); if(!idv)throw new Error("填备份 ID");
+      S.backupPreview=await api("admin/backups/"+encodeURIComponent(idv)+"/preview","POST",{password:$("#bpass").value});
+      S.backupPreview.id=idv; render(); toast("预览通过","ok");
+    }
+    else if(act==="backup-upload"){
+      const f=$("#bfile").files[0]; if(!f)throw new Error("选文件");
+      const pw=btoa(String.fromCharCode(...new TextEncoder().encode($("#bpass").value)));
+      const r=await fetch("/api/v1/admin/backups",{method:"POST",headers:{authorization:"Bearer "+S.token,"content-type":"application/octet-stream","x-backup-password":pw},body:f});
+      const d=await r.json(); if(!r.ok)throw new Error(d.error||"上传失败");
+      S.backupId=d.backupId; render(); toast("已上传："+d.backupId,"ok");
+    }
+    else if(act==="backup-restore"){
+      const p=S.backupPreview; if(!p)throw new Error("先预览");
+      await api("admin/backups/"+encodeURIComponent(p.id)+"/restore","POST",{
+        password:$("#bpass").value,expectedChecksum:p.checksum,
+        spaceId:$("#bnew").value.trim()||undefined,owner:$("#bowner").value.trim()||undefined,replace:$("#breplace").checked});
+      toast("恢复完成，按提示用新目录启动","ok");
+    }
+    else if(act==="settings-load"){
+      S.settings=await api("admin/spaces/"+sid()+"/settings"); render(); toast("已读取设置","ok");
+    }
+    else if(act==="settings-save"){
+      const patch={};
+      $$("[data-setting]").forEach(el=>{
+        const k=el.dataset.setting;
+        if(el.type==="checkbox"){patch[k]=el.checked;return;}
+        const raw=el.value.trim();
+        if(raw==="")return;
+        if(el.type==="number"){const n=Number(raw); if(Number.isFinite(n))patch[k]=n; return;}
+        patch[k]=raw;
+      });
+      await api("admin/spaces/"+sid()+"/settings","PUT",{patch});
+      S.settings=await api("admin/spaces/"+sid()+"/settings"); render(); toast("已保存 "+Object.keys(patch).length+" 项","ok");
+    }
+    else if(act==="project-create"){
+      const projectId=$("#nproj").value.trim(); if(!projectId)throw new Error("填项目 ID");
+      const r=await api("admin/projects","POST",{projectId});
+      S.spaces=await api("admin/spaces"); render();
+      toast("项目已创建，凭据只显示这一次："+r.token,"ok");
+    }
+    else if(act==="space-create"){
+      const spaceId=$("#nspace").value.trim(), owner=$("#nowner").value.trim();
+      if(!spaceId||!owner)throw new Error("填空间 ID 与项目");
+      await api("admin/spaces","POST",{spaceId,owner});
+      S.spaces=await api("admin/spaces"); render(); toast("空间已创建","ok");
+    }
+    else if(act==="readers-save"){
+      const ids=$("#readers").value.split(",").map(x=>x.trim()).filter(Boolean);
+      await api("admin/spaces/"+sid()+"/readers","PUT",{projectIds:ids});
+      S.spaces=await api("admin/spaces"); render(); toast("授权已保存","ok");
+    }
+  }catch(err){
+    toast(err.message+(err.status?" · HTTP "+err.status:""),"err");
+  }
+});
+$("#main").addEventListener("change",e=>{
+  const el=e.target.closest("[data-change]"); if(!el)return;
+  if(el.dataset.change==="scene-pick"){S.scene=el.value;S.entry=null;S.entryPreview=null;render();}
+  if(el.dataset.change==="pick-item"){
+    const [key,itemKey]=String(el.value).split("||");
+    S.personSel=S.personSel||{}; S.personSel.item={key,itemKey}; S.personPreview=null; render();
+  }
+});
+$("#main").addEventListener("input",e=>{
+  const el=e.target.closest("[data-input]");
+
+});
+$("#main").addEventListener("keydown",e=>{
+  if(e.key!=="Enter")return;
+  const id=e.target.id;
+  if(id==="q"){e.preventDefault();$('[data-act="recall"]')?.click();}
+  if(id==="actor"){e.preventDefault();$('[data-act="person-load"]')?.click();}
+  if(id==="sq"){e.preventDefault();$('[data-act="subjects"]')?.click();}
+});
+function curPersonItem(){
+  const sel=S.personSel?.item; if(!sel||!S.person)return null;
+  return [...S.person.profiles,...S.person.impressions].find(i=>i.key===sel.key&&i.itemKey===sel.itemKey)||null;
+}
+
+/* ---------------- boot ---------------- */
+function hideBoot(){const b=$("#boot-screen");if(b)b.hidden=true;}
+function showGate(msg){
+  hideBoot();
+  $("#gate").hidden=false; $("#app").hidden=true;
+  if(msg)$("#gate-msg").textContent=msg;
+}
+// 本机单人使用：默认不要凭据。服务端带 --no-auth 时，未携带凭据的回环请求就是管理员，
+// 所以这里先直接开门；只有服务端明确回 401（即没开 --no-auth）才回退到凭据表单。
+(async function boot(){
+  try{
+    S.spaces=await api("admin/spaces");
+    S.anonymous=true;
+    await enter();
+    return;
+  }catch(err){
+    if(err.status&&err.status!==401){showGate("服务未就绪："+err.message);return;}
+    if(!err.status){showGate("连不上服务（"+location.origin+"）");$("#gate-dot").classList.add("off");return;}
+  }
+  const saved=localStorage.getItem(LS_TOKEN);
+  if(saved){
+    S.token=saved;
+    try{
+      S.spaces=await api("admin/spaces");
+      $("#remember").checked=true;
+      await enter();
+      return;
+    }catch(e){S.token="";localStorage.removeItem(LS_TOKEN);}
+  }
+  showGate("");
+  try{
+    const r=await fetch("/health",{signal:AbortSignal.timeout(2500)});
+    $("#gate-dot").classList.toggle("off",!r.ok);
+  }catch{$("#gate-dot").classList.add("off");}
+})();
+</script>
+</body>
+</html>

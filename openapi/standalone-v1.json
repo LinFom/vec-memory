@@ -2,8 +2,8 @@
   "openapi": "3.1.0",
   "info": {
     "title": "vec-memory standalone protocol",
-    "version": "1.1.0",
-    "description": "Standalone service. Default port 8091. All business and admin routes require Bearer credentials; admin routes require administrator credentials. POST/PUT bodies must be JSON objects, at most 4 MiB. This contract is separate from the legacy /api/vec service."
+    "version": "1.2.0",
+    "description": "Standalone HTTP JSON service. Project routes require Bearer credentials and space/scope authorization. Local no-credential management is available only with loopback localAdmin mode; --require-auth disables it. Management operations are unavailable to project credentials."
   },
   "servers": [
     {
@@ -2133,6 +2133,605 @@
           },
           "default": {
             "description": "Stable error; includes MAINTENANCE (503), STALE_REVISION / PREVIEW_REQUIRED (409), INVALID_BACKUP / PASSWORD_REQUIRED (400)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/spaces/{spaceId}/graph": {
+      "post": {
+        "summary": "Full relationship projection. Projects must supply scope. Explicit relations survive the interaction time range.",
+        "tags": [
+          "Relationship graph"
+        ],
+        "parameters": [
+          {
+            "name": "spaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "from": {
+                    "type": "number"
+                  },
+                  "to": {
+                    "type": "number"
+                  },
+                  "scope": {
+                    "type": "object",
+                    "required": [
+                      "kind",
+                      "id"
+                    ],
+                    "properties": {
+                      "kind": {
+                        "enum": [
+                          "private",
+                          "group",
+                          "game",
+                          "channel"
+                        ]
+                      },
+                      "id": {
+                        "type": "string",
+                        "minLength": 1
+                      }
+                    },
+                    "additionalProperties": false
+                  },
+                  "sharedSpaceIds": {
+                    "type": "array",
+                    "maxItems": 20,
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "includeMemories": {
+                    "type": "boolean",
+                    "default": false
+                  },
+                  "includeSimilarity": {
+                    "type": "boolean",
+                    "default": false
+                  }
+                },
+                "required": [],
+                "additionalProperties": true
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful operation; fields may be extended",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Stable error code and readable explanation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/spaces/{spaceId}/graph-evidence": {
+      "post": {
+        "summary": "Read exact persisted message sources; each item is scope-filtered.",
+        "tags": [
+          "Relationship graph"
+        ],
+        "parameters": [
+          {
+            "name": "spaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "ids": {
+                    "type": "array",
+                    "maxItems": 30,
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "scope": {
+                    "type": "object",
+                    "required": [
+                      "kind",
+                      "id"
+                    ],
+                    "properties": {
+                      "kind": {
+                        "enum": [
+                          "private",
+                          "group",
+                          "game",
+                          "channel"
+                        ]
+                      },
+                      "id": {
+                        "type": "string",
+                        "minLength": 1
+                      }
+                    },
+                    "additionalProperties": false
+                  }
+                },
+                "required": [
+                  "ids"
+                ],
+                "additionalProperties": true
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful operation; fields may be extended",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Stable error code and readable explanation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/spaces/{spaceId}/graph-memories": {
+      "post": {
+        "summary": "Management only: expand visible memory entries and events.",
+        "tags": [
+          "Relationship graph"
+        ],
+        "parameters": [
+          {
+            "name": "spaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "actorIds": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "scope": {
+                    "type": "object",
+                    "required": [
+                      "kind",
+                      "id"
+                    ],
+                    "properties": {
+                      "kind": {
+                        "enum": [
+                          "private",
+                          "group",
+                          "game",
+                          "channel"
+                        ]
+                      },
+                      "id": {
+                        "type": "string",
+                        "minLength": 1
+                      }
+                    },
+                    "additionalProperties": false
+                  }
+                },
+                "required": [],
+                "additionalProperties": true
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful operation; fields may be extended",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Stable error code and readable explanation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/spaces/{spaceId}/relationships": {
+      "post": {
+        "summary": "Management only: preview or revise explicit relationships. Existing changes require current expectedRev and previewToken.",
+        "tags": [
+          "Relationship graph"
+        ],
+        "parameters": [
+          {
+            "name": "spaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "operationId": {
+                    "type": "string",
+                    "maxLength": 200
+                  },
+                  "scope": {
+                    "type": "object",
+                    "required": [
+                      "kind",
+                      "id"
+                    ],
+                    "properties": {
+                      "kind": {
+                        "enum": [
+                          "private",
+                          "group",
+                          "game",
+                          "channel"
+                        ]
+                      },
+                      "id": {
+                        "type": "string",
+                        "minLength": 1
+                      }
+                    },
+                    "additionalProperties": false
+                  },
+                  "action": {
+                    "enum": [
+                      "create",
+                      "preview",
+                      "confirm",
+                      "correct",
+                      "retract"
+                    ]
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "sourceActorId": {
+                    "type": "string"
+                  },
+                  "targetActorId": {
+                    "type": "string"
+                  },
+                  "kind": {
+                    "enum": [
+                      "relationship",
+                      "attitude"
+                    ]
+                  },
+                  "predicate": {
+                    "type": "string",
+                    "maxLength": 80
+                  },
+                  "statement": {
+                    "type": "string",
+                    "maxLength": 2000
+                  },
+                  "evidenceIds": {
+                    "type": "array",
+                    "maxItems": 100,
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "expectedRev": {
+                    "type": "integer"
+                  },
+                  "previewToken": {
+                    "type": "string"
+                  },
+                  "reason": {
+                    "type": "string"
+                  },
+                  "negated": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "operationId"
+                ],
+                "additionalProperties": true
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful operation; fields may be extended",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Stable error code and readable explanation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/spaces/{spaceId}/graph-identity": {
+      "post": {
+        "summary": "Management only: verify or revoke platform identity for view-only cross-space deduplication.",
+        "tags": [
+          "Relationship graph"
+        ],
+        "parameters": [
+          {
+            "name": "spaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "operationId": {
+                    "type": "string",
+                    "maxLength": 200
+                  },
+                  "scope": {
+                    "type": "object",
+                    "required": [
+                      "kind",
+                      "id"
+                    ],
+                    "properties": {
+                      "kind": {
+                        "enum": [
+                          "private",
+                          "group",
+                          "game",
+                          "channel"
+                        ]
+                      },
+                      "id": {
+                        "type": "string",
+                        "minLength": 1
+                      }
+                    },
+                    "additionalProperties": false
+                  },
+                  "nodeId": {
+                    "type": "string"
+                  },
+                  "platform": {
+                    "type": "string"
+                  },
+                  "stableId": {
+                    "type": "string"
+                  },
+                  "revoke": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "operationId",
+                  "nodeId",
+                  "platform",
+                  "stableId"
+                ],
+                "additionalProperties": true
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful operation; fields may be extended",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Stable error code and readable explanation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/spaces/{spaceId}/relation-backfill": {
+      "post": {
+        "summary": "Management only: manual historical extraction. Preview does not call a model; pause completes the active batch; jobs are durable.",
+        "tags": [
+          "Relationship graph"
+        ],
+        "parameters": [
+          {
+            "name": "spaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "operationId": {
+                    "type": "string",
+                    "maxLength": 200
+                  },
+                  "scope": {
+                    "type": "object",
+                    "required": [
+                      "kind",
+                      "id"
+                    ],
+                    "properties": {
+                      "kind": {
+                        "enum": [
+                          "private",
+                          "group",
+                          "game",
+                          "channel"
+                        ]
+                      },
+                      "id": {
+                        "type": "string",
+                        "minLength": 1
+                      }
+                    },
+                    "additionalProperties": false
+                  },
+                  "action": {
+                    "enum": [
+                      "preview",
+                      "start",
+                      "pause",
+                      "resume"
+                    ]
+                  },
+                  "jobId": {
+                    "type": "string"
+                  },
+                  "from": {
+                    "type": "number"
+                  },
+                  "to": {
+                    "type": "number"
+                  }
+                },
+                "required": [
+                  "action"
+                ],
+                "additionalProperties": true
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful operation; fields may be extended",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Stable error code and readable explanation",
             "content": {
               "application/json": {
                 "schema": {
