@@ -51,6 +51,10 @@
     "withKeywords": true,
     "withSummary": true,
     "topK": 8,
+    "recallPolicyMode": "off",
+    "recallPolicyWeights": "",
+    "recallExposureWindow": 3,
+    "recallExposureDecay": 0.6,
     "queryInstruction": "",
     "suspectMinCount": 8,
     "suspectMaxSpread": 0.35,
@@ -86,6 +90,33 @@
     "managementOrigins": []
   },
   "configSchema": {
+    "recallPolicyMode": {
+      "type": "string",
+      "enum": ["off", "shadow", "enabled"],
+      "label": "检索重排模式（默认关）",
+      "description": "off = 完全不调用策略层、响应与历史基线逐字可比（fail-closed，也是 kill switch）；shadow = 只算各信号分量写进响应诊断、hits 顺序原样不动；enabled = 分量参与定序。改这个键不需要重启服务，也不产生任何文档向量，不会触发整库重嵌。"
+    },
+    "recallPolicyWeights": {
+      "type": "string",
+      "label": "重排权重 JSON（留空 = 免调权 RRF）",
+      "description": "留空用 Reciprocal Rank Fusion 名次融合，无超参、不受余弦与话题重合度量纲差异影响。填 JSON 对象（键只能是 base/entity/recency/frequency/context）则切换为加权和，内部先做 min-max 归一化并自动归一化权重和；解析失败会显式退回 RRF 并回报 POLICY_CONFIG_INVALID，不静默。"
+    },
+    "recallExposureWindow": {
+      "type": "number",
+      "min": 1,
+      "max": 16,
+      "step": 1,
+      "label": "曝光降权窗口（轮）",
+      "description": "最近 N 轮被 /search 返回过的条目让位，不排除。注意这是「检索级曝光」，不是「真正进过 prompt 的注入级曝光」。状态是纯内存有界派生量，重启归零、不落盘、不进备份。"
+    },
+    "recallExposureDecay": {
+      "type": "number",
+      "min": 0.01,
+      "max": 1,
+      "step": 0.05,
+      "label": "曝光降权系数",
+      "description": "每被曝光一次乘一次该系数（如 0.6）。取值下限 0.01 而不是 0，避免降权退化成静默排除。"
+    },
     "llmEndpointKind": {
       "type": "string",
       "enum": [

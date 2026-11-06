@@ -125,6 +125,14 @@ export const DEFAULT_SETTINGS = {
   // redacted 口径：snippets+summary（宽，实测空表 0/502）· summary（窄，空表 94/502）
   keywordsCaliber: 'snippets+summary',
   topK: 8,
+  // ── 读侧召回策略（票 03）[by:WorkBuddy] ──────────────────────────────
+  // 默认 off = fail-closed；这些键**不产生文档向量**，不进 encodingIdentity、
+  // 不改 sourceHash，因此改它们永远不会触发整库重嵌。
+  // 权重留空 ⇒ RRF 名次融合（无超参）；填 JSON 对象 ⇒ 加权和（先 min-max 归一化）。
+  recallPolicyMode: 'off',
+  recallPolicyWeights: '',
+  recallExposureWindow: 3,
+  recallExposureDecay: 0.6,
   // 查询侧的指令前缀（非对称编码）。留空用 Qwen3 的官方默认。
   queryInstruction: '',
   // ── M2 注入（ADR-0009，2026-10-10 拍板：人格属性句 · 每人 2 条 · 全群开）──

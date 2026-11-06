@@ -45,6 +45,8 @@ import {
 import { embedDocuments } from './core/embed.mjs';
 import { distribution, judge, summarize } from './core/stats.mjs';
 import { RANK_VERSION } from './core/rank.mjs';
+import { parsePolicy, rerankHits } from './core/recall-policy.mjs';
+import { createExposureState } from './core/exposure.mjs';
 import {
   chunksDir,
   DEFAULT_SETTINGS,
@@ -121,6 +123,33 @@ async function readJsonBody(req) {
 //     把重试改成 0 只会让一次抖动留下一批永久缺口。
 const QUERY_EMBED_BUDGET_MS = 1500;
 const INJECT_EMBED_BUDGET_MS = 1800;
+
+// ── 读侧召回策略（票 03 / docs/cost-and-mitigations-20261106.md）[by:WorkBuddy] ──
+// 默认 `off` ⇒ 连策略函数都不调用、响应不多一个字段，与历史基线逐字可比。
+// 三态就是 feature flag：off(fail-closed) / shadow(只算不排、零副作用) / enabled(参与定序)。
+// 任何配置非法或运行抛错 ⇒ 原顺序 + 稳定码，禁止静默放行。
+// 曝光状态是纯内存有界派生量（exposure.mjs），不落盘、不进备份、不进编码身份。
+const RECALL_EXPOSURE = createExposureState();
+function applyRecallPolicy(rt, hits, { query, chatKey, k, now = Date.now() }) {
+  const cfg = parsePolicy(rt.settings || {});
+  if (!cfg.ok) {
+    return { hits, policy: { mode: cfg.mode, applied: false,
+      degraded: { code: cfg.reason, reason: cfg.detail } } };
+  }
+  if (cfg.mode === 'off') return { hits, policy: null };
+  try {
+    const spaceKey = String(rt.dir || 'default');
+    const out = rerankHits({ hits, query, chatKey, spaceKey, cfg,
+      exposure: RECALL_EXPOSURE, now, k });
+    if (out.recordIds.length) {
+      RECALL_EXPOSURE.record(`${spaceKey}|${chatKey ?? ''}`, out.recordIds, now);
+    }
+    return { hits: out.hits, policy: out.diagnostics };
+  } catch (e) {
+    return { hits, policy: { mode: cfg.mode, applied: false,
+      degraded: { code: 'POLICY_FAILED', reason: String(e?.message || e).slice(0, 200) } } };
+  }
+}
 
 /**
  * 造一份"主动查询用"的嵌入端点：一条总预算 + 不重试。
@@ -1670,6 +1699,7 @@ export async function handleMemoryVec(req, res, pathname, helpers) {
           return true;
         }
         const r = rt.store.searchText({ text: qNormalized, k, chatKey, kind });
+        const pol = applyRecallPolicy(rt, r.hits, { query: qNormalized, chatKey, k });
         json(res, 200, {
           ok: true,
           q: text,
@@ -1693,7 +1723,7 @@ export async function handleMemoryVec(req, res, pathname, helpers) {
             + '并列按命中词数、再按时间新近排序。换个说法可能搜不到 —— 这就是要向量路的理由。'
             + '事件在独立的 events 容器里（分数不可比，不混排）。',
           events: eventSidecar(qNormalized),
-          hits: r.hits.map((h) => ({
+          hits: pol.hits.map((h) => ({
             source: docSourceOf(h.meta),
             id: h.id,
             score: h.score,
@@ -1702,7 +1732,8 @@ export async function handleMemoryVec(req, res, pathname, helpers) {
             title: h.meta.title,
             when: h.meta.when,
             text: h.meta.text
-          }))
+          })),
+          ...(pol.policy ? { policy: pol.policy } : {})
         });
         return true;
       }
@@ -1730,6 +1761,7 @@ export async function handleMemoryVec(req, res, pathname, helpers) {
         const fail = embedFailureOf(e);
         if (reqMode === 'auto') {
           const r = rt.store.searchText({ text: qNormalized, k, chatKey, kind });
+          const pol = applyRecallPolicy(rt, r.hits, { query: qNormalized, chatKey, k });
           json(res, 200, {
             ok: true, q: text, qNormalized, requested: reqMode, mode: 'exact',
             scoredBy: 'token-overlap',
@@ -1741,11 +1773,12 @@ export async function handleMemoryVec(req, res, pathname, helpers) {
             note: '关键词路：score = 话题重合度（0~2，含跳字 bigram），不是语义相似度。'
               + '事件在独立的 events 容器里（分数不可比，不混排）。',
             events: eventSidecar(qNormalized),
-            hits: r.hits.map((h) => ({
+            hits: pol.hits.map((h) => ({
               source: docSourceOf(h.meta),
               id: h.id, score: h.score, matched: h.matched,
               chatKey: h.meta.chatKey, title: h.meta.title, when: h.meta.when, text: h.meta.text
-            }))
+            })),
+            ...(pol.policy ? { policy: pol.policy } : {})
           });
           return true;
         }
@@ -1760,6 +1793,8 @@ export async function handleMemoryVec(req, res, pathname, helpers) {
       }
       const scores = result.hits.map((h) => h.score);
       const dist = distribution(scores, { topK: Math.min(5, k) });
+      // 诊断分布仍按**原始**召回顺序的分数计算（策略不改 result.hits 本身，只返回新数组）。
+      const pol = applyRecallPolicy(rt, result.hits, { query: qNormalized, chatKey, k });
       json(res, 200, {
         ok: true,
         q: text,
@@ -1775,7 +1810,7 @@ export async function handleMemoryVec(req, res, pathname, helpers) {
         distribution: { ...dist, sorted: undefined, buckets: undefined },
         judgment: judge(dist, { topK: Math.min(5, k) }),
         events: eventSidecar(qNormalized),
-        hits: result.hits.map((h) => ({
+        hits: pol.hits.map((h) => ({
           source: docSourceOf(h.meta),
           id: h.id,
           score: Number(h.score.toFixed(6)),
@@ -1783,7 +1818,8 @@ export async function handleMemoryVec(req, res, pathname, helpers) {
           title: h.meta.title,
           when: h.meta.when,
           text: h.meta.text
-        }))
+        })),
+        ...(pol.policy ? { policy: pol.policy } : {})
       });
       return true;
     }
