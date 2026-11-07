@@ -1,0 +1,253 @@
+{
+  "title": "vec-memory generic memory import contract v1",
+  "description": "离线导入文档的受限 JSON Schema 子集。支持的关键字白名单见 interop/validate-import.mjs；遇到白名单外关键字会 fail-closed 报错。字段名、类型与错误码均不含任何具体 Agent 项目名。本文件是形状的唯一真值源，契约文档只解释语义。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contract", "spaceId", "origin", "entries"],
+  "properties": {
+    "contract": {
+      "type": "string",
+      "const": "vec-memory/import@1",
+      "description": "契约标识与版本。"
+    },
+    "spaceId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$",
+      "description": "目标空间 ID，与独立协议同规则。"
+    },
+    "notes": {
+      "type": "string",
+      "maxLength": 2000,
+      "description": "给人工核对者的自由备注，不参与任何判定。"
+    },
+    "origin": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "verified", "source"],
+      "description": "整批来源。verified 恒为 false：本契约只接未核验的历史导入。",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "const": "historical-import"
+        },
+        "verified": {
+          "type": "boolean",
+          "const": false
+        },
+        "source": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["locator"],
+          "properties": {
+            "locator": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 500,
+              "description": "原始文件与行号，或原始记录的稳定 ID。"
+            },
+            "file": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 500
+            },
+            "line": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "recordId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            }
+          }
+        },
+        "note": {
+          "type": "string",
+          "maxLength": 1000
+        }
+      }
+    },
+    "messages": {
+      "type": "array",
+      "maxItems": 500,
+      "description": "可选的原话原料，形状与独立协议 POST /messages 一致。",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["messageId", "conversationId", "actorId", "role", "timestamp", "text", "scope"],
+        "properties": {
+          "messageId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "conversationId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "actorId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "role": {
+            "type": "string",
+            "enum": ["user", "assistant", "system", "tool"]
+          },
+          "timestamp": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "text": {
+            "type": "string",
+            "maxLength": 100000
+          },
+          "scope": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["kind", "id"],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": ["private", "group", "game", "channel"]
+              },
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              }
+            }
+          }
+        }
+      }
+    },
+    "entries": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 5000,
+      "description": "记忆条目。每条必须自带来源定位；不携带向量、不携带评分、不携带运行状态。",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "text", "scope", "origin"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$",
+            "description": "调用方生成的稳定 ID，用于导入幂等。"
+          },
+          "kind": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_]{0,63}$",
+            "description": "目标服务已有的事实分类名。契约不复制服务枚举，合法性由写入端校验。"
+          },
+          "text": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 20000
+          },
+          "scope": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["kind", "id"],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": ["private", "group", "game", "channel"]
+              },
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              }
+            }
+          },
+          "actorId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200,
+            "description": "说话人稳定标识；认不出时留空，不得猜人。"
+          },
+          "subject": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id"],
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              },
+              "displayName": {
+                "type": "string",
+                "maxLength": 200
+              },
+              "kind": {
+                "type": "string",
+                "maxLength": 64
+              }
+            }
+          },
+          "evidenceIds": {
+            "type": "array",
+            "maxItems": 100,
+            "description": "引用本批 messages 中的 messageId；不得引用机器输出作为事实证据。",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            }
+          },
+          "origin": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["kind", "verified", "source"],
+            "description": "逐条来源。verified 恒为 false；人工确认只能由服务既有写入口完成，不写回本契约。",
+            "properties": {
+              "kind": {
+                "type": "string",
+                "const": "historical-import"
+              },
+              "verified": {
+                "type": "boolean",
+                "const": false
+              },
+              "source": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["locator"],
+                "properties": {
+                  "locator": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500
+                  },
+                  "file": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500
+                  },
+                  "line": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "recordId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  }
+                }
+              },
+              "note": {
+                "type": "string",
+                "maxLength": 1000
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

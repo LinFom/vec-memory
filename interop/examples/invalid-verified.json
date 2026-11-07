@@ -1,0 +1,31 @@
+{
+  "contract": "vec-memory/import@1",
+  "spaceId": "demo",
+  "origin": {
+    "kind": "historical-import",
+    "verified": false,
+    "source": {"locator": "facts.jsonl:1-2"}
+  },
+  "entries": [
+    {
+      "id": "entry-001",
+      "text": "喜欢不加糖的茶",
+      "scope": {"kind": "private", "id": "chat-a"},
+      "origin": {
+        "kind": "historical-import",
+        "verified": false,
+        "source": {"locator": "facts.jsonl:1"}
+      }
+    },
+    {
+      "id": "entry-002",
+      "text": "周末约好去露营",
+      "scope": {"kind": "group", "id": "team"},
+      "origin": {
+        "kind": "historical-import",
+        "verified": true,
+        "source": {"locator": "facts.jsonl:2"}
+      }
+    }
+  ]
+}

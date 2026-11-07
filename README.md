@@ -38,6 +38,8 @@ Windows 可将路径换成 `E:\vec-memory-data`。保存初始化时仅显示一
 - [新事物自动发现、候选与人工纠正](docs/thing-memory.md)
 - [完整设计](docs/完整设计文档.md) · [本次改进与评估对照](docs/项目客观评估.md) · [验收记录](docs/acceptance-20261101.md)
 - [备份、导入与回退](docs/operations/backup-restore.md)
+- [通用记忆导入契约 v1](docs/memory-import-contract-20261107.md) · [离线校验器](interop/validate-import.mjs)
+- [TODO（未实现）：人工核对页面](docs/TODO-human-review-page-20261107.md) — 设计一直有、实现一直没做；前端由用户侧负责
 
 0.32 新增通用场景档案、逐条跨渠道授权、关联纠正、人工确认的跨平台账号绑定，以及人物档案前置展示。完整备份密码加密，导入支持旁置验证与回退副本；不需要更换存储引擎。旧群记忆通过 `tools/import-group-memory.mjs` 显式导入为未核验候选。
 
