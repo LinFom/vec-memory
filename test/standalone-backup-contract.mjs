@@ -7,7 +7,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { gzipSync, gunzipSync } from 'node:zlib';
 import { initialize, createService } from '../src/standalone/service.mjs';
 import { createStandaloneServer } from '../src/standalone/server.mjs';
-import { createBackup, inspectBackup, restoreBackup } from '../src/standalone/backup.mjs';
+import { createBackup, inspectBackup, restoreBackup, createBackupTo, inspectBackupFile } from '../src/standalone/backup.mjs';
 
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 function timeout(promise, ms, label = 'operation') {
@@ -253,4 +253,37 @@ test('import-intent recovery refuses destination, staging or rollback outside th
     assert.equal(fs.existsSync(path.join(spaces, 's')), false, field + ' must not be renamed into spaces');
     assert.equal(fs.existsSync(path.join(escaped, 'payload')), false, field + ' must not be renamed outside spaces');
   }
+});
+
+test('streaming v2: budget fails before reading, magic is stable, and v1 stays readable', async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'vec-backup-stream-v2-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  initialize(root);
+  const space = path.join(root, 'spaces', 's');
+  fs.mkdirSync(space, { recursive: true });
+  fs.writeFileSync(path.join(space, 'blob.bin'), Buffer.alloc(3 * 1024 * 1024, 7));
+  fs.writeFileSync(path.join(space, 'note.txt'), 'hello');
+
+  // 前置预算：超限立刻失败、点名最大文件，且不留下半成品。
+  await assert.rejects(createBackupTo(root, path.join(root, 'x.vmb'), { spaceId: 's', limit: 1024 * 1024 }), error => {
+    assert.equal(error.code, 'BACKUP_TOO_LARGE');
+    assert.match(error.message, /blob\.bin/);
+    return true;
+  });
+  assert.equal(fs.existsSync(path.join(root, 'x.vmb')), false, 'failed backup must not leave a partial file');
+
+  const file = path.join(root, 'b.vmb');
+  const created = await createBackupTo(root, file, { spaceId: 's', password: 'password-123' });
+  const raw = fs.readFileSync(file);
+  assert.equal(raw.subarray(0, 4).toString(), 'VMB2', 'v2 must keep its magic in plaintext');
+  assert.equal(raw.includes(Buffer.from('hello')), false, 'content must not appear in plaintext');
+  const manifest = await inspectBackupFile(file, 'password-123');
+  assert.equal(manifest.files.length, 2);
+  assert.equal(manifest.checksum, created.checksum, 'file and create paths must agree on checksum');
+  assert.equal(inspectBackup(raw, 'password-123').checksum, created.checksum, 'buffer path must agree too');
+
+  // 老备份永远打得开：写入格式换了，v1 的读取与恢复保持不变。
+  const legacy = createBackup(root, { spaceId: 's' });
+  assert.equal(inspectBackup(legacy).kind, 'space');
+  assert.throws(() => restoreBackup(raw, path.join(root, 'nope')), { code: 'ASYNC_REQUIRED' });
 });
