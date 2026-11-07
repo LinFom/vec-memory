@@ -4,7 +4,8 @@ import path from 'node:path';
 import { randomBytes, createHash, randomUUID } from 'node:crypto';
 import { MemoryError, digest } from '../core/durable-log.mjs';
 import { createSpaceEngine } from './engine.mjs';
-import { createBackup, inspectBackup, restoreBackup, writeBackup } from './backup.mjs';
+import { inspectAnyFile, restoreAnyFile } from './backup.mjs';
+import { runBackupTask } from './backup-runner.mjs';
 const IMPLEMENTATION_VERSION=JSON.parse(fs.readFileSync(new URL('../../package.json',import.meta.url),'utf8')).version;
 
 const id = value => {
@@ -150,26 +151,36 @@ export function createService({ root, engineFactory = createSpaceEngine, localAd
           if (parts[3] === 'backups') {
             const dir = path.join(root,'backups'); fs.mkdirSync(dir,{recursive:true});
             const file = name => path.join(dir,id(name)+'.vmb');
-            if (parts[4] && method === 'GET') return {status:200,binary:fs.readFileSync(file(parts[4])),filename:parts[4]+'.vmb'};
+            if (parts[4] && method === 'GET') {
+              // 流式下发：几百 MB 的备份不再整体读进内存再一次性写出去。
+              const target = file(parts[4]), stat = fs.statSync(target);
+              return {status:200,stream:()=>fs.createReadStream(target),size:stat.size,filename:parts[4]+'.vmb'};
+            }
             if (!parts[4] && method === 'POST') {
               const backupId = randomUUID();
-              if (body.upload) { inspectBackup(body.upload,body.password); writeBackup(file(backupId),body.upload); }
-              else await exclusive(async () => { if(body.spaceId) permit(access,who,id(body.spaceId)); writeBackup(file(backupId),createBackup(root,body)); });
+              if (body.uploadPath) {
+                // 上传走临时文件：先校验，通过才落到正式文件名。
+                await inspectAnyFile(body.uploadPath, body.password);
+                fs.renameSync(body.uploadPath, file(backupId));
+              } else await exclusive(async () => {
+                if (body.spaceId) permit(access,who,id(body.spaceId));
+                await runBackupTask('create', {root, destination:file(backupId), spaceId:body.spaceId, password:body.password});
+              });
               return finish({backupId,download:'/api/v1/admin/backups/'+backupId});
             }
             if (parts[4] && parts[5] === 'preview' && method === 'POST') {
-              const archive = inspectBackup(fs.readFileSync(file(parts[4])),body.password);
+              const archive = await runBackupTask('inspect', {file:file(parts[4]),password:body.password});
               return finish({kind:archive.kind,files:archive.files.length,totalBytes:archive.totalBytes,checksum:archive.checksum,sourceSpaceId:archive.spaceId,automaticTasksSuspendedOnRestore:true});
             }
             if (parts[4] && parts[5] === 'restore' && method === 'POST') return finish(await exclusive(async () => {
-              const bytes = fs.readFileSync(file(parts[4])), archive = inspectBackup(bytes,body.password);
+              const source = file(parts[4]), archive = await inspectAnyFile(source,body.password);
               if (!body.expectedChecksum || body.expectedChecksum !== archive.checksum) throw new MemoryError('BACKUP_CHANGED','Preview and supply its checksum first',409);
-              if (archive.kind === 'service') {const result=restoreBackup(bytes,root+'.restore-'+randomUUID(),body);await validateRestored(result.destination,'service');return {...result,validated:true};}
+              if (archive.kind === 'service') {const result=await restoreAnyFile(source,root+'.restore-'+randomUUID(),body);await validateRestored(result.destination,'service');return {...result,validated:true};}
               const sid = id(body.spaceId), owner = id(body.owner);
               if (!access.projects[owner]) throw new MemoryError('INVALID_OWNER','Known owner required');
               if (access.spaces[sid] && body.replace !== true) throw new MemoryError('ALREADY_EXISTS','Choose a new space or explicitly replace',409);
               const destination = path.join(root,'spaces',sid), staging = destination+'.import-'+randomUUID();
-              const result = restoreBackup(bytes,staging,body);
+              const result = await restoreAnyFile(source,staging,body);
               await validateRestored(staging,'space');
               const rollback = fs.existsSync(destination) ? destination+'.rollback-'+randomUUID() : null;
               // Durable intent makes an interrupted pair of renames recoverable on startup.
