@@ -176,19 +176,40 @@ test('四处配置白名单同步，且默认关闭', () => {
 
 test('C7 全路径一致性：四条召回路径都接了策略，且分布口径不被放大召回稀释', () => {
   const src = read('src/router.mjs');
-  // 只数真正的调用点（都形如 `const pol = applyRecallPolicy(rt, ...)`），
-  // 不把函数定义 `function applyRecallPolicy(rt, ...)` 算进去。
+  // 只数真正的调用点（票 04 把 applyRecallPolicy 改成 async 后，都形如
+  // `const pol = await applyRecallPolicy(rt, ...)`），不把函数定义
+  // `async function applyRecallPolicy(rt, ...)` 算进去。
   // 2026-11-07 修正：上一版只数了块层三条，漏掉 `kind=event` 的向量支路 —— 那条
   // 同样是「同类 hits 内部重排」，不接就会出现「大部分路径有重排、这条没有」的静默分叉。
-  const calls = src.match(/const pol = applyRecallPolicy\(rt,/g) || [];
-  assert.equal(calls.length, 4, '关键词主路 / auto 降级路 / 向量路 / kind=event 向量路各一次');
+  const calls = src.match(/const pol = await applyRecallPolicy\(rt,/g) || [];
+  assert.equal(calls.length, 4, '关键词主路 / auto 降级路 / 向量路 / kind=event 向量路各一次（async 化后都必须 await）');
+  // 防止「第五个调用点漏 await」：把函数定义行排除后，所有真正调用
+  // applyRecallPolicy(rt,...) 的行都必须带 await，且恰好 4 行。上面按 `const pol =` 数，
+  // 这里按「出现 applyRecallPolicy(rt,」的行数兜底 —— 换变量名 / 漏 await / 多接一条都能抓到。
+  const callLines = src.split('\n').filter(
+    (line) => line.includes('applyRecallPolicy(rt,') && !line.includes('function applyRecallPolicy')
+  );
+  assert.equal(callLines.length, 4, '恰好 4 个调用点；新增第五个必须先接策略');
+  for (const line of callLines) {
+    assert.match(line, /await applyRecallPolicy\(rt,/, '每个调用点都必须 await，漏一个会把 Promise 当 hits 用');
+  }
   assert.equal((src.match(/k: storeK/g) || []).length, 4, '四条 store 调用都必须用放大后的召回量');
   assert.match(src, /const storeK = recallTopN\(k, polCfg\);/);
   // 分布诊断必须按请求 k 的前 k 条算，不能拿 4k 条稀释后的分数当新口径。
   assert.match(src, /result\.hits\.slice\(0, Math\.max\(1, k\)\)\.map\(\(h\) => h\.score\)/);
   // 配置非法 / 运行抛错的分支也必须截回 k，否则「失败但返回 4k 条」是另一种静默失败。
   assert.match(src, /const trim = \(arr\) => trimToK\(arr, k\);/, '截断用可实跑验证的公共函数');
-  assert.match(src, /return \{ hits: trim\(out\.hits\), policy: out\.diagnostics \}/);
+  // 2026-11-07 票 04：精排接在 rerankHits() 之后、trim() 之前，返回从
+  // `trim(out.hits) + out.diagnostics` 改成 `trim(finalHits) + diagnostics`。
+  // 等价强断言，锁住「降级时原序不变」的结构（不是放宽成只 grep 名字）：
+  //   - `let finalHits = out.hits;` ⇒ 回落基线是票 03 的 out.hits（不是 store 原始 hits）；
+  //   - 只有成功且 applied 分支才 `finalHits = ordered;`，降级分支只写 diagnostics；
+  //     全文件 `finalHits =` 恰好 2 次（初始化 + 成功分支），多一次即降级偷偷换序；
+  //   - 返回改成 trim(finalHits) / diagnostics。
+  assert.match(src, /let finalHits = out\.hits;/, '回落原序基线必须是票 03 的 out.hits');
+  assert.match(src, /finalHits = ordered;/, '只有精排成功且 applied 才改写 finalHits');
+  assert.equal((src.match(/finalHits =/g) || []).length, 2, '降级分支不得给 finalHits 赋值（否则是静默换序）');
+  assert.match(src, /return \{ hits: trim\(finalHits\), policy: diagnostics \};/);
   assert.match(src, /\.\.\.\(pol\.policy \? \{ policy: pol\.policy \} : \{\}\)/g);
   assert.match(src, /if \(cfg\.mode === 'off'\) return \{ hits, policy: null \};/, 'off 不得新增响应字段');
   // 注入侧：只在非 off 时传因子、只在非 off 时多一个响应字段。

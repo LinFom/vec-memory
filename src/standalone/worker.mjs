@@ -14,6 +14,8 @@ import {embedQueries,embedDocuments,checkEndpoint} from '../core/embed.mjs';
 import {memoryCoreOf,subjectSection} from '../core/memory-core.mjs';
 import {readLineage} from '../core/lineage.mjs';
 import {readRecentEvents,readEventsById,readEventRows,readHitLog,bumpEventHits} from '../core/consolidate.mjs';
+// [by:WorkBuddy] 票 07：事件引用形状 + 注入侧回查闸门（纯函数，零 I/O）。
+import {eventRefsOf,auditEventQuotation} from '../core/event-gist.mjs';
 import {getEventIndex,searchEvents} from '../core/event-index.mjs';
 import {FACT_KINDS} from '../core/facts.mjs';
 import {prepareDiscoveries,applyDiscoveries} from '../core/thing-discovery.mjs';
@@ -157,7 +159,8 @@ async function remember(p){
  else {const r=store.put({speaker:hit.label,target:'',fact_kind:kind,scope,content,evidenceIds:itemKey?[`item:${scope}:${hit.label}:${itemKey}`]:(ids.length?ids:[`manual:${operationId}`]),provenance:refs,itemProvenance:itemKey?{[itemKey]:refs}:{},delivery,at:new Date().toISOString()});result={ok:true,saved:r.action==='update',action:r.action,rev:r.rev,kind,itemKey,speaker:hit.label};}
  return memoryOperations.append(operationId,p,{kind,actorId,scope,source},result);
 }
-function eventRefs(e){return [{type:'window',id:e.windowId||e.id,chatKey:e.chatKey,fromTs:e.fromTs,toTs:e.toTs,matchMethod:'persisted-window'}];}
+// [by:WorkBuddy] 票 07：窗口级 eventRefs 已由 core/event-gist.mjs 的 eventRefsOf 取代
+// （有 evidenceIds 产 message 级引用，否则原样退回 window 级形状）。
 function subjectScope(p) { return canonicalChatKey(p.scope); }
 async function subjects(p) {
  const rt=await getRuntime(),scope=rt.normalizer.scopeLabel(subjectScope(p)),store=openSubjectStore(rt.dir);
@@ -230,12 +233,36 @@ async function recall(p){
  const hitCounts=readHitLog({libDir:rt.dir}).counts,recent=readRecentEvents({libDir:rt.dir,chatKey,limit:rt.settings.consolidateInjectCount||6,hitCounts}),eventIds=new Set(recent.map(e=>e.id));
  let eventRows=recent;
  if(query){const q=rt.normalizer.normalize(query,{register:false}).text,hits=searchEvents(getEventIndex({libDir:rt.dir}),q,{chatKey,limit:3,minScore:rt.settings.consolidateEventMinScore||0.18,exclude:eventIds});eventRows=[...recent,...readEventsById({libDir:rt.dir,chatKey,ids:hits.map(h=>h.id),hitCounts})];}
- for(const e of eventRows){eventIds.add(e.id);items.push({id:`event:${e.id}`,text:e.summary,layer:e.promotedAt?'long-term':'episodic',sourceRefs:eventRefs(e)});}
- if(query){const r=await router.handle({method:'POST',path:'/search',body:{q:query,chatKey,k:p.limit||8,mode:p.purpose==='automatic'?'keyword':p.mode||'auto',includeEvents:false}});if(!r.body?.ok)throw new MemoryError(r.body?.code||'SEARCH_FAILED',r.body?.error||'Search failed',r.status);
-  metric=r.body.mode==='vector'?'vector':metric==='vector'?'hybrid':'keyword';degraded=degraded||r.body.degraded;
-  const events=new Map(readEventRows({libDir:rt.dir}).rows.map(e=>[e.id,e]));
-  for(const h of r.body.hits||[]){if(h.chatKey!==chatKey)continue;const e=events.get(h.id);if(e&&eventIds.has(e.id))continue;items.push({id:`document:${h.id}`,text:h.text||h.title||'',layer:'long-term',sourceRefs:e?eventRefs(e):[{type:'window',id:h.id,chatKey,matchMethod:'corpus-document'}],score:h.score});if(e)eventIds.add(e.id);}
- }
+// [by:WorkBuddy] 票 07：注入侧回查闸门（fail-closed）。
+// 三重校验全部落在 worker 的注入装配点：router.mjs 只服务 /search 命中，不参与注入，
+// 所以「校验失败不注入」在这里真正生效，且完全不碰 router.mjs。
+// 完整事件行（含 evidenceIds）读一次；老事件行没有该字段 ⇒ audit 直接放行、引用退回 window 级。
+const eventFullRows=new Map(readEventRows({libDir:rt.dir}).rows.map(e=>[e.id,e]));
+const messageById=new Map();
+for(const m of canonicalMessages(input)){let ck='';try{ck=canonicalChatKey(m.scope);}catch{}messageById.set(m.messageId,{...m,chatKey:ck});}
+const lookupMessage=id=>messageById.get(String(id));
+const quoteAudit={checked:0,blocked:0,failures:[]};
+// 把 evidenceIds 从完整账本行补到注入用的裁剪行，再跑三重校验；
+// 失败返回 null 让调用方拦下该项（不 push），并把稳定失败码留在诊断里，绝不静默放行。
+const gate=e=>{
+ const full=eventFullRows.get(e.id);
+ const target=full&&Array.isArray(full.evidenceIds)?{...e,evidenceIds:full.evidenceIds}:e;
+ // [by:WorkBuddy] 只把「事件行显式声明的 quote」交给第三重引文校验。
+ // summary 是派生摘要、不是逐字引文；拿它当 quote 会把所有 episodic 项误拦掉。
+ // 未声明 quote 时 auditEventQuotation 仍做来源 id + 时间窗两重，并不等于跳过校验。
+ const a=auditEventQuotation(target,{lookupMessage,quote:full?.quote??e.quote});
+ if(a.checked)quoteAudit.checked++;
+ if(!a.ok){quoteAudit.blocked++;quoteAudit.failures.push({id:e.id,code:a.code,failures:a.failures});return null;}
+ return target;
+};
+for(const e of eventRows){eventIds.add(e.id);const g=gate(e);if(!g)continue;items.push({id:`event:${e.id}`,text:e.summary,layer:e.promotedAt?'long-term':'episodic',sourceRefs:eventRefsOf(g)});}
+if(query){const r=await router.handle({method:'POST',path:'/search',body:{q:query,chatKey,k:p.limit||8,mode:p.purpose==='automatic'?'keyword':p.mode||'auto',includeEvents:false}});if(!r.body?.ok)throw new MemoryError(r.body?.code||'SEARCH_FAILED',r.body?.error||'Search failed',r.status);
+ metric=r.body.mode==='vector'?'vector':metric==='vector'?'hybrid':'keyword';degraded=degraded||r.body.degraded;
+ for(const h of r.body.hits||[]){if(h.chatKey!==chatKey)continue;const e=eventFullRows.get(h.id);if(e&&eventIds.has(e.id))continue;
+  let g=null;
+  if(e){g=gate(e);if(!g){eventIds.add(e.id);continue;}}
+  items.push({id:`document:${h.id}`,text:h.text||h.title||'',layer:'long-term',sourceRefs:g?eventRefsOf(g):[{type:'window',id:h.id,chatKey,matchMethod:'corpus-document'}],score:h.score});if(e)eventIds.add(e.id);}
+}
  const subjects=subjectSection(memoryCoreOf(rt,factStoreOf(rt)).subjects,scope,query,4);
  for(const d of subjects.subjectDetails)items.push({id:`subject:${d.id||digest(d)}`,text:`${d.knowledgeStatus==='candidate'?'【待确认】':d.authority==='manual'?'【人工修订】':'【来源观察】'}${d.possibleConflict?'【存在不同说法】':''}${d.subject.label} · ${d.aspect}：${d.statement}`,layer:'subject',knowledgeStatus:d.knowledgeStatus||'observed',authority:d.authority||'automatic',possibleConflict:!!d.possibleConflict,sourceRefs:d.provenance||[]});
  const working=canonicalMessages(input).filter(m=>canonicalChatKey(m.scope)===chatKey&&(!p.conversationId||m.conversationId===p.conversationId)).sort((a,b)=>b.timestamp-a.timestamp).slice(0,6).reverse();
@@ -245,7 +272,10 @@ async function recall(p){
  const unique=[...new Map(items.map(i=>[i.id,i])).values()],receiptId=randomUUID();
  for(const [id,r]of receipts)if(r.expires<Date.now())receipts.delete(id);
  receipts.set(receiptId,{expires:Date.now()+60000,chatKey,itemIds:new Set(unique.map(i=>i.id)),eventIds:new Set(eventIds),adopted:new Set()});
- return {ok:true,items:unique,block:unique.length?'<!--mv-inject-->\n'+unique.map(i=>`【${i.layer}】${i.text}`).join('\n'):'',receiptId,actualMode:metric,degraded};
+ // [by:WorkBuddy] 票 07：可观测诊断。只有真的回查过（checked>0）或拦下过（blocked>0）才附加，
+ // 老事件行 / 空注入时响应形状逐字不变，避免给既有调用方塞新字段。
+ return {ok:true,items:unique,block:unique.length?'<!--mv-inject-->\n'+unique.map(i=>`【${i.layer}】${i.text}`).join('\n'):'',receiptId,actualMode:metric,degraded,
+  ...(quoteAudit.checked||quoteAudit.blocked?{quoteAudit}:{})};
 }
 async function adoption(p){const r=receipts.get(p.receiptId);if(!r||r.expires<=Date.now()){receipts.delete(p.receiptId);return {ok:true,accepted:false,reason:'unknown-or-expired'};}
  if(!Array.isArray(p.itemIds)||p.itemIds.some(id=>!r.itemIds.has(id)))throw new MemoryError('INVALID_ADOPTION','itemIds must be a subset of the receipt');

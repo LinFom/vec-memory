@@ -3,7 +3,7 @@
   "info": {
     "title": "vec-memory standalone protocol",
     "version": "1.2.0",
-    "description": "Standalone HTTP JSON service. Project routes require Bearer credentials and space/scope authorization. Local no-credential management is available only with loopback localAdmin mode; --require-auth disables it. Management operations are unavailable to project credentials."
+    "description": "Standalone HTTP JSON service. Project routes require Bearer credentials and space/scope authorization. Local no-credential management is available only with loopback localAdmin mode; --require-auth disables it. Management operations are unavailable to project credentials. Offline import: vec-memory/import@1 is an OFFLINE JSON document, NOT an HTTP endpoint - see interop/import-contract.schema.json, docs/memory-import-contract-20261107.md and the ImportContractDocument schema in components.schemas. It adds no path and no write entry; import output lands only through the existing v1 routes."
   },
   "servers": [
     {
@@ -3899,6 +3899,116 @@
           }
         },
         "additionalProperties": true
+      },
+      "ImportContractDocument": {
+        "type": "object",
+        "description": "OFFLINE JSON document shape for vec-memory/import@1. This is a document contract, NOT an HTTP endpoint: no path in this spec consumes or produces it, and it adds no write entry. Shape source of truth: interop/import-contract.schema.json; validator: interop/validate-import.mjs; semantics: docs/memory-import-contract-20261107.md. Import output is submitted through the existing v1 routes only.",
+        "required": ["contract", "spaceId", "origin", "entries"],
+        "additionalProperties": false,
+        "properties": {
+          "contract": {
+            "type": "string",
+            "const": "vec-memory/import@1",
+            "description": "Contract id and version."
+          },
+          "spaceId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$",
+            "description": "Target space id; same rule as the standalone protocol."
+          },
+          "notes": {
+            "type": "string",
+            "maxLength": 2000,
+            "description": "Free-form note for human reviewers; not used by any decision."
+          },
+          "origin": {
+            "type": "object",
+            "description": "Batch origin. verified is always false: this contract accepts only unverified historical imports.",
+            "required": ["kind", "verified", "source"],
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "type": "string",
+                "const": "historical-import"
+              },
+              "verified": {
+                "type": "boolean",
+                "const": false,
+                "description": "Always false. Callers cannot declare imported data verified; confirmation happens only through existing human write routes, never written back into this document."
+              },
+              "source": {
+                "type": "object",
+                "required": ["locator"],
+                "additionalProperties": false,
+                "properties": {
+                  "locator": {"type": "string", "minLength": 1, "maxLength": 500},
+                  "file": {"type": "string", "minLength": 1, "maxLength": 500},
+                  "line": {"type": "integer", "minimum": 1},
+                  "recordId": {"type": "string", "minLength": 1, "maxLength": 200}
+                }
+              },
+              "note": {"type": "string", "maxLength": 1000}
+            }
+          },
+          "messages": {
+            "type": "array",
+            "maxItems": 500,
+            "description": "Optional raw evidence messages; same shape as POST /messages (messageId, conversationId, actorId, role, timestamp, text, scope). Only role=user may serve as evidence.",
+            "items": {
+              "type": "object",
+              "required": ["messageId", "conversationId", "actorId", "role", "timestamp", "text", "scope"],
+              "properties": {
+                "messageId": {"type": "string"},
+                "conversationId": {"type": "string"},
+                "actorId": {"type": "string"},
+                "role": {"enum": ["user", "assistant", "system", "tool"]},
+                "timestamp": {"type": "string"},
+                "text": {"type": "string"},
+                "scope": {"$ref": "#/components/schemas/Scope"}
+              }
+            }
+          },
+          "entries": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 5000,
+            "description": "Memory entries. Each carries its own origin.source.locator; no vectors, scores or runtime state.",
+            "items": {
+              "type": "object",
+              "required": ["id", "text", "scope", "origin"],
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$",
+                  "description": "Caller-generated stable id for import idempotency."
+                },
+                "kind": {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$"},
+                "text": {"type": "string"},
+                "scope": {"$ref": "#/components/schemas/Scope"},
+                "actorId": {"type": "string"},
+                "evidenceIds": {
+                  "type": "array",
+                  "items": {"type": "string"},
+                  "description": "References messageId values from this batch's messages."
+                },
+                "origin": {
+                  "type": "object",
+                  "description": "Per-entry origin; verified is always false, same shape as the top-level origin.",
+                  "required": ["kind", "verified", "source"],
+                  "properties": {
+                    "kind": {"type": "string", "const": "historical-import"},
+                    "verified": {"type": "boolean", "const": false},
+                    "source": {
+                      "type": "object",
+                      "required": ["locator"],
+                      "properties": {"locator": {"type": "string"}}
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
       }
     }
   }

@@ -62,7 +62,8 @@ test('最小合法样例通过，且未核验与来源追溯逐条可数', () =>
   const result = validateImportDocument(doc('minimal-valid'));
   assert.equal(result.ok, true, JSON.stringify(result.errors));
   assert.equal(result.contract, 'vec-memory/import@1');
-  assert.deepEqual(result.summary, {spaceId: 'demo', entries: 2, messages: 1, unverified: 2, traced: 2});
+  // [by:WorkBuddy] 票 07：D11 新增 summary.unattributed（entry-002 无 actorId）。只改断言，不放宽校验器。
+  assert.deepEqual(result.summary, {spaceId: 'demo', entries: 2, messages: 1, unverified: 2, traced: 2, unattributed: ['entry-002']});
   assert.ok(result.warnings.some(w => w.code === 'NO_EVIDENCE_REF' && w.index === 1), '第二条无原话引用，必须给警告而不是假装已确认');
 });
 
@@ -103,8 +104,21 @@ test('CLI 离线可跑：合法退出 0，非法退出 1 且 stderr 可读', () 
 
 test('契约文件不含任何具体 Agent 项目名，校验器不依赖服务内部模块', () => {
   const forbidden = /溟月|moon[-_]core|moon[-_]mem|QQ-Agent|qq-agent|Nyan|Samara|OneBot|3211|3399/i;
+  // [by:WorkBuddy] 票 02 往 interop/ 下加了子目录（importers/、examples/legacy-jsonl/），
+  // 原来那行 readdirSync 会把目录名也当文件读 ⇒ EISDIR。改成递归只收文件，
+  // 顺带把新增的映射表 / 转换器 / 样例数据一并纳入专名扫描（覆盖更严，不是放宽）。
+  const listFiles = (dirUrl, prefix = '') => {
+    const out = [];
+    for (const ent of fs.readdirSync(dirUrl, {withFileTypes: true})) {
+      const rel = prefix ? `${prefix}/${ent.name}` : ent.name;
+      if (ent.isDirectory()) out.push(...listFiles(new URL(`${ent.name}/`, dirUrl), rel));
+      else if (/\.(json|jsonl|mjs|md)$/.test(ent.name)) out.push(rel);
+    }
+    return out;
+  };
   const files = ['import-contract.schema.json', 'validate-import.mjs',
-    ...fs.readdirSync(new URL('../interop/examples/', import.meta.url)).map(f => `examples/${f}`)];
+    ...listFiles(new URL('../interop/', import.meta.url))];
+  assert.ok(files.length >= 10, `扫描到的契约文件太少：${files.length}`);
   for (const file of files) assert.doesNotMatch(fs.readFileSync(at(file), 'utf8'), forbidden, `${file} 含专有名词`);
   assert.doesNotMatch(contractDoc, forbidden, '契约文档含专有名词');
   assert.doesNotMatch(validatorSource, /from\s+['"][^'"]*src\//, '校验器不得 import 服务内部模块');

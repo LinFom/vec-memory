@@ -42,6 +42,8 @@ import { buildEmbedText, chunkMeta, sourceHash } from './chunkread.mjs';
 import { chatRawOf } from './derive.mjs';
 import { FACT_KIND_GROUPS } from './facts.mjs';
 import { upsertSlotItem, itemKeyOf } from './inject.mjs';
+// [by:WorkBuddy] 票 07：事件 gist 的 evidenceIds 回指（纯函数，零 I/O）。
+import { deriveEvidenceIds } from './event-gist.mjs';
 
 export const CONSOLIDATE_VERSION = 1;
 
@@ -1713,6 +1715,10 @@ async function applyWindow({ win, parsed, normalizer, factStore, store, settings
   //   · `summary` = **这一件事**的正文（`title：detail`），归一化闸门照旧逐条过
   //   · `items` 保留单元素数组（面板/旧读者按 items 渲染仍能显示这一条）
   const windowId = eventIdOf(win);
+  // [by:WorkBuddy] 票 07：同一条记录内的派生回指（窗口 rows 的消息 id）。
+  // 只取 id、去重、限 40、全字符串，绝不复制正文；值与事实槽 :1829 同源但独立派生，
+  // 不改动事实槽写入语义、不改事件账本文件名。
+  const evidenceIds = deriveEvidenceIds(win);
   out.eventId = windowId;
   if (windowId && parsed.events.length) {
     const existing = readEventRows({ libDir, strict: true });
@@ -1746,6 +1752,9 @@ async function applyWindow({ win, parsed, normalizer, factStore, store, settings
         detail,
         who: item.who,
         summary,
+        // [by:WorkBuddy] 票 07：窗口内消息 id 的回指（派生字段，不含正文、不新增实体类型）。
+        // 老账本没有这个字段 ⇒ eventRefsOf 自动退回 window 级引用，向后兼容。
+        evidenceIds,
         items: [item],                  // 单元素：旧读者不炸
         // 短期层的两个运行时字段（`ADR-0048`）：
         //   hits       —— 真的进了 `/inject` 最终 lines 的次数（排练次数）

@@ -1,0 +1,2 @@
+{"messageId":"m-001","conversationId":"chat-a","actorId":"user-a","role":"user","timestamp":"2026-10-29T08:00:00Z","text":"我喜欢不加糖的茶，小A 是长期一起做项目的同伴。","scope":{"kind":"private","id":"chat-a"}}
+{"messageId":"m-002","conversationId":"chat-a","actorId":"user-a","role":"user","timestamp":"2026-10-29T08:05:00Z","text":"上周三我们把向量代换到了新模型，项目代号是 vec-memory。","scope":{"kind":"private","id":"chat-a"}}

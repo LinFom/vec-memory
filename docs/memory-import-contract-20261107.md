@@ -178,4 +178,4 @@ CLI 输出 `{ok, contract, errors, warnings, summary}`，可读错误逐行打�
 
 ## 11. 变更记录
 
-- 2026-11-07 [by:WorkBuddy]：用户「其他的你继续吧」⇒ 按 tracker Frontier 认领票 01，新增契约 schema、离线校验器、七个样例（一合法六非法）、专项测试与本文。**未改 `src/core/`、未改协议、未改 `web/`、未推送远端。**
+- 2026-11-07 [by:WorkBuddy]：用户「其他的你继续吧」⇒ 按 tracker Frontier 认领票 01，新增契约 schema、离线校验器、七个样例（一合法六非法）、专项测试与本文。**未改 `src/core/`、未改协议、未改 `web/`**（当时未推送；14:43 已推送 `c06e8fe`，见 tracker 地图）。

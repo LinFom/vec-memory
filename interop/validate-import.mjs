@@ -151,6 +151,38 @@ function checkEvidence(document, errors, warnings) {
   });
 }
 
+/**
+ * [by:WorkBuddy] 票 07 / D11：说话人识别兜底（离线镜像）。
+ * 口径与 src/core/event-gist.mjs 的 unattributedSummary 完全一致；校验器按票 01 纪律
+ * 必须保持零 src/ 依赖、零服务内部模块，故在此离线镜像一份，不 import 服务代码。
+ *
+ *  · 缺 actorId 的 entry ⇒ 标 unattributed、usableAsEvidence:false（warning，不影响 ok）；
+ *  · 若同时带 subject.kind==='person'（想挂人物档案）⇒ UNATTRIBUTED_PERSON（error ⇒ ok:false）。
+ */
+function collectUnattributed(document) {
+  const entries = Array.isArray(document?.entries) ? document.entries : [];
+  const unattributed = [], warnings = [], violations = [];
+  entries.forEach((entry, index) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return;
+    const actorId = typeof entry.actorId === 'string' ? entry.actorId.trim() : '';
+    if (actorId) return;
+    const id = typeof entry.id === 'string' && entry.id ? entry.id : `entries[${index}]`;
+    const at = `entries[${index}]`;
+    unattributed.push(id);
+    warnings.push({
+      code: 'UNATTRIBUTED_ENTRY', path: at, index, id, usableAsEvidence: false,
+      message: '该条目无 actorId：标为 unattributed、不可作为事实证据，认不出说话人时不得猜人'
+    });
+    if (entry.subject && typeof entry.subject === 'object' && entry.subject.kind === 'person') {
+      violations.push({
+        code: 'UNATTRIBUTED_PERSON', path: `${at}.actorId`, index, id,
+        message: '无说话人却想挂人物档案（subject.kind=person）：拒绝导入，避免把未署名的话记到某个人头上'
+      });
+    }
+  });
+  return { unattributed, warnings, violations };
+}
+
 function decorate(errors) {
   for (const error of errors) {
     const found = /^(?:entries|messages)\[(\d+)\]/.exec(error.path);
@@ -165,13 +197,18 @@ export function validateImportDocument(document, schema = SCHEMA) {
   const errors = [], warnings = [];
   validateNode(document, schema, '', errors);
   checkEvidence(document, errors, warnings);
+  // [by:WorkBuddy] 票 07 / D11：说话人兜底（只加 summary 字段 / warning / error，不改导出签名、不改 CLI 退出码语义）。
+  const ua = collectUnattributed(document);
+  warnings.push(...ua.warnings);
+  errors.push(...ua.violations);
   const entries = Array.isArray(document?.entries) ? document.entries : [];
   const summary = {
     spaceId: typeof document?.spaceId === 'string' ? document.spaceId : null,
     entries: entries.length,
     messages: Array.isArray(document?.messages) ? document.messages.length : 0,
     unverified: entries.filter(e => e?.origin?.verified === false).length,
-    traced: entries.filter(e => typeof e?.origin?.source?.locator === 'string' && e.origin.source.locator.length > 0).length
+    traced: entries.filter(e => typeof e?.origin?.source?.locator === 'string' && e.origin.source.locator.length > 0).length,
+    unattributed: ua.unattributed
   };
   return {ok: errors.length === 0, contract: document?.contract ?? null, errors: decorate(errors), warnings: decorate(warnings), summary};
 }

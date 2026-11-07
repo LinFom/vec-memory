@@ -46,6 +46,8 @@ import { embedDocuments } from './core/embed.mjs';
 import { distribution, judge, summarize } from './core/stats.mjs';
 import { RANK_VERSION } from './core/rank.mjs';
 import { parsePolicy, rerankHits, recallTopN, trimToK, makeInjectionExposureFactor } from './core/recall-policy.mjs';
+// 票 04：可选 cross-encoder 精排后端（独立外部 HTTP 服务，只做客户端）[by:WorkBuddy]
+import { parseRerankConfig, rerankCandidates, RERANK_DEGRADED } from './core/rerank-backend.mjs';
 import { createExposureState, channelKey } from './core/exposure.mjs';
 import {
   chunksDir,
@@ -130,8 +132,12 @@ const INJECT_EMBED_BUDGET_MS = 1800;
 // 三态就是 feature flag：off(fail-closed) / shadow(只算不排、零副作用) / enabled(参与定序)。
 // 任何配置非法或运行抛错 ⇒ 原顺序 + 稳定码，禁止静默放行。
 // 曝光状态是纯内存有界派生量（exposure.mjs），不落盘、不进备份、不进编码身份。
+// 票 04：可选 cross-encoder 精排后端（外部 HTTP，异步）[by:WorkBuddy] 2026-11-07
+// 因为精排要发一次网络请求，本函数改为 async，四条召回路径的调用点全部 `await`
+// （漏一个就会把 Promise 当 hits 用，静默出错 —— 有源码级断言锁住「恰好 4 处」）。
 const RECALL_EXPOSURE = createExposureState();
-function applyRecallPolicy(rt, hits, { query, chatKey, k, now = Date.now(), cfg: givenCfg }) {
+const idOfHit = (h, i) => String((h && h.id) ?? (h && h.meta && h.meta.id) ?? `idx-${i}`);
+export async function applyRecallPolicy(rt, hits, { query, chatKey, k, now = Date.now(), cfg: givenCfg }) {
   const cfg = givenCfg || parsePolicy(rt.settings || {});
   // 所有分支都必须截回 k：配置非法 / 运行抛错时 store 可能已按放大后的 k 召回，
   // 不截就会把 4k 条候选悄悄返回给调用方 —— 又是一次「失败但看起来正常」。
@@ -140,6 +146,7 @@ function applyRecallPolicy(rt, hits, { query, chatKey, k, now = Date.now(), cfg:
     return { hits: trim(hits), policy: { mode: cfg.mode, applied: false,
       degraded: { code: cfg.reason, reason: cfg.detail } } };
   }
+  // off：连精排配置都不解析、连精排函数都不调用 —— 响应零新增字段、零外部请求。
   if (cfg.mode === 'off') return { hits, policy: null };
   try {
     const spaceKey = String(rt.dir || 'default');
@@ -147,10 +154,57 @@ function applyRecallPolicy(rt, hits, { query, chatKey, k, now = Date.now(), cfg:
     const out = rerankHits({ hits, query, chatKey, spaceKey, channel: 'search', cfg,
       exposure: RECALL_EXPOSURE, now, k });
     if (out.degraded) return { hits: trim(hits), policy: { mode: cfg.mode, applied: false, degraded: out.degraded } };
-    if (out.recordIds.length) RECALL_EXPOSURE.record(exKey, out.recordIds, now);
+
+    // ── 票 04 精排接入：rerankHits() 之后、trim() 之前 [by:WorkBuddy] ──────────
+    // 只有策略非 off 且显式 rerankEnabled 才接；默认关闭时 diagnostics 不带 rerank 字段
+    // （与票 03 基线逐字可比）。失败一律回落 out.hits（票 03 产物，**不是** store 原始 hits）、
+    // 带稳定码、不抛 5xx、绝不退回关键词支路（语义不同，别照抄 embed 的 auto 降级）。
+    // 连续 3 次 degraded ⇒ 进程内内存标志自动跳过精排（rerank-backend.mjs 内熔断）。
+    let finalHits = out.hits;
+    let diagnostics = out.diagnostics;
+    let recordIds = out.recordIds;
+    const rc = parseRerankConfig(rt.settings || {});
+    if (rc.enabled && cfg.mode !== 'off' && Array.isArray(out.hits) && out.hits.length >= 2) {
+      const rr = rc.ok
+        ? await rerankCandidates({ hits: out.hits, query, cfg: rc, now })
+        : { ok: false, degraded: RERANK_DEGRADED.FAILED, detail: rc.detail,
+            autoDisabled: false, order: null, count: out.hits.length };
+      if (rr.ok && Array.isArray(rr.order)) {
+        const ordered = rr.order.map((i) => out.hits[i]);
+        const applied = cfg.mode === 'enabled';
+        if (applied) {
+          finalHits = ordered;
+          // 精排成功 ⇒ 曝光改记「精排后」前 k 条 id，否则计数与用户实际看到的顺序脱节。
+          recordIds = ordered.slice(0, Math.max(1, Number(k) || 8)).map((h, i) => idOfHit(h, i));
+        }
+        // shadow：finalHits 仍是 out.hits 的同一引用、顺序不变，只把 proposedOrder 写进 diagnostics。
+        diagnostics = { ...(out.diagnostics || {}),
+          rerank: {
+            applied,
+            model: rc.model,
+            scoreSource: 'cross-encoder',
+            proposedOrder: ordered.map((h, i) => idOfHit(h, i)),
+            count: rr.count,
+            degraded: null,
+            autoDisabled: !!rr.autoDisabled
+          } };
+      } else {
+        diagnostics = { ...(out.diagnostics || {}),
+          rerank: {
+            applied: false,
+            model: rc.model,
+            scoreSource: 'cross-encoder',
+            proposedOrder: null,
+            degraded: rr.degraded || RERANK_DEGRADED.FAILED,
+            detail: rr.detail || null,
+            autoDisabled: !!rr.autoDisabled
+          } };
+      }
+    }
+    if (recordIds.length) RECALL_EXPOSURE.record(exKey, recordIds, now);
     // 放大召回后必须截回请求 k：响应里的 k、配额、注入预算都按请求值解释，
-    // 多捞的候选只是给重排看的，绝不能悄悄流到调用方。
-    return { hits: trim(out.hits), policy: out.diagnostics };
+    // 多捞的候选只是给重排看的，绝不能悄悄流到调用方。失败分支同样截（见上文）。
+    return { hits: trim(finalHits), policy: diagnostics };
   } catch (e) {
     return { hits: trim(hits), policy: { mode: cfg.mode, applied: false,
       degraded: { code: 'POLICY_FAILED', reason: String(e?.message || e).slice(0, 200) } } };
@@ -1623,7 +1677,7 @@ export async function handleMemoryVec(req, res, pathname, helpers) {
           // 第四条召回路径（票 03 收尾）：kind=event 的向量支路同样是「同类 hits 内部」，
           // 之前 C7 断言只数了块层三条，把这里漏了 —— 静默不接比不接更危险。
           const r = rt.store.search({ ...queryIdentity, vector: vectors[0], k: storeK, chatKey, kind: 'event' });
-          const pol = applyRecallPolicy(rt, r.hits, { query: qEvent, chatKey, k, cfg: polCfg });
+          const pol = await applyRecallPolicy(rt, r.hits, { query: qEvent, chatKey, k, cfg: polCfg });
           json(res, 200, {
             ...base, mode: 'vector', scoredBy: 'cosine', degraded: null,
             scanned: r.scanned,
@@ -1713,7 +1767,7 @@ export async function handleMemoryVec(req, res, pathname, helpers) {
           return true;
         }
         const r = rt.store.searchText({ text: qNormalized, k: storeK, chatKey, kind });
-        const pol = applyRecallPolicy(rt, r.hits, { query: qNormalized, chatKey, k, cfg: polCfg });
+        const pol = await applyRecallPolicy(rt, r.hits, { query: qNormalized, chatKey, k, cfg: polCfg });
         json(res, 200, {
           ok: true,
           q: text,
@@ -1775,7 +1829,7 @@ export async function handleMemoryVec(req, res, pathname, helpers) {
         const fail = embedFailureOf(e);
         if (reqMode === 'auto') {
           const r = rt.store.searchText({ text: qNormalized, k: storeK, chatKey, kind });
-          const pol = applyRecallPolicy(rt, r.hits, { query: qNormalized, chatKey, k, cfg: polCfg });
+          const pol = await applyRecallPolicy(rt, r.hits, { query: qNormalized, chatKey, k, cfg: polCfg });
           json(res, 200, {
             ok: true, q: text, qNormalized, requested: reqMode, mode: 'exact',
             scoredBy: 'token-overlap',
@@ -1810,7 +1864,7 @@ export async function handleMemoryVec(req, res, pathname, helpers) {
       const scores = result.hits.slice(0, Math.max(1, k)).map((h) => h.score);
       const dist = distribution(scores, { topK: Math.min(5, k) });
       // 策略不改 result.hits 本身，只返回新数组；顺序仍以原始召回为准。
-      const pol = applyRecallPolicy(rt, result.hits, { query: qNormalized, chatKey, k, cfg: polCfg });
+      const pol = await applyRecallPolicy(rt, result.hits, { query: qNormalized, chatKey, k, cfg: polCfg });
       json(res, 200, {
         ok: true,
         q: text,

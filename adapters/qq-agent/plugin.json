@@ -55,6 +55,12 @@
     "recallPolicyWeights": "",
     "recallExposureWindow": 3,
     "recallExposureDecay": 0.6,
+    "rerankEnabled": false,
+    "rerankBaseURL": "",
+    "rerankApiKey": "",
+    "rerankModel": "",
+    "rerankTimeoutMs": 400,
+    "rerankTopN": 0,
     "queryInstruction": "",
     "suspectMinCount": 8,
     "suspectMaxSpread": 0.35,
@@ -116,6 +122,43 @@
       "step": 0.05,
       "label": "曝光降权系数",
       "description": "每被曝光一次乘一次该系数（如 0.6）。取值下限 0.01 而不是 0，避免降权退化成静默排除。"
+    },
+    "rerankEnabled": {
+      "type": "boolean",
+      "label": "启用外部 cross-encoder 精排（默认关）",
+      "description": "票 04：把票 03 重排后的同类候选送到一个独立外部 rerank 服务逐对打分。默认关 = fail-closed，零外部请求、响应与历史基线逐字可比。仅在检索重排模式为 shadow 或 enabled 时才生效（off 时连函数都不调用）。"
+    },
+    "rerankBaseURL": {
+      "type": "string",
+      "label": "精排服务地址",
+      "description": "外部 rerank 服务根地址，形如 http://127.0.0.1:8080；实际请求 POST {baseURL}/rerank。开启精排时必填，须为 http(s) URL。"
+    },
+    "rerankApiKey": {
+      "type": "string",
+      "secret": true,
+      "label": "精排 API Key",
+      "description": "留空则不发送 Authorization 头（本机推理服务通常无需 Key）。"
+    },
+    "rerankModel": {
+      "type": "string",
+      "label": "精排模型名称",
+      "description": "随请求 body 的 model 字段透传给外部服务；开启精排时必填。不内嵌模型、不产生文档向量。"
+    },
+    "rerankTimeoutMs": {
+      "type": "number",
+      "min": 1,
+      "max": 800,
+      "step": 50,
+      "label": "精排单次超时（毫秒）",
+      "description": "默认 400ms、硬上限 800ms（/search 总预算 1500ms，需给回退留余量）。在线热路径 retries=0。连续 3 次降级会进程内内存自动跳过精排，重启归零，不落盘、不改配置。"
+    },
+    "rerankTopN": {
+      "type": "number",
+      "min": 0,
+      "max": 200,
+      "step": 1,
+      "label": "精排候选上限（0=全部）",
+      "description": "最多送多少条候选去打分；0 = 送全部票 03 放大召回后的候选。超出上限的尾部候选按原序保留（只重排、不增不删）。"
     },
     "llmEndpointKind": {
       "type": "string",

@@ -21,8 +21,12 @@ import { channelKey } from './exposure.mjs';
 
 export const POLICY_MODES = Object.freeze(['off', 'shadow', 'enabled']);
 export const SIGNAL_NAMES = Object.freeze(['base', 'entity', 'recency', 'frequency', 'context']);
+// 票 04：新键与票 03 一并纳入「四处白名单同步」断言的母表 [by:WorkBuddy]
+// （默认值不放在本文件的 DEFAULTS 里 —— 那是 parsePolicy 的解析默认值；
+//  精排默认值由 src/core/rerank-backend.mjs 的 RERANK_DEFAULTS 持有，避免两份真值源）。
 export const POLICY_SETTINGS_KEYS = Object.freeze([
-  'recallPolicyMode', 'recallPolicyWeights', 'recallExposureWindow', 'recallExposureDecay'
+  'recallPolicyMode', 'recallPolicyWeights', 'recallExposureWindow', 'recallExposureDecay',
+  'rerankEnabled', 'rerankBaseURL', 'rerankApiKey', 'rerankModel', 'rerankTimeoutMs', 'rerankTopN'
 ]);
 
 const DEFAULTS = Object.freeze({

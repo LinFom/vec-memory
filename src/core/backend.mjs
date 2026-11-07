@@ -133,6 +133,16 @@ export const DEFAULT_SETTINGS = {
   recallPolicyWeights: '',
   recallExposureWindow: 3,
   recallExposureDecay: 0.6,
+  // ── 票 04 可选 cross-encoder 精排（独立外部 HTTP 服务）[by:WorkBuddy] ──────
+  // 默认关闭（fail-closed）；不内嵌模型、不写任何真值、不进 encodingIdentity/sourceHash，
+  // 因此改这些键永远不会触发整库重嵌。timeoutMs 默认 400ms、硬上限 800ms；
+  // topN=0 表示不设上限（送全部候选）。旧配置缺这些键时由本默认值兜底。
+  rerankEnabled: false,
+  rerankBaseURL: '',
+  rerankApiKey: '',
+  rerankModel: '',
+  rerankTimeoutMs: 400,
+  rerankTopN: 0,
   // 查询侧的指令前缀（非对称编码）。留空用 Qwen3 的官方默认。
   queryInstruction: '',
   // ── M2 注入（ADR-0009，2026-10-10 拍板：人格属性句 · 每人 2 条 · 全群开）──

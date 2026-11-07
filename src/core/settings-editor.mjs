@@ -26,6 +26,13 @@ export const SETTINGS_FIELDS = [
   field('recallPolicyWeights','重排权重 JSON（空=免调权 RRF）','采用与召回'),
   field('recallExposureWindow','曝光降权窗口（轮）','采用与召回','integer',{min:1,max:16}),
   field('recallExposureDecay','曝光降权系数','采用与召回','number',{min:0.01,max:1}),
+  // 票 04 可选 cross-encoder 精排后端（外部 HTTP 服务）[by:WorkBuddy]
+  field('rerankEnabled','启用外部精排','采用与召回','boolean'),
+  field('rerankBaseURL','精排服务地址','采用与召回','url'),
+  field('rerankApiKey','精排 API Key','采用与召回','secret'),
+  field('rerankModel','精排模型名称','采用与召回'),
+  field('rerankTimeoutMs','精排超时（毫秒，≤800）','采用与召回','integer',{min:1,max:800}),
+  field('rerankTopN','精排候选上限（0=全部）','采用与召回','integer',{min:0,max:200}),
   field('injectPerPerson','每人印象条数','采用与召回','integer',{min:1,max:30}),
   field('injectTotal','印象总条数','采用与召回','integer',{min:1,max:100}),
   field('injectThreshold','向量相关性阈值','采用与召回','number',{min:0,max:1}),

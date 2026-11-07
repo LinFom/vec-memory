@@ -34,3 +34,21 @@
 ### 渠道显示名同步（0.33.2）
 
 `ensureScene` 支持可选的 `name`、`nameSource: "adapter"` 和 `previousName`。适配器名称来自平台元数据；服务保留手工命名，适配器改名时按上一次已确认的名称比较更新。响应包含 `nameSyncSupported: true`、实际保存的 `name`、`nameSource`、`updated`、`manualPreserved`，并可含 `staleName`。客户端应记录回执中的名称作为下一轮的 `previousName`。名称不参与空间、账号或渠道身份匹配。
+
+## 通用记忆导入契约（离线文档，非 HTTP 端点）
+
+[by:WorkBuddy] 票 06 · `vec-memory/import@1` 是**一份离线 JSON 文档**的形状契约，用于把第三方记忆产物整理成通用格式。它**不是本协议新增的 HTTP 接口，也不是第二个写入口**：本协议的 paths 集合不因此改变。OpenAPI 里的 `components.schemas.ImportContractDocument` 只是对该离线文档形状的描述，不对应任何 path、不产生任何请求/响应。
+
+| 东西 | 位置 | 职责 |
+| --- | --- | --- |
+| 形状唯一真值源 | [interop/import-contract.schema.json](interop/import-contract.schema.json) | 字段、必填、类型、枚举、const、附加字段策略 |
+| 离线校验器 | [interop/validate-import.mjs](interop/validate-import.mjs) | `validateImportDocument` / CLI；不启服务、不连端口、零外部依赖 |
+| 语义说明 | [docs/memory-import-contract-20261107.md](docs/memory-import-contract-20261107.md) | 「历史导入 / 未核验」定义、边界、禁止事项 |
+| 导入器样例（票 02） | [interop/importers/jsonl-to-contract.mjs](interop/importers/jsonl-to-contract.mjs) | 源侧 JSONL → 契约文档（离线） |
+| 导入计划与提交（票 02） | [tools/import-contract-document.mjs](tools/import-contract-document.mjs) | 契约文档 → 确定性计划 → 沿用 v1 公开写入口提交 |
+
+- **契约标识**：顶层 `contract` 为常量 `"vec-memory/import@1"`；`spaceId` 与本协议同规则。
+- **未核验定义**：顶层 `origin` 与每条 `entries[].origin` 都是 `{kind:"historical-import", verified:false, source:{locator,...}}`。`verified` 由 `const:false` 锁死，调用方不能自行声明已核验；它是来源属性，不参与召回打分。自动整理不得把它提升为已确认事实；如需确认，走服务既有人工写入口（`/memories` 的 `source:"manual"` 或人工修订），**不写回导入契约文档**。
+- **落地方式**：导入产物最终仍通过本协议既有的 `/messages`、`/entities`、`/memories`、`/workspace` 等公开写入口写入，逐条带定位与稳定 ID，可幂等重入；契约只约束离线文档形状。
+
+> **明确声明：协议不新增导入端点。** 不存在 `/import`、`/api/v1/import` 或任何专用导入路径；导入不改变 v1 的 paths 集合，也不新增任何写入口。
