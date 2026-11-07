@@ -6,9 +6,12 @@
 //   ③ 最贵的：若误进 `encodingIdentity()`，改一次权重就会触发整库重嵌。
 // 按 CQRS projection 的纪律，read model 是缓存不是真值 —— 那就干脆不落。
 //
-// 口径（诚实标注）：这里记录的是「检索级曝光」= 本服务 `/search` 最近返回过哪些 id，
-// **不是**「注入级曝光」= 真正进过 prompt 的块。二者不等价。要升级成注入级，
-// 需在 `/inject` 收据确认处调用 record()，属票 05，本轮不接、也不假装接了。
+// 口径（2026-11-07 更新）：同一个实例同时承载**两个互不串味的通道**——
+//   · 'search'：本服务 `/search` 最近返回过哪些文档 id；
+//   · 'inject'：真正进过 prompt 的属性/档案行 id（`who|line`）。
+// 两侧 id 空间根本不同（文档 id vs 注入行），混在一个 key 里 lookup 永远不命中，
+// 所以由 `channelKey()` 统一把 channel 编进 key，物理隔离（票 03 收尾）。
+// 注入级只在 enabled 态写：shadow 只算不记，off 完全不碰。
 //
 // 与「采用次数」严格分开（CONTEXT.md:16「采用次数不是真实性评分」）：
 // 本模块只影响 hits 顺序，不写任何事实、不改任何 meta、不参与 sourceHash。
@@ -20,6 +23,11 @@ export const EXPOSURE_LIMITS = Object.freeze({
   maxIdsPerTurn: 32,
   ttlMs: 10 * 60 * 1000
 });
+
+/** 统一 key 构造：space + channel + chatKey，保证检索级与注入级互不污染。 */
+export function channelKey(spaceKey, channel, chatKey) {
+  return `${String(spaceKey || 'default')}|${String(channel || 'search')}|${String(chatKey ?? '')}`;
+}
 
 function intIn(v, lo, hi, fallback) {
   const n = Number(v);

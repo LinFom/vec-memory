@@ -17,6 +17,8 @@
 // router.mjs:1633 的纪律仍然成立：「三种分数不可比」⇒ 只在同类 hits 内部重排，
 // 绝不把事件侧车 / 档案 / 文档候选混进同一个数组。
 
+import { channelKey } from './exposure.mjs';
+
 export const POLICY_MODES = Object.freeze(['off', 'shadow', 'enabled']);
 export const SIGNAL_NAMES = Object.freeze(['base', 'entity', 'recency', 'frequency', 'context']);
 export const POLICY_SETTINGS_KEYS = Object.freeze([
@@ -33,6 +35,24 @@ const DEFAULTS = Object.freeze({
 
 const RRF_K = 60; // 标准经验常数；名次融合对它的具体取值不敏感
 const RECENCY_HALFLIFE_MS = 30 * 24 * 60 * 60 * 1000;
+
+/**
+ * 放大召回：只在策略非 off 时多捞候选，重排后一律截回请求 k。
+ * store 的硬上限是 200（vecstore.mjs:676/744），这里不越过它。
+ * off 时返回原 k ⇒ 与历史基线逐字可比。
+ */
+export function recallTopN(k, cfg) {
+  const base = Math.max(1, Number(k) || 8);
+  if (!cfg?.ok || cfg.mode === 'off') return base;
+  return Math.max(1, Math.min(200, Math.max(base * 4, 20)));
+}
+
+/** 放大召回后截回请求 k。单独导出，好让截断本身能被实跑验证（而不是只做源码断言）。 */
+export function trimToK(hits, k) {
+  if (!Array.isArray(hits)) return hits;
+  const cap = Math.max(1, Math.min(200, Number(k) || 8));
+  return hits.length > cap ? hits.slice(0, cap) : hits;
+}
 
 function intIn(v, lo, hi, fallback) {
   const n = Number(v);
@@ -157,7 +177,7 @@ function recencyOf(when, now) {
  * @returns {{hits:Array, diagnostics:object|null, degraded:object|null, applied:boolean, recordIds:string[]}}
  */
 export function rerankHits({
-  hits = [], query = '', chatKey = null, spaceKey = 'default',
+  hits = [], query = '', chatKey = null, spaceKey = 'default', channel = 'search',
   cfg, exposure = null, now = Date.now(), k = 8
 } = {}) {
   const conf = cfg || parsePolicy({});
@@ -208,7 +228,7 @@ export function rerankHits({
     ? conf.weights
     : Object.fromEntries(SIGNAL_NAMES.map((name) => [name, 1 / SIGNAL_NAMES.length]));
 
-  const exKey = `${spaceKey}|${chatKey ?? ''}`;
+  const exKey = channelKey(spaceKey, channel, chatKey);
   const scored = views.map((v, i) => {
     const components = Object.fromEntries(SIGNAL_NAMES.map((name) => [name, Number(signals[name][i].toFixed(6))]));
     const fused = conf.strategy === 'weighted'
@@ -239,7 +259,8 @@ export function rerankHits({
     signals: SIGNAL_NAMES,
     weights: conf.strategy === 'weighted' ? w : null,
     rrfK: conf.strategy === 'rrf' ? RRF_K : null,
-    exposure: { window: conf.exposureWindow, decay: conf.exposureDecay, scope: 'search-level, not injection-level' },
+    exposure: { window: conf.exposureWindow, decay: conf.exposureDecay,
+      channel, scope: `${channel}-level; channels are key-isolated` },
     applied,
     originalOrder,
     proposedOrder,
@@ -266,4 +287,39 @@ export function rerankHits({
     applied,
     recordIds: applied ? ordered.slice(0, Math.max(1, k)).map((x) => x.id) : []
   };
+}
+
+/**
+ * 注入级曝光因子工厂（票 03 收尾）。
+ *
+ * 返回一个 `(lineId) => factor` 纯函数，交给 `inject.mjs:selectInjectLines` 当可选参数。
+ * 这样 `inject.mjs` 不 import 策略层、不依赖曝光实现，层次不倒挂；不传该参数时
+ * `selectInjectLines` 的排序与返回对象逐字不变。
+ *
+ * 关键隔离：用 `channel='inject'` 造 key，与 `/search` 的 `'search'` 通道物理分开。
+ * 两边 id 空间不同（文档 id vs `who|line`），混用只会「永远查不到」这种静默失败。
+ *
+ * 三态纪律：off 返回 null（完全不接）；shadow 返回恒 1 但照常统计 `wouldDemote`；
+ * enabled 返回真实软降权因子。函数对象自带 `.report()` / `.key` 供响应诊断。
+ */
+export function makeInjectionExposureFactor({
+  exposure, spaceKey = 'default', chatKey = '', cfg, now = Date.now()
+} = {}) {
+  const conf = cfg || parsePolicy({});
+  if (!exposure || !conf.ok || conf.mode === 'off') return null;
+  const key = channelKey(spaceKey, 'inject', chatKey);
+  const state = { checked: 0, demoted: 0, wouldDemote: 0, mode: conf.mode, channel: 'inject' };
+  const factorOf = (lineId) => {
+    const ex = exposure.lookup(key, lineId, now, conf.exposureWindow, conf.exposureDecay);
+    state.checked += 1;
+    if (ex.count > 0) {
+      state.demoted += 1;
+      if (conf.mode === 'shadow') state.wouldDemote += 1;
+    }
+    return conf.mode === 'shadow' ? 1 : ex.factor;
+  };
+  factorOf.report = () => ({ ...state });
+  factorOf.key = key;
+  factorOf.mode = conf.mode;
+  return factorOf;
 }

@@ -18,7 +18,7 @@
 | C4 | gist 不能存第二份原文 | 07 已于 2026-11-06 批准新增 ⇒ 本轮仍只锁约束，实现由 07 承载 |
 | C5 | `off`/`shadow` 期看不到效果、跳不过对拍 | **说轻了**：6 条标注查询远达不到显著性所需样本量 |
 | C6 | `policy-state.json` 误入备份 / `encodingIdentity` | **被 C1 的纯内存方案直接消解** |
-| C7 | **（新）双入口一致性** | `/search` 有关键词路与向量路，只挂一处 ⇒ 另一路静默不重排 |
+| C7 | **（新）全路径一致性** | `/search` 实有**四条**召回路径；只挂一处 ⇒ 其余静默不重排。2026-11-07 复核发现首版自称「三条都接了」的断言本身就是假的 |
 
 一句话：**C1/C6 被消解，C2/C5 被低估，新增 C7**。下面每条按「代价到底多大 → 主流/专业方法 → 本项目落点 → 还剩什么 → 验收」展开。
 
@@ -135,13 +135,13 @@
 
 ---
 
-## 7. C7 — 双入口一致性（新增）
+## 7. C7 — 全路径一致性（新增，2026-11-07 修正）
 
-**代价量化**：`/search` 有两条命中路径 —— `router.mjs:1672` 的 `searchText()`（关键词路，score 是话题重合度）与 `router.mjs:1726` 的 `store.search()`（向量路，score 是余弦）。只在向量路插策略 ⇒ `worker.mjs:234` 默认 `mode:'auto'` 且未配嵌入端点时**全部走关键词路**，策略层完全不被调用，**没有任何报错**。这正是本项目一贯要根除的静默失败。
+**代价量化**：`/search` 命中路径不止两条。首版写了「三条都接了」，但静态复核 `router.mjs` 后实际是**四条**：关键词主路、`auto` 降级路、向量路、以及 `kind=event` 的向量支路（`router.mjs:1613`）。最后一条同样是「同类 hits 内部重排」，却从未接策略层；而 C7 测试只数了块层三个调用点就宣布全绿 —— **断言恰好只覆盖自己写过的代码，全绿毫无意义**。这类「自证式通过」比单纯的漏接更危险：它还会给出一个假的信心。
 
-**主流方法**：单一纯函数 + 在每条召回路径的同一抽象层调用；contract test 覆盖全部分支（§8-A 的 flag/分支测试纪律）。
+**主流方法**：单一纯函数 + 在每条召回路径的同一抽象层调用；contract test 覆盖全部分支（§8-A 的 flag/分支测试纪律）。补充一条本项目自己的纪律：**分支数要从路由表/调用点反向盘点，不能从已实现的调用数正推**。
 
-**本项目落点（本轮实做）**：`rerankHits()` 做成与分数来源无关的纯函数，两处各插一次；策略内部先归一化，因此 `scoredBy` 不同不影响结果；测试断言两条路径都接上。事件侧车 / 档案层**有意不参与**（守 `router.mjs:1633`「三种分数不可比」）。
+**本项目落点（已实做）**：`rerankHits()` 与分数来源无关，四条路径各插一次，`cfg` 只解析一次并透传；测试断言 `const pol = applyRecallPolicy(rt,` 恰好 4 次、`k: storeK` 恰好 4 次。事件**侧车** / 档案层**有意不参与**（守 `router.mjs:1633`「三种分数不可比」）—— 注意「事件侧车（IDF 容器）」与「`kind=event` 的向量文档路」是两回事，别混。
 
 **还剩什么**：关键词路的 `matched` 字段与向量路不同，可解释分量里要标 `source` 以免误读。
 
@@ -172,17 +172,19 @@
 
 ## 9. 本轮实现范围与判定标准
 
-**做**：C1 纯内存曝光、C2 RRF 默认 + 权重外置 + 位置敏感评测工具、C3 三态 flag + 降级回退、C5 paired bootstrap 工具、C7 双入口接入；票 03 状态 `ready-for-agent → claimed`。
+**做**：C1 纯内存曝光（检索级 + 注入级双通道）、C2 RRF 默认 + 权重外置 + 位置敏感评测工具、C3 三态 flag + 降级回退、C5 paired bootstrap 工具、C7 **四条**路径接入、放大召回；票 03 状态 `ready-for-agent → claimed → resolved`。
 
 **不做**：C4 的 07 号票实现（票已批准新增，本轮不认领）、任何生产权重、在线 A/B、跨进程曝光状态、cross-encoder（票 04）、导入器（票 01/02）。
 
-**判定「这次没白干」**（2026-11-06 实跑后逐条核对）：
+**判定「这次没白干」**（2026-11-07 收尾后逐条核对）：
 
 - [x] `src/core/factstore.mjs` / `vecstore.mjs` / `vector-generation.mjs` / `embed.mjs` **零改动**（`git diff --name-only` 验证）
-- [x] `src/router.mjs` 只在**三条**召回路径后各插一次策略调用（关键词主路 / `auto` 降级路 / 向量路，共 9 个 diff hunk）；`off` 态响应逐字不变
-- [x] `npm test` **63/63**、`npm run test:adapter` **12 pass / 4 skip / 0 fail**、专项 `test/recall-policy.mjs` **10/10**；源码守卫与四处白名单同步均有断言
-- [x] `tools/evaluate-recall-policy.mjs` 产出三态快照 + MRR/NDCG@8 + bootstrap CI + `--grid`，报告首行即强制标注合成集局限
+- [x] `src/router.mjs` 在**四条**召回路径后各插一次策略调用；`off` 态响应逐字不变
+- [x] `npm test` **69/69**、`npm run test:adapter` **12 pass / 4 skip / 0 fail**、`test/recall-policy.mjs` **15/15**、`test/inject-exposure.mjs` **1/1**（真实 `router.handle('/inject')` 端到端）
+- [x] `tools/evaluate-recall-policy.mjs` v2 产出三态快照 + MRR/NDCG@8 + bootstrap CI + `--grid` + `amplifiedRecall` 实跑小节，报告强制标注合成集局限
 - [x] `externalModelRequests = 0`；默认 `recallPolicyMode='off'`
+- [x] 放大召回 8 → 32 条候选，最终仍 `trimToK` 回 8 条；`distribution/judgment` 仍按请求 k 的前 k 条原始分数算
+- [x] 注入级曝光 `demoted` 跨轮 0 → 3 → 4 → 6；6 候选 / 3 配额下连续 4 轮注入集合两两不同
 
 ### 实跑结果（如实记录，含不好看的那个数）
 
@@ -192,12 +194,27 @@
 | 合成集三态 | off NDCG@8 `0.581957`、shadow `0.581957`、enabled `0.632005`；MRR `0.436111 → 0.513889` |
 | paired bootstrap（6 对，10 000 次） | meanDelta `+0.050048`，**CI95 `[-0.193167, 0.247048]` 覆盖 0** ⇒ 只能说「未发现劣化」，**不能说更优** |
 | 端到端冒烟 | `offEqualsShadowByText` / `enabledTextsEqualOff` / `sameModeRepeatStable` / `enabledNoCrash` / `noExternalModelRequests` 全 true |
-| 真值层 diff | 零；`router.mjs` 9 个 hunk，其余为四处白名单 + 新增文件 |
+| 真值层 diff | 零（首版与收尾复核均为零）；其余为四处白名单 + 策略层模块 + 测试/评测工具 |
 
 冒烟第一次跑出 `offEqualsShadow: false`，查清是**夹具口径错**：三态各用独立临时 root，`fact:<digest>` 含写入时间戳所以跨 root 必然不同，不是顺序变化。改为比较 item 文本并补 A/A 自对照后全绿 —— 记录在此，避免以后有人把「测试改绿」当成「把问题修掉」。
 
-**本次仍未解决、不可跳过的**：真库标注集与生产权重（C2）、在线 shadow / canary（C5）、注入级曝光（C1 口径）、放大召回（票 03 后续切片）、C4 的 07 号票实现（票本身已批准）。
+### 2026-11-07 收尾补记（票 03 → resolved）
+
+| 补上的 | 实跑证据 |
+| --- | --- |
+| 放大召回 | `amplifiedRecall`: off 8 → enabled 32 候选；被埋在第 25 位的相关条目 off 时根本不在候选里、enabled 时进入；`returnedCount=8` |
+| 注入级曝光 | `test/inject-exposure.mjs` 真实路由连跑 4 轮，`demoted` 0→3→4→6，四轮集合两两不同；`dry` 不写状态；`deferred` 走 60s 收据并 ack 成功 |
+| 第四条召回路径 | `kind=event` 向量支路补接；C7 断言 3 → 4 |
+| 配置/失败分支 | 所有分支统一 `trimToK`，配置非法或抛错也不会把 4k 条候选悄悄返回 |
+
+**本轮查出的两个「不好看但必须写下来」的事实**：
+
+1. **「三条路径都接了」是假断言**。漏掉的 `kind=event` 向量支路从未报错，而测试因为只数自己写过的三处而全绿。已改为从调用点反向盘点（4 处 `applyRecallPolicy` + 4 处 `k: storeK`）。
+2. **曝光让位不是无条件生效**。当「候选数 == 配额数」时，每轮所有候选被同等降权，共同因子不改变相对顺序 —— 实测 3 候选 / 3 配额连跑 4 轮顺序完全一致。这是设计边界而非 bug：曝光 debiasing 本来就只在「部分候选曝光、部分没有」时改变相对次序。端到端用例因此刻意用 6 候选 / 3 配额，并在报告的 `limitations` 里写明，不拿「顺序没变」粉饰成通过。
+
+**仍未解决、不可跳过的**：真库标注集与生产权重（C2）、在线 shadow / canary（C5）、C4 的 07 号票实现（票本身已批准，被 01 阻塞）、cross-encoder（04）、导入器（01/02）。CI95 仍覆盖 0 ⇒ 依旧**只报未发现劣化，不宣称更优**。
 
 ## Comments
 
 - 2026-11-06 [by:WorkBuddy]：用户要求「认真设计诚实代价的代价部分 + 找主流方法解决 + 开工」。复核后发现 C2/C5 被低估、C6 可消解、新增 C7，据此重排优先级并开工票 03。
+- 2026-11-07 [by:WorkBuddy]：用户「接着之前的任务清单继续做」⇒ 收尾票 03 到 `resolved`。补齐放大召回、注入级曝光双通道、第四条召回路径；修正 C7 假断言；如实记录「候选==配额时无相对让位」的设计边界。Frontier 变为 01 / 04。

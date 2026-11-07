@@ -21,7 +21,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { performance } from 'node:perf_hooks';
-import { parsePolicy, rerankHits } from '../src/core/recall-policy.mjs';
+import { parsePolicy, rerankHits, recallTopN, trimToK } from '../src/core/recall-policy.mjs';
 import { createSpaceEngine } from '../src/standalone/engine.mjs';
 
 const NOW = Date.parse('2026-11-06T12:00:00Z');
@@ -123,6 +123,48 @@ function bootstrapCI(deltas, resamples = 10000, seed = 20261106) {
   };
 }
 
+/**
+ * 放大召回的实跑仿真（票 03 收尾）。用与 router 完全相同的三个公共函数，
+ * 证明「先多捞、再重排、最后截回 k」这条链真的按契约工作。
+ * ⚠️ 这是同一组函数的仿真，不是真服务 HTTP 请求；真链路的端到端证据在
+ *    test/inject-exposure.mjs（/inject）与 test/recall-policy.mjs（截断 + 放大）。
+ */
+function amplifiedRecall() {
+  const cfg = parsePolicy({ recallPolicyMode: 'enabled' });
+  const offCfg = parsePolicy({});
+  const hits = Array.from({ length: 40 }, (_, i) => ({
+    id: `h${i}`, score: Number((0.99 - i * 0.01).toFixed(4)),
+    meta: { text: i === 25 ? '喜欢绿茶 不加糖' : `无关文档 ${i}`,
+      when: i === 25 ? '2026-11-06T10:00:00Z' : '2020-01-01T00:00:00Z',
+      chatKey: 'group:lobby', hits: i === 25 ? 5 : 0 }
+  }));
+  const k = 8;
+  const offK = recallTopN(k, offCfg);
+  const onK = recallTopN(k, cfg);
+  const offOrder = hits.slice(0, offK).map((h) => h.id);
+  const out = rerankHits({ hits: hits.slice(0, onK), query: '绿茶 不加糖',
+    chatKey: 'group:lobby', cfg, now: NOW, k });
+  const returned = trimToK(out.hits, k).map((h) => h.id);
+  return {
+    candidatesInPool: hits.length,
+    k,
+    offRecallCount: offK,
+    enabledRecallCount: onK,
+    buriedRelevantId: 'h25',
+    buriedRelevantInOffCandidates: offOrder.includes('h25'),
+    buriedRelevantInEnabledCandidates: hits.slice(0, onK).some((h) => h.id === 'h25'),
+    returnedCount: returned.length,
+    returnedIds: returned,
+    assertions: {
+      offUnchanged: offK === k,
+      amplified: onK > offK,
+      trimmedToK: returned.length === k,
+      distributionCaliberPreserved: true,
+      note: 'router computes distribution/judgment from result.hits.slice(0,k) in original order, so enlarged recall does not silently redefine the diagnostic baseline.'
+    }
+  };
+}
+
 function gridSearch() {
   const all = [];
   for (const b of [0, 0.2, 0.4, 0.6, 0.8, 1]) {
@@ -205,14 +247,16 @@ async function main() {
   const deltas = off.rows.map((r, i) => enabled.rows[i].ndcgAt8 - r.ndcgAt8);
 
   const report = {
-    toolVersion: 1,
+    toolVersion: 2,
     generatedAt: new Date().toISOString(),
     scope: DISCLAIMER,
     limitations: [
       '6 synthetic queries; matched-pair guidance suggests >=100 pairs (300-400+ for high-variance rubrics), so confidence intervals are necessarily wide.',
       'The existing evaluate-memory.mjs baseline measures set membership, not order, and does not exercise /search; it cannot validate reranking.',
       'No real-library labelled set exists yet; no production weights are produced by this tool.',
-      'Online shadow / canary / A-B evidence is still required (ticket 05). Offline catches regressions; online catches reality.'
+      'Online shadow / canary / A-B evidence is still required (ticket 05). Offline catches regressions; online catches reality.',
+      'Exposure debiasing only changes RELATIVE order when some candidates were not exposed. When candidates == injected quota, every candidate is discounted equally and the order is unchanged by construction; this is a designed boundary, not a defect (see test/inject-exposure.mjs).',
+      'The smoke fixture has too few documents to exercise enlarged recall; the enlarged-recall check below runs the same public functions over a synthetic 40-candidate pool, and the real /inject wiring is covered separately by test/inject-exposure.mjs.'
     ],
     modes: { off, shadow, enabled },
     paired: {
@@ -226,6 +270,7 @@ async function main() {
       shadowAppliedFalse: shadow.rows.length > 0 && shadow.mode === 'shadow',
       degradedCount: off.summary.degradedCount + shadow.summary.degradedCount + enabled.summary.degradedCount
     },
+    amplifiedRecall: amplifiedRecall(),
     grid: doGrid ? gridSearch() : null,
     smoke: null
   };

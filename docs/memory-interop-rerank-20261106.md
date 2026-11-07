@@ -72,6 +72,6 @@ vec-memory 成为与 Agent 框架无关的**通用记忆能力服务**：
 ## 参考基线
 
 - 检索质量基线：`docs/recall-evaluation-before-20261101.json`、`docs/recall-evaluation-20261101.json`，评测工具 `tools/evaluate-memory.mjs`。⚠️ 这三个指标是**集合指标、与顺序无关**，且不经过 `/search`，不能用来判定重排质量；位置敏感评测见 `tools/evaluate-recall-policy.mjs`。
-- 现有检索链：`/search` 三条召回路径（关键词主路 / `auto` 降级路 / 向量路）→ 余弦 + 字面重叠打分 → 截断；`src/core/rank.mjs` 是只算不用的影子诊断仪表，**不是排序模块**。
+- 现有检索链：`/search` **四条**召回路径（关键词主路 / `auto` 降级路 / 向量路 / `kind=event` 向量支路）→ 余弦或字面重叠打分 → 截断；`src/core/rank.mjs` 是只算不用的影子诊断仪表，**不是排序模块**。⚠️ 2026-11-07 修正：首版只数了三条，漏掉的 `kind=event` 支路从未报错，而断言因只数自己接过的三处而全绿 —— 「自证式通过」的教训见代价文档 §7。
 - 代价量化与专业解法：`docs/cost-and-mitigations-20261106.md`。
 - 协议与隔离：`PROTOCOL.md`、`openapi/`、`CONTEXT.md`（空间 / 场合 / 主体 / 来源 / 采用）。
