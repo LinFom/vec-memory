@@ -6,6 +6,7 @@ import path from 'node:path';
 import { createHash, randomUUID, randomBytes } from 'node:crypto';
 import { gzipSync, gunzipSync } from 'node:zlib';
 import { initialize, createService } from '../src/standalone/service.mjs';
+import { createSpaceEngine } from '../src/standalone/engine.mjs';
 import { createStandaloneServer } from '../src/standalone/server.mjs';
 import { createBackup, inspectBackup, restoreBackup, createBackupTo, inspectBackupFile, restoreBackupFile } from '../src/standalone/backup.mjs';
 
@@ -278,7 +279,10 @@ test('streaming v2: budget fails before reading, magic is stable, and v1 stays r
   assert.equal(raw.subarray(0, 4).toString(), 'VMB2', 'v2 must keep its magic in plaintext');
   assert.equal(raw.includes(Buffer.from('hello')), false, 'content must not appear in plaintext');
   const manifest = await inspectBackupFile(file, 'password-123');
-  assert.equal(manifest.files.length, 2);
+  // 包内多了一条合成条目 backup-manifest.json（说明这份备份是哪种模式、排了什么）。
+  assert.equal(manifest.files.length, 3);
+  assert.ok(manifest.files.some(f => f.name === 'backup-manifest.json'), 'every archive must carry its own manifest');
+  assert.equal(manifest.mode, 'evidence', 'v2 defaults to evidence mode');
   assert.equal(manifest.checksum, created.checksum, 'file and create paths must agree on checksum');
   assert.equal(inspectBackup(raw, 'password-123').checksum, created.checksum, 'buffer path must agree too');
 
@@ -306,7 +310,9 @@ test('progress: byte-accurate reporting, readable while the service is in mainte
   assert.equal(seen[0].phase, 'scan');
   assert.ok(seen.some(p => p.phase === 'read' && p.total === created.totalBytes), 'read phase must carry the real total');
   for (let i = 1; i < seen.length; i++) assert.ok((seen[i].done ?? 0) >= (seen[i - 1].done ?? 0), 'progress must never go backwards within one phase');
-  assert.equal(created.totalBytes, 40 * 1024 * 1024 + 5);
+  // totalBytes 是包内总字节（含 manifest），sourceBytes 才是被打包的原文件字节。
+  assert.equal(created.sourceBytes, 40 * 1024 * 1024 + 5);
+  assert.ok(created.totalBytes > created.sourceBytes, 'manifest bytes are part of the payload total');
 
   // 2) 维护态下进度接口必须仍可读：备份期间其它请求一律 503，进度是唯一的活口。
   const access = JSON.parse(fs.readFileSync(path.join(root, 'access.json'), 'utf8'));
@@ -352,4 +358,100 @@ test('progress: byte-accurate reporting, readable while the service is in mainte
   await assert.rejects(restoreBackupFile(file, bad, { password: 'not-the-password' }));
   assert.equal(fs.existsSync(bad), false);
   assert.equal(fs.readdirSync(root).filter(n => n.startsWith('bad-password.staging-')).length, 0);
+});
+
+test('evidence mode is the default: memory + its evidence go in, the full message log stays out', async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'vec-backup-evidence-'));
+  const out = fs.mkdtempSync(path.join(os.tmpdir(), 'vec-backup-out-'));
+  t.after(() => { fs.rmSync(root, { recursive: true, force: true }); fs.rmSync(out, { recursive: true, force: true }); });
+  initialize(root);
+  const space = path.join(root, 'spaces', 's');
+  fs.mkdirSync(path.join(space, 'input'), { recursive: true });
+  fs.mkdirSync(path.join(space, 'imported-source', 'messages'), { recursive: true });
+  // ⚠️ legacy/data 是这个空间的 DATA_DIR（worker 把 DATA_DIR 绑到这里），里面放的是
+  // facts slots / normalizer / 当前向量代 —— 记忆本体，不是残留。它必须在包里。
+  fs.mkdirSync(path.join(space, 'legacy', 'data', 'memory-vec', 'facts'), { recursive: true });
+  fs.mkdirSync(path.join(space, 'legacy', 'data', 'memory-vec', 'normalizer'), { recursive: true });
+
+  // 记忆与证据：块里自带 snippets（原文片段），aliases 把 mid 映射回 messageId。
+  fs.writeFileSync(path.join(space, 'input', 'corpus.json'), JSON.stringify([
+    { id: 'hour_a', kind: 'hour', chunk: { id: 'hour_a', snippets: [{ mid: 1, text: '证据原文', ts: 1 }] } }
+  ]));
+  fs.writeFileSync(path.join(space, 'input', 'evidence-aliases.json'), JSON.stringify({ '1': 'group:1:1' }));
+  fs.writeFileSync(path.join(space, 'input', 'relationship-index.json'), JSON.stringify({ edges: [] }));
+  // 完整原始记录与迁移残留：默认一条都不该进包。
+  fs.writeFileSync(path.join(space, 'input', 'messages.jsonl'), 'x'.repeat(2 * 1024 * 1024));
+  fs.writeFileSync(path.join(space, 'imported-source', 'messages', 'group_1.json'), 'raw');
+  fs.writeFileSync(path.join(space, 'legacy', 'data', 'memory-vec', 'vectors.bin'), 'old');
+  fs.writeFileSync(path.join(space, 'legacy', 'data', 'memory-vec', 'facts', 'slots.jsonl'), '{"key":"s1"}\n');
+  // secret.key 与 entities.json 必须成对出现：只有映射表没有密钥时引擎会明确拒绝启动
+  // （占位符编号不可重生成，换了密钥检索「照常返回结果、只是全错」）。
+  fs.writeFileSync(path.join(space, 'legacy', 'data', 'memory-vec', 'normalizer', 'secret.key'), 'k'.repeat(32));
+  fs.writeFileSync(path.join(space, 'legacy', 'data', 'memory-vec', 'normalizer', 'entities.json'), '[]');
+  fs.writeFileSync(path.join(space, 'migration-manifest.json'), '{}');
+  fs.writeFileSync(path.join(space, 'settings.json'), JSON.stringify({ autoIndexEnabled: true, apiKey: 'secret-value' }));
+  fs.writeFileSync(path.join(space, 'state.json'), JSON.stringify({ jobs: {}, receipts: {} }));
+
+  const evidenceFile = path.join(out, 'evidence.vmb');
+  const made = await createBackupTo(root, evidenceFile, { spaceId: 's', password: 'password-123' });
+  assert.equal(made.mode, 'evidence', 'v2 must default to evidence mode');
+  assert.equal(made.evidenceOnly, true);
+  assert.equal(made.containsCredentials, false, 'space archives carry no credential file');
+
+  const names = (await inspectBackupFile(evidenceFile, 'password-123')).files.map(f => f.name).sort();
+  assert.ok(names.includes('input/corpus.json'), 'memory blocks must be packed');
+  assert.ok(names.includes('input/evidence-aliases.json'), 'mid → messageId map must be packed');
+  assert.ok(names.includes('input/relationship-index.json'));
+  assert.ok(!names.includes('input/messages.jsonl'), 'the full message log must not be packed by default');
+  assert.ok(!names.some(n => n.startsWith('imported-source/')), 'import leftovers must not be packed');
+  // legacy/data 是 DATA_DIR：facts 与 normalizer 必须一起走，否则恢复出来的库「可读但没记忆」。
+  assert.ok(names.includes('legacy/data/memory-vec/facts/slots.jsonl'), 'fact slots are the memory itself — must be packed');
+  assert.ok(names.includes('legacy/data/memory-vec/normalizer/entities.json'), 'entity map is required for recall');
+  assert.ok(!names.includes('migration-manifest.json'));
+  assert.ok(names.includes('backup-manifest.json'), 'the archive must explain what it left out');
+
+  // 排除清单必须点名，且按体积排序 —— 用户要能一眼看出省下来的是什么。
+  assert.equal(made.excluded[0].path, 'input/messages.jsonl');
+  assert.equal(made.excluded[0].bytes, 2 * 1024 * 1024);
+  assert.ok(made.excluded[0].label.length > 0, 'each excluded entry must explain what it is');
+  assert.ok(!made.excluded.some(x => x.path === 'legacy/'), 'legacy/data is DATA_DIR, never an exclusion');
+  // 体积对比就是这次改造的全部理由：2MB 原始日志 → 几十 KB 的包。
+  assert.ok(made.storedBytes < 1024 * 1024, `evidence archive must stay tiny, got ${made.storedBytes}`);
+
+  // 恢复：语料在、原始日志不在，引擎仍能 audit（可读、可召回），只是不能重建索引。
+  const restored = path.join(root, 'spaces', 'copy');
+  const done = await restoreBackupFile(evidenceFile, restored, { password: 'password-123', expectedChecksum: made.checksum });
+  assert.equal(done.mode, 'evidence');
+  assert.equal(done.evidenceOnly, true);
+  assert.ok(fs.existsSync(path.join(restored, 'input', 'corpus.json')));
+  assert.equal(fs.existsSync(path.join(restored, 'input', 'messages.jsonl')), false);
+  assert.ok(fs.existsSync(path.join(restored, 'legacy', 'data', 'memory-vec', 'facts', 'slots.jsonl')), 'restored copy must keep the fact store');
+  const onDisk = JSON.parse(fs.readFileSync(path.join(restored, 'backup-manifest.json'), 'utf8'));
+  assert.equal(onDisk.evidenceOnly, true);
+  assert.match(onDisk.note, /不能重建索引/, 'the limitation must survive the restore, not live in a doc');
+  const engine = createSpaceEngine({ root: restored, maintenance: true });
+  try { await engine.call('audit', {}); } finally { await engine.close(); }
+
+  // 完整模式仍然可用：显式要，才把全部原始记录给你。
+  const fullFile = path.join(out, 'full.vmb');
+  const full = await createBackupTo(root, fullFile, { spaceId: 's', password: 'password-123', mode: 'full' });
+  assert.equal(full.mode, 'full');
+  assert.equal(full.evidenceOnly, false);
+  assert.deepEqual(full.excluded, [], 'full mode excludes nothing');
+  const fullNames = (await inspectBackupFile(fullFile, 'password-123')).files.map(f => f.name);
+  assert.ok(fullNames.includes('input/messages.jsonl'));
+  assert.ok(fullNames.includes('migration-manifest.json'));
+
+  // 服务级：同一条排除规则要能剥掉 spaces/<id>/ 前缀，且 access.json 必须留下。
+  const serviceFile = path.join(out, 'service.vmb');
+  const service = await createBackupTo(root, serviceFile, { password: 'password-123' });
+  assert.equal(service.containsCredentials, true, 'service archives always carry access.json');
+  const serviceNames = (await inspectBackupFile(serviceFile, 'password-123')).files.map(f => f.name);
+  assert.ok(serviceNames.includes('access.json'));
+  assert.ok(serviceNames.includes('spaces/s/input/corpus.json'));
+  assert.ok(!serviceNames.includes('spaces/s/input/messages.jsonl'), 'the same rule must apply with the spaces/ prefix');
+
+  // 未知模式必须明确报错，而不是悄悄退回某个默认值。
+  await assert.rejects(createBackupTo(root, path.join(out, 'bad.vmb'), { spaceId: 's', password: 'password-123', mode: 'partial' }),
+    error => error.code === 'INVALID_BACKUP');
 });

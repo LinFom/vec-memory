@@ -4,7 +4,7 @@ import path from 'node:path';
 import { randomBytes, createHash, randomUUID } from 'node:crypto';
 import { MemoryError, digest } from '../core/durable-log.mjs';
 import { createSpaceEngine } from './engine.mjs';
-import { inspectAnyFile, restoreAnyFile } from './backup.mjs';
+import { inspectAnyFile, restoreAnyFile, normalizeBackupMode } from './backup.mjs';
 import { runBackupTask } from './backup-runner.mjs';
 import { beginProgress, reportProgress, finishProgress, progressSnapshot } from './backup-progress.mjs';
 const IMPLEMENTATION_VERSION=JSON.parse(fs.readFileSync(new URL('../../package.json',import.meta.url),'utf8')).version;
@@ -180,13 +180,16 @@ export function createService({ root, engineFactory = createSpaceEngine, localAd
                   finishProgress(null, {backupId});
                 } catch (error) { finishProgress(error); throw error; }
               } else {
+                // 默认证据级：只带记忆与证据。要全量原始记录必须显式说 mode:'full'。
+                const mode = normalizeBackupMode(body.mode);
                 // 进度在 exclusive 之前开始：关引擎/排空在跑请求那几秒也要显示「在动」。
-                beginProgress('create', body.spaceId ? '正在导出空间备份' : '正在生成完整备份', 0);
+                const what = body.spaceId ? '正在导出空间备份' : (mode === 'evidence' ? '正在导出证据级备份' : '正在生成完整备份');
+                beginProgress('create', what, 0);
                 let failure = null;
                 try {
                   await exclusive(async () => {
                     if (body.spaceId) permit(access,who,id(body.spaceId));
-                    await runBackupTask('create', {root, destination:file(backupId), spaceId:body.spaceId, password:body.password}, {onProgress: patch => reportProgress(patch)});
+                    await runBackupTask('create', {root, destination:file(backupId), spaceId:body.spaceId, password:body.password, mode}, {onProgress: patch => reportProgress(patch)});
                   });
                 } catch (error) { failure = error; throw error; }
                 finally { finishProgress(failure, failure ? null : {backupId}); }
@@ -198,7 +201,8 @@ export function createService({ root, engineFactory = createSpaceEngine, localAd
               try {
                 const archive = await runBackupTask('inspect', {file:file(parts[4]),password:body.password}, {onProgress: patch => reportProgress(patch)});
                 finishProgress(null);
-                return finish({kind:archive.kind,files:archive.files.length,totalBytes:archive.totalBytes,checksum:archive.checksum,sourceSpaceId:archive.spaceId,automaticTasksSuspendedOnRestore:true});
+                return finish({kind:archive.kind,files:archive.files.length,totalBytes:archive.totalBytes,checksum:archive.checksum,sourceSpaceId:archive.spaceId,
+                  mode:archive.mode||'full',evidenceOnly:(archive.mode||'full')==='evidence',excluded:archive.excluded||[],automaticTasksSuspendedOnRestore:true});
               } catch (error) { finishProgress(error); throw error; }
             }
             if (parts[4] && parts[5] === 'restore' && method === 'POST') {

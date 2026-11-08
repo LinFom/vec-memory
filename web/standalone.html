@@ -229,7 +229,7 @@ const S={
   page:"overview", scope:{kind:"group",id:""},
   person:null, personCtx:"", personSel:null, entry:null, entryPreview:null,
   scene:"", subject:null, subjectSel:null, recall:null, jobs:null,
-  settings:null, backupPreview:null, busy:0, job:null, jobTimer:null, bpass:""
+  settings:null, backupPreview:null, busy:0, job:null, jobTimer:null, bpass:"", backupMode:"evidence"
 };
 const LS_THEME="memory-console-theme", LS_TOKEN="memory-console-token";
 const NAV=[
@@ -832,14 +832,18 @@ function viewBackup(){
   const pwHint=S.backupId&&!S.bpass
     ?`<div class="card" style="margin-bottom:12px;border-left:3px solid var(--orange)"><p class="sub">刷新页面后备份密码已清空；预览/恢复前请重新输入（加密备份必须用导出时那个口令）。</p></div>`
     :"";
-  return head("备份与导入","完整备份含模型设置与授权，空间导出不含模型密钥。恢复前必须预览校验和。")+
+  return head("备份与导入","默认导出「证据级」：只带记忆块与支撑它的原文片段，不含全量原始聊天。要连原始记录一起带走，选完整镜像。恢复前必须预览校验和。")+
   `<div id="jobslot">${jobHtml()}</div>`+pwHint+
   `<div class="split">
     <div class="card">
       <h2>导出</h2>
-      <div class="field"><label>备份密码（完整备份至少 8 位）</label><input class="inp" id="bpass" type="password" autocomplete="new-password"></div>
+      <div class="field"><label>备份内容</label>
+        <label class="hp" style="display:block"><input type="radio" name="bmode" value="evidence" ${S.backupMode!=="full"?"checked":""}> 证据级（推荐）· 记忆 + 证据片段，不含全量原始聊天</label>
+        <label class="hp" style="display:block;margin-top:4px"><input type="radio" name="bmode" value="full" ${S.backupMode==="full"?"checked":""}> 完整镜像 · 连 <span class="mono">input/messages.jsonl</span> 一起带走，体积大一个数量级</label>
+      </div>
+      <div class="field"><label>备份密码（服务级备份至少 8 位；空间导出可留空）</label><input class="inp" id="bpass" type="password" autocomplete="new-password"></div>
       <div class="toolbar" style="margin-top:10px"><div class="acts">
-        <button class="btn" data-act="backup-full">完整服务备份</button>
+        <button class="btn" data-act="backup-full">导出整个服务</button>
         <button class="btn" data-act="backup-space">导出当前空间</button>
       </div></div>
       <div class="hr"></div>
@@ -864,9 +868,10 @@ function viewBackup(){
       </div></div>
       ${p?`<div class="hr"></div><dl class="kv">
         <dt>类型</dt><dd>${esc(p.kind)}</dd>
+        <dt>内容</dt><dd>${p.evidenceOnly?"证据级 · 记忆与证据片段":"完整镜像 · 含全部原始记录"}</dd>
         <dt>文件</dt><dd>${esc(p.files)} 个 · ${esc((p.totalBytes/1048576).toFixed(2))} MB</dd>
         <dt>校验和</dt><dd class="mono">${esc(p.checksum)}</dd>
-      </dl>`:""}
+      </dl>${p.evidenceOnly?`<p class="sub" style="margin-top:8px;color:var(--orange)">这份备份不含全量原始消息：恢复后可读、可召回，但<b>不能重建索引</b>（重建需要 input/messages.jsonl）。</p>`:""}`:""}
       <p class="sub" style="font-size:12px;color:var(--muted);margin-top:12px">恢复会短暂停写（请求返回 503 MAINTENANCE），聊天可继续、稍后重试；完整恢复生成新目录，需用新目录启动。</p>
     </div>
   </div>`;
@@ -1047,11 +1052,12 @@ $("#main").addEventListener("click",async e=>{
     else if(act==="backup-full"||act==="backup-space"){
       const password=bpassVal()||undefined;
       // 先挡住明显的填错：服务端只说「密码至少 8 位」，用户要等一轮请求才知道。
-      // 空间导出允许不加密（密码留空），完整备份必须给密码。
-      if(act==="backup-full"&&(!password||password.length<8))throw new Error("完整备份密码至少 8 位");
-      beginJob(act==="backup-space"?"正在导出空间备份":"正在生成完整备份");
+      // 空间导出允许不加密（密码留空），服务级备份必须给密码（它含 access.json）。
+      if(act==="backup-full"&&(!password||password.length<8))throw new Error("服务级备份密码至少 8 位");
+      const mode=S.backupMode==="full"?"full":"evidence";
+      beginJob((act==="backup-space"?"正在导出空间备份":(mode==="evidence"?"正在导出证据级备份":"正在生成完整镜像")));
       try{
-        const r=await api("admin/backups","POST",{...(act==="backup-space"?{spaceId:S.space}:{}),password});
+        const r=await api("admin/backups","POST",{...(act==="backup-space"?{spaceId:S.space}:{}),password,mode});
         S.backupId=r.backupId; toast("备份已生成："+r.backupId,"ok");
       }finally{ await endJob(); render(); }
     }
@@ -1092,7 +1098,9 @@ $("#main").addEventListener("click",async e=>{
         const r=await api("admin/backups/"+encodeURIComponent(p.id)+"/restore","POST",{
           password:bpassVal(),expectedChecksum:p.checksum,
           spaceId:$("#bnew").value.trim()||undefined,owner:$("#bowner").value.trim()||undefined,replace:$("#breplace").checked});
-        toast("恢复完成"+(r.destination?"："+r.destination:""),"ok");
+        // 证据级恢复出来的库缺少 messages.jsonl：说清「现在能做什么、不能做什么」，
+        // 否则用户下一步点「重建索引」会得到一份空语料，还以为恢复成功了。
+        toast("恢复完成"+(r.destination?"："+r.destination:"")+(r.evidenceOnly?"（证据级：可读可召回，不能重建索引）":""),"ok");
         S.backupPreview=null;
       }finally{ await endJob(); await refreshBase(); render(); }
     }
@@ -1147,6 +1155,8 @@ $("#main").addEventListener("input",e=>{
   const el=e.target.closest("[data-input]");
   // 密码存在内存里跟着页面走（不写进 HTML）：备份/预览/恢复三步用的是同一个密码。
   if(e.target.id==="bpass")S.bpass=e.target.value;
+  // radio 没有 data-input，单独认：模式要跨 render 保持（否则刷新一下就被重置成证据级）。
+  if(e.target.name==="bmode")S.backupMode=e.target.value;
 });
 $("#main").addEventListener("keydown",e=>{
   if(e.key!=="Enter")return;

@@ -50,10 +50,51 @@ function skippedEntry(name) {
   return name === '.service.lock' || name === 'backups' || name.endsWith('.tmp');
 }
 
+// ── 备份模式 ────────────────────────────────────────────────────────────────
+// `evidence`（默认）= 只带走「记忆 + 证据」，不带走完整原始记录。
+// `full`           = 目录镜像，连全量原始消息一起带走（旧行为）。
+//
+// 为什么证据级是默认：记忆块（corpus 的 chunk）已经把支撑它的原文片段存进
+// `snippets`（含 text、mid、speaker、ts），证据链是自足的；而 `input/messages.jsonl`
+// 里绝大多数消息从未进入任何记忆 —— 生产库上它是 500,624 行 / 330MB，而记忆块只有
+// 826 个、证据片段 23,381 条。把它一起打包，等于为了 3% 的证据付 100% 的体积和隐私。
+//
+// 代价只有一个且必须明说：**恢复后不能重建索引**（canonicalEvidence 从 messages.jsonl
+// 派生，缺失即空）。检索、召回、注入都不受影响，因为向量来自 chunk 而不是原始日志。
+// 这条写在包内的 `backup-manifest.json` 里，恢复后仍然看得见。
+const BACKUP_MODES = ['evidence', 'full'];
+// ⚠️ `legacy/` 绝对不能排除 —— 这个名字是历史命名，不是「旧残留」。
+// worker.mjs 里 `bindHost({config:{DATA_DIR:path.join(root,'legacy','data')}})`，
+// 也就是说这个空间的 **DATA_DIR 就是 legacy/data**：facts/slots.jsonl（真正的记忆条目）、
+// normalizer/（实体映射，记忆可用性的前提）、consolidate/、subjects/ 和当前向量代都在里面。
+// 把它当残留排掉 = 备份出一份「有小时块、没有事实」的壳，audit 还会因为空库可读而通过。
+const EVIDENCE_EXCLUDES = [
+  {key: 'input/messages.jsonl', label: '全量原始消息日志（重建索引用，非记忆本体）'},
+  {key: 'imported-source/', label: '导入源素材（迁移完成后不再被读取）'},
+  {key: 'migration-manifest.json', label: '迁移映射（记录旧库文件路径）'}
+];
+export function normalizeBackupMode(mode) {
+  if (mode == null || mode === '') return 'evidence';
+  if (!BACKUP_MODES.includes(mode)) fail(`Unknown backup mode ${JSON.stringify(mode)}; expected evidence|full`);
+  return mode;
+}
+
+// 服务级备份的 name 带 `spaces/<id>/` 前缀，空间级没有。剥掉前缀后统一判定，
+// 这样同一份排除表对两种范围都成立，不会出现「导出空间时漏排、备份整库时排掉」的分裂。
+function evidenceExcludeKey(name) {
+  const parts = name.split('/');
+  const rel = (parts[0] === 'spaces' && parts.length > 2 ? parts.slice(2) : parts).join('/');
+  for (const item of EVIDENCE_EXCLUDES) {
+    if (item.key.endsWith('/') ? rel.startsWith(item.key) : rel === item.key) return item.key;
+  }
+  return null;
+}
+
 // 只做 lstat，不读内容 —— 体积判定必须发生在任何一次 readFile 之前。
-function collect(root, limit) {
-  if (!fs.existsSync(root)) return {files: [], totalBytes: 0, largest: null};
+function collect(root, limit, mode = 'full') {
+  if (!fs.existsSync(root)) return {files: [], totalBytes: 0, largest: null, excluded: []};
   const files = []; let totalBytes = 0; let largest = null;
+  const excluded = new Map();
   const visit = (dir, prefix) => {
     for (const name of fs.readdirSync(dir).sort()) {
       if (skippedEntry(name)) continue;
@@ -61,6 +102,12 @@ function collect(root, limit) {
       if (stat.isSymbolicLink()) fail('Symbolic links cannot be backed up');
       if (stat.isDirectory()) { visit(file, relative + '/'); continue; }
       if (!stat.isFile()) fail('Unsupported file type');
+      const skipKey = mode === 'evidence' ? evidenceExcludeKey(relative) : null;
+      if (skipKey) {
+        const acc = excluded.get(skipKey) || {key: skipKey, files: 0, bytes: 0};
+        acc.files++; acc.bytes += stat.size; excluded.set(skipKey, acc);
+        continue;
+      }
       totalBytes += stat.size;
       if (!largest || stat.size > largest.size) largest = {name: relative, size: stat.size};
       if (totalBytes > limit) {
@@ -73,17 +120,26 @@ function collect(root, limit) {
     }
   };
   visit(root, '');
-  return {files, totalBytes, largest};
+  return {
+    files, totalBytes, largest,
+    // 只回报真的排到了东西的项：没出现的目录不该在清单里占一行「已排除 0 个文件」。
+    excluded: [...excluded.values()].map(item => ({
+      path: item.key,
+      label: EVIDENCE_EXCLUDES.find(e => e.key === item.key)?.label || '',
+      files: item.files, bytes: item.bytes
+    })).sort((a, b) => b.bytes - a.bytes)
+  };
 }
 
 // ---------------------------------------------------------------- v1（同步，兼容保留）
 
-export function createBackup(root, {spaceId, password} = {}) {
+export function createBackup(root, {spaceId, password, mode = 'full'} = {}) {
   if (!spaceId && (typeof password !== 'string' || password.length < 8)) throw new MemoryError('PASSWORD_REQUIRED','Full backups require a password of at least 8 characters');
   if (spaceId && !SPACE_ID_RE.test(spaceId)) fail('Invalid space ID');
   const source = spaceId ? path.join(root,'spaces',spaceId) : root;
-  // 先量体积再读文件：超限时不应该已经吃掉 512MB 内存。
-  const {files: listing} = collect(source, MAX_INLINE);
+  // 先量体积再读文件：超限时不应该已经吃掉 512MB 内存。v1 是兼容路径，默认仍是完整镜像；
+  // 证据级只对 v2 是默认（v1 的调用方是旧代码与测试，语义不该被悄悄换掉）。
+  const {files: listing} = collect(source, MAX_INLINE, normalizeBackupMode(mode));
   const files = [];
   for (const item of listing) {
     let data = fs.readFileSync(item.file);
@@ -117,7 +173,11 @@ async function* payloadOf(files, spaceId, tick = () => {}, totalBytes = 0) {
     yield u32(name.length); yield name;
     const hash = createHash('sha256'); let size = 0;
     const special = spaceId && (item.name === 'settings.json' || item.name === 'state.json');
-    if (special) {
+    if (item.data) {
+      // 合成条目（backup-manifest.json）：不落盘、不读磁盘，直接进流。
+      hash.update(item.data); size = item.data.length;
+      if (size) { yield u32(size); yield item.data; }
+    } else if (special) {
       let data = fs.readFileSync(item.file);
       if (item.name === 'settings.json') {
         const settings = JSON.parse(data);
@@ -145,10 +205,12 @@ async function* payloadOf(files, spaceId, tick = () => {}, totalBytes = 0) {
   yield u32(TRAILER_MARK); yield u32(trailer.length); yield trailer;
 }
 
-function headerOf({kind, spaceId, createdAt, fileCount, totalBytes, encrypted, salt, iv}) {
+function headerOf({kind, spaceId, createdAt, fileCount, totalBytes, encrypted, salt, iv, mode = 'full', excluded = []}) {
   const header = Buffer.from(JSON.stringify({
     format: 'vec-memory-backup', version: 2, kind, spaceId: spaceId || null, createdAt,
-    fileCount, totalBytes, compression: 'gzip', encryption: encrypted ? 'aes-256-gcm' : null
+    fileCount, totalBytes, compression: 'gzip', encryption: encrypted ? 'aes-256-gcm' : null,
+    // mode 放在明文头里：预览/体检不必解压就能说出「这份备份带不带全量原始消息」。
+    mode, excluded
   }), 'utf8');
   const fixed = Buffer.alloc(HEADER_FIXED);
   MAGIC.copy(fixed, 0);
@@ -158,13 +220,14 @@ function headerOf({kind, spaceId, createdAt, fileCount, totalBytes, encrypted, s
   return {fixed, header};
 }
 
-export async function createBackupTo(root, destination, {spaceId, password, limit = MAX_STREAM, onProgress} = {}) {
+export async function createBackupTo(root, destination, {spaceId, password, limit = MAX_STREAM, onProgress, mode} = {}) {
+  const backupMode = normalizeBackupMode(mode);
   if (!spaceId && (typeof password !== 'string' || password.length < 8)) throw new MemoryError('PASSWORD_REQUIRED','Full backups require a password of at least 8 characters');
   if (spaceId && !SPACE_ID_RE.test(spaceId)) fail('Invalid space ID');
   const tick = makeTicker(onProgress);
   tick({phase: 'scan', done: 0, total: 0}, true);
   const source = spaceId ? path.join(root, 'spaces', spaceId) : root;
-  const {files, totalBytes} = collect(source, limit);
+  const {files, totalBytes, excluded} = collect(source, limit, backupMode);
   tick({phase: 'read', done: 0, total: totalBytes}, true);
 
   const encrypted = typeof password === 'string' && password.length > 0;
@@ -172,7 +235,25 @@ export async function createBackupTo(root, destination, {spaceId, password, limi
   const iv = encrypted ? randomBytes(12) : Buffer.alloc(12);
   const kind = spaceId ? 'space' : 'service';
   const createdAt = new Date().toISOString();
-  const {fixed, header} = headerOf({kind, spaceId, createdAt, fileCount: files.length, totalBytes, encrypted, salt, iv});
+
+  // manifest 进包而不是进 settings.json：settings 的 schema 会拒绝未知键，
+  // 而这份说明必须在恢复之后依然读得到 —— 否则「不能重建索引」就成了口头约定。
+  const manifest = {
+    format: 'vec-memory-backup-manifest', version: 1, mode: backupMode,
+    kind, spaceId: spaceId || null, createdAt,
+    evidenceOnly: backupMode === 'evidence',
+    // 服务级备份必须带 access.json（管理员 hash、空间授权），所以它天然含凭据；
+    // 空间级不含授权文件。要拿去分享时看这一条，而不是猜。
+    containsCredentials: !spaceId,
+    note: backupMode === 'evidence'
+      ? '证据级备份：含记忆块与支撑它的原文片段（chunk.snippets），不含全量原始消息日志。恢复后可读、可召回；不能重建索引 —— 重建需要 input/messages.jsonl。'
+      : '完整镜像备份：含全部原始记录，可重建索引。',
+    excluded
+  };
+  const manifestBytes = Buffer.from(JSON.stringify(manifest, null, 2), 'utf8');
+  const entries = [{name: 'backup-manifest.json', size: manifestBytes.length, data: manifestBytes}, ...files];
+  const payloadBytes = totalBytes + manifestBytes.length;
+  const {fixed, header} = headerOf({kind, spaceId, createdAt, fileCount: entries.length, totalBytes: payloadBytes, encrypted, salt, iv, mode: backupMode, excluded});
 
   const partial = destination + '.partial-' + randomUUID();
   const digest = createHash('sha256');
@@ -193,17 +274,21 @@ export async function createBackupTo(root, destination, {spaceId, password, limi
       // 先喂头再喂正文，顺序必须与读取侧一致。
       digest.update(head);
       const out = fs.createWriteStream(null, {fd, start: head.length, autoClose: false});
-      await pipe(Readable.from(payloadOf(files, spaceId, tick, totalBytes)), ...stages, tap, out);
+      await pipe(Readable.from(payloadOf(entries, spaceId, tick, payloadBytes)), ...stages, tap, out);
       if (cipher) {
         const tag = cipher.getAuthTag();
         fs.writeSync(fd, tag, 0, tag.length, fs.fstatSync(fd).size);
       }
       fs.fsyncSync(fd);
-      tick({phase: 'finalize', done: totalBytes, total: totalBytes}, true);
+      tick({phase: 'finalize', done: payloadBytes, total: payloadBytes}, true);
     } finally { fs.closeSync(fd); }
     await fsp.rename(partial, destination);
     const stat = await fsp.stat(destination);
-    return {ok:true, kind, spaceId: spaceId || null, files: files.length, totalBytes,
+    return {ok:true, kind, spaceId: spaceId || null, mode: backupMode, evidenceOnly: backupMode === 'evidence',
+      containsCredentials: !spaceId,
+      // totalBytes = 包内总字节（含 backup-manifest.json，进度分母与 header 都用它）；
+      // sourceBytes = 实际被打包的原文件字节，回答「这份备份装了多少数据」。
+      files: entries.length, totalBytes: payloadBytes, sourceBytes: totalBytes, excluded,
       storedBytes: stat.size, checksum: digest.digest('hex'), createdAt};
   } catch (error) {
     await fsp.rm(partial, {force: true}).catch(() => {});
@@ -367,7 +452,10 @@ export async function inspectBackupFile(file, password, onProgress) {
   if (!trailer || !Array.isArray(trailer.files)) fail('Backup trailer is missing');
   if (trailer.files.length !== meta.header.fileCount) fail('File count mismatch');
   if (meta.header.kind === 'service' && !trailer.files.some(f => f.name === 'access.json')) fail('Missing service credentials');
-  return {...meta.header, files: trailer.files, totalBytes: trailer.files.reduce((sum, f) => sum + f.size, 0), checksum};
+  // 本轮之前产生的 v2 备份没有 mode 字段 ⇒ 一律当完整镜像看（它们确实带了全部文件）。
+  return {...meta.header, mode: meta.header.mode || 'full',
+    evidenceOnly: (meta.header.mode || 'full') === 'evidence',
+    files: trailer.files, totalBytes: trailer.files.reduce((sum, f) => sum + f.size, 0), checksum};
 }
 
 // verifiedChecksum：调用方（服务层）已经完整校验过同一文件、同一密码得到的校验和。
@@ -407,6 +495,7 @@ export async function restoreBackupFile(file, destination, {password, expectedCh
     // 快路径的校验和在这里落地：内容真的被换过就整批丢弃，与「先验后写」的结论一致。
     if (trusted && actual !== verifiedChecksum) throw new MemoryError('BACKUP_CHANGED','Backup changed since it was verified',409);
     summary = {kind: meta.header.kind, files: trailer.files.length, checksum: actual,
+      mode: meta.header.mode || 'full',
       totalBytes: trailer.files.reduce((sum, f) => sum + (Number(f.size) || 0), 0)};
     // 恢复后自动任务一律暂停，等人工确认再开 —— 恢复出来的库不该自己跑起来。
     for (const item of written.filter(w => w.name === 'settings.json' || /^spaces\/[^/]+\/settings\.json$/.test(w.name))) {
@@ -427,7 +516,8 @@ export async function restoreBackupFile(file, destination, {password, expectedCh
     if (error instanceof MemoryError) throw error;
     throw new MemoryError('RESTORE_FAILED', `Restore failed; staging was discarded: ${error.message}`, 500);
   }
-  return {ok:true,destination,kind:summary.kind,files:summary.files,totalBytes:summary.totalBytes,checksum:summary.checksum,automaticTasksSuspended:true};
+  return {ok:true,destination,kind:summary.kind,mode:summary.mode,evidenceOnly:summary.mode==='evidence',
+    files:summary.files,totalBytes:summary.totalBytes,checksum:summary.checksum,automaticTasksSuspended:true};
 }
 
 // ---------------------------------------------------------------- 统一入口
