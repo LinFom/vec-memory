@@ -138,6 +138,18 @@ pre{margin:8px 0 0;padding:10px;background:var(--card-2);border:1px solid var(--
 .kv dt{color:var(--muted)}
 .kv dd{margin:0;overflow-wrap:anywhere}
 
+/* 备份/恢复进度：备份 40s、整库恢复 54s，没有它用户分不清「在跑」和「卡死」 */
+.job{margin-top:12px;border:1px solid var(--line);border-radius:var(--radius-sm);padding:11px 12px;background:var(--card-2)}
+.job .row{display:flex;align-items:baseline;justify-content:space-between;gap:10px;font-size:12.5px}
+.job .pct{font-weight:650;font-variant-numeric:tabular-nums}
+.job .track{height:8px;border-radius:999px;background:var(--chip);overflow:hidden;margin:8px 0 6px;border:1px solid var(--line)}
+.job .fill{height:100%;width:0;border-radius:999px;background:var(--accent);transition:width .28s linear}
+.job .fill.unk{width:32%;animation:slide 1.35s ease-in-out infinite}
+.job.bad .fill{background:var(--red);animation:none;width:100%}
+.job.bad .pct{color:var(--red)}
+.job .meta{display:flex;justify-content:space-between;gap:10px;font-size:11.5px;color:var(--muted);font-variant-numeric:tabular-nums}
+@keyframes slide{0%{margin-left:-32%}100%{margin-left:100%}}
+
 /* starmap */
 #star{width:100%;height:auto;display:block;border-radius:var(--radius-sm);background:radial-gradient(circle at 50% 45%,var(--accent-soft),transparent 62%)}
 .legend{display:flex;gap:14px;flex-wrap:wrap;font-size:11.5px;color:var(--muted);margin-top:8px}
@@ -217,7 +229,7 @@ const S={
   page:"overview", scope:{kind:"group",id:""},
   person:null, personCtx:"", personSel:null, entry:null, entryPreview:null,
   scene:"", subject:null, subjectSel:null, recall:null, jobs:null,
-  settings:null, backupPreview:null, busy:0
+  settings:null, backupPreview:null, busy:0, job:null, jobTimer:null, bpass:""
 };
 const LS_THEME="memory-console-theme", LS_TOKEN="memory-console-token";
 const NAV=[
@@ -237,7 +249,12 @@ function toast(msg,kind){
 }
 function busy(on){
   S.busy+=on?1:-1; if(S.busy<0)S.busy=0;
-  const box=$("#busybox"); box.innerHTML=S.busy?'<div class="busy">处理中…</div>':"";
+  syncBusyChip();
+}
+// 有真进度条时不再显示「处理中…」胶囊：两个提示叠在一起只会让人以为卡了两处。
+function syncBusyChip(){
+  const box=$("#busybox"); if(!box)return;
+  box.innerHTML=(S.busy&&!S.job?.active)?'<div class="busy">处理中…</div>':"";
 }
 async function api(route,method="GET",body){
   busy(true);
@@ -245,7 +262,8 @@ async function api(route,method="GET",body){
     const r=await fetch("/api/v1/"+route,{
       method,
       headers:{...(S.token?{authorization:"Bearer "+S.token}:{}),...(body?{"content-type":"application/json"}:{})},
-      signal:AbortSignal.timeout(route.includes('backups')?180000:30000),
+      // 备份/恢复按体积能跑几分钟，30 分钟只防彻底没响应；真实进度靠进度接口，不靠这个超时。
+      signal:AbortSignal.timeout(route.includes('backups')?1800000:30000),
       ...(body?{body:JSON.stringify(body)}:{})
     });
     let data=null; try{data=await r.json();}catch{}
@@ -259,6 +277,104 @@ async function api(route,method="GET",body){
 const sid=()=>encodeURIComponent(S.space);
 const wsAction=(action,body={})=>api("spaces/"+sid()+"/workspace","POST",{action,...body});
 const opId=()=>crypto.randomUUID();
+
+/* ---------------- 备份/恢复进度 ---------------- */
+// 服务端在 worker 里按「已处理字节」上报真进度，前端每 500ms 读一次。不用假动画：
+// 假动画在失败时会走到 99% 卡住，反而更像死机。
+const JOB_POLL_MS=500;
+const PHASE_NAME={scan:"扫描文件",prepare:"准备中",read:"读取并压缩",verify:"校验校验和",write:"写入磁盘",validate:"校验恢复结果",finalize:"收尾",done:"完成",failed:"失败"};
+const fmtMB=n=>{const v=(Number(n)||0)/1048576;return (v>=100?v.toFixed(0):v.toFixed(1))+" MB";};
+const fmtDur=ms=>{if(!Number.isFinite(ms)||ms<0)return "—";const s=Math.round(ms/1000);return s<60?s+" 秒":Math.floor(s/60)+" 分 "+(s%60)+" 秒";};
+// 密码框会被 render 重建，值统一从 S.bpass 取（输入时同步），避免「备份完密码就空了」。
+const bpassVal=()=>{const el=$("#bpass");return el?el.value:(S.bpass||"");};
+function jobHtml(){
+  const j=S.job; if(!j)return "";
+  const pct=j.percent==null?null:j.percent, bad=j.phase==="failed", settled=bad||j.phase==="done";
+  // 进行中显示「现在这一阶段」，结束时显示「这件事叫什么」——这两个不是一回事，
+  // 混用会出现「正在准备恢复」挂到 94% 才变的情况。
+  const title=settled?(j.label||PHASE_NAME[j.phase]||"处理中"):(PHASE_NAME[j.phase]||j.label||"处理中");
+  const left=[j.label&&j.label!==title?j.label:null,j.total?`${fmtMB(j.done)} / ${fmtMB(j.total)}`:null];
+  return `<div class="job${bad?" bad":""}">
+    <div class="row"><span>${esc(title)}</span><span class="pct">${bad?"已失败":(pct==null?"进行中":pct.toFixed(1)+"%")}</span></div>
+    <div class="track"><div class="fill${pct==null?" unk":""}" style="${pct==null?"":`width:${pct}%`}"></div></div>
+    <div class="meta"><span>${left.filter(Boolean).map(esc).join(" · ")}</span><span>${j.active?"已用 "+fmtDur(j.elapsedMs)+(j.etaMs?" · 约剩 "+fmtDur(j.etaMs):""):"耗时 "+fmtDur(j.elapsedMs)}</span></div>
+    ${bad&&j.error?`<div class="meta" style="margin-top:6px;color:var(--red)">${esc((j.error.code||"")+"："+(j.error.message||""))}</div>`:""}
+  </div>`;
+}
+function paintJob(){const slot=$("#jobslot");if(slot)slot.innerHTML=jobHtml();syncBusyChip();}
+async function probeJob(){
+  const r=await fetch("/api/v1/admin/backups/progress",{headers:{...(S.token?{authorization:"Bearer "+S.token}:{})},signal:AbortSignal.timeout(8000)});
+  if(!r.ok)return null;
+  const d=await r.json().catch(()=>null);
+  return d&&d.ok?d:null;
+}
+function startJobPolling(){
+  if(S.jobTimer)return;
+  S.jobTimer=setInterval(async()=>{
+    let d=null;
+    try{d=await probeJob();}catch{return;}   // 轮询本身失败不提示：备份窗口里网络抖动是常态
+    if(!d)return;
+    S.job=d; paintJob();
+    if(!d.active){
+      stopJobPolling();
+      // 刷新过页面也能拿到这次生成/上传的备份 ID（进度快照里带回来了）。
+      if(d.backupId&&d.backupId!==S.backupId)S.backupId=d.backupId;
+      // 任务结束后把页面数据补回来：维护窗口内所有 reads 都是 503，缓存的还是旧内容。
+      setTimeout(async()=>{
+        try{
+          // 维护窗口里 boot 拿不到空间表（见 boot 的 MAINTENANCE 分支），这里就地补上。
+          if(!Object.keys(S.spaces?.spaces||{}).length){S.spaces=await api("admin/spaces");applySpaces();}
+          await refreshBase();
+        }catch{}
+        render();
+      },250);
+    }
+  },JOB_POLL_MS);
+}
+function stopJobPolling(){if(S.jobTimer){clearInterval(S.jobTimer);S.jobTimer=null;}}
+function beginJob(label){
+  S.job={active:true,label,phase:"scan",done:0,total:0,percent:null,elapsedMs:0,etaMs:null,error:null};
+  paintJob();startJobPolling();
+}
+async function endJob(){
+  // 再读一次，把最后那一帧（100% 或错误码）画出来再停表。
+  try{const d=await probeJob();if(d){S.job=d;paintJob();}}catch{}
+  finally{stopJobPolling();}
+}
+async function resumeJobIfAny(){
+  try{
+    const d=await probeJob();
+    if(d&&d.active){S.job=d;if(S.page!=="backup"){S.page="backup";location.hash="#/backup";}render();startJobPolling();return true;}
+  }catch{}
+  return false;
+}
+// 上传走 XHR 而不是 fetch：只有 XHR 能拿到上传的字节进度（fetch 的 ReadableStream 上传还没有跨浏览器支持）。
+// 上传完成后服务端还要在校验线程里解压算校验和，那段由进度轮询接手显示。
+function uploadBackup(file,passwordB64){
+  return new Promise((resolve,reject)=>{
+    const xhr=new XMLHttpRequest(), startedAt=Date.now();
+    xhr.open("POST","/api/v1/admin/backups");
+    xhr.setRequestHeader("authorization","Bearer "+S.token);
+    xhr.setRequestHeader("content-type","application/octet-stream");
+    xhr.setRequestHeader("x-backup-password",passwordB64);
+    xhr.upload.onprogress=e=>{
+      if(!e.lengthComputable)return;
+      S.job={...(S.job||{}),active:true,label:"正在上传备份",phase:"read",done:e.loaded,total:e.total,
+        percent:Math.round(e.loaded/e.total*1000)/10,elapsedMs:Date.now()-startedAt,etaMs:null,error:null};
+      paintJob();
+      if(e.loaded>=e.total){S.job={...S.job,label:"正在校验上传的备份",phase:"verify"};paintJob();startJobPolling();}
+    };
+    xhr.onload=()=>{
+      let d=null; try{d=JSON.parse(xhr.responseText);}catch{}
+      if(xhr.status>=200&&xhr.status<300)return resolve(d||{});
+      const e=new Error((d&&(d.code?d.code+": ":"")+(d.error||""))||("HTTP "+xhr.status));
+      e.status=xhr.status;e.code=d&&d.code;reject(e);
+    };
+    xhr.onerror=()=>reject(new Error("上传中断（服务可能正在备份，稍后重试）"));
+    xhr.ontimeout=()=>reject(new Error("上传超时"));
+    xhr.send(file);
+  });
+}
 
 function applyTheme(){
   const v=$("#theme")?$("#theme").value:"auto";
@@ -299,15 +415,22 @@ async function enter(){
     if(st)st.innerHTML='<span class="dot"></span>本机 · 免凭据';
     const out=$("#logout"); if(out)out.hidden=true;
   }
+  applySpaces();
+  await refreshBase();
+  render();
+  // 刷新页面/重进工作台时，后台可能还在跑备份：直接接回进度，而不是让用户以为卡住了。
+  void resumeJobIfAny();
+}
+// 空间下拉单独抽出来：维护窗口里 boot 拿不到空间表，进度结束后要能就地补上。
+function applySpaces(){
   const spaces=Object.keys(S.spaces?.spaces||{});
-  const sel=$("#space");
+  const sel=$("#space"); if(!sel)return;
   sel.innerHTML=spaces.length
     ? spaces.map(k=>`<option value="${esc(k)}">${esc(k)}${S.spaces.spaces[k]?.owner&&S.spaces.spaces[k].owner!==k?" · "+esc(S.spaces.spaces[k].owner):""}</option>`).join("")
     : '<option value="">（没有已登记的空间）</option>';
-  S.space=spaces[0]||"";
+  if(!spaces.includes(S.space))S.space=spaces[0]||"";
+  sel.value=S.space;
   sel.onchange=async()=>{S.space=sel.value;S.ws=null;S.status=null;S.scene="";S.person=null;await refreshBase();render();};
-  await refreshBase();
-  render();
 }
 function buildNav(){
   $("#nav").innerHTML='<div class="grp">日常</div>'+
@@ -323,6 +446,8 @@ async function refreshBase(){
   const attempt=async(fn)=>{
     try{return {ok:true,value:await fn()};}
     catch(e){
+      // 维护态是「服务此刻只读」，不是它慢：重试只会把 503 刷成一串红字。
+      if(e.code==="MAINTENANCE")return {ok:false,error:e};
       if(e.status&&e.status<500&&e.status!==429)return {ok:false,error:e};
       await new Promise(r=>setTimeout(r,1200));
       try{return {ok:true,value:await fn()};}catch(e2){return {ok:false,error:e2};}
@@ -337,6 +462,13 @@ async function refreshBase(){
   if(stR.ok)S.status=stR.value;
   if(verR.ok)S.ver=verR.value;
   const failed=[wsR,stR].filter(r=>!r.ok);
+  // 备份/恢复窗口内服务按设计只读（503 MAINTENANCE）。这不是故障，不该弹红；直接把
+  // 进度条接回来看住它，恢复完成后再自动刷新一次。
+  if(failed.some(r=>r.error?.status===503&&/MAINTENANCE/.test(String(r.error?.message||"")))){
+    S.degraded="";
+    void resumeJobIfAny();
+    return;
+  }
   S.degraded=failed.length?String(failed[0].error?.message||"读取失败"):"";
   if(S.degraded)toast("读取失败："+S.degraded+"（可点概览里的重试）","err");
   if(S.ver)$("#hp-ver").textContent="v"+(S.ver.implementationVersion||"?");
@@ -367,6 +499,9 @@ function render(){
   const view={overview:viewOverview,people:viewPeople,scene:viewScene,star:viewStar,recall:viewRecall,subject:viewSubject,backup:viewBackup,settings:viewSettings}[S.page];
   $("#main").innerHTML=`<div class="page">${view()}</div>`;
   $("#main").scrollTop=0;
+  // 每次 render 都会重建表单，密码框必须回填 —— 否则「备份完成后接着点预览」必然报
+  // INVALID_BACKUP（密码被清空），而且提示写的是「文件损坏」，完全误导。
+  if(S.page==="backup"){const pw=$("#bpass");if(pw)pw.value=S.bpass||"";}
   if(S.page==="overview")loadOverviewExtra();
   if(S.page==="scene"&&S.ws)bindSceneSelect();
   if(S.page==="star")renderStar();
@@ -692,7 +827,13 @@ function viewSubject(){
 /* ---------------- backup ---------------- */
 function viewBackup(){
   const p=S.backupPreview;
+  // 刷新页面会清掉内存里的密码（故意的：口令不进 localStorage）。有备份 ID 却没有密码时，
+  // 用户下一步必然失败，所以提前说明，而不是等他点了预览再看到红字。
+  const pwHint=S.backupId&&!S.bpass
+    ?`<div class="card" style="margin-bottom:12px;border-left:3px solid var(--orange)"><p class="sub">刷新页面后备份密码已清空；预览/恢复前请重新输入（加密备份必须用导出时那个口令）。</p></div>`
+    :"";
   return head("备份与导入","完整备份含模型设置与授权，空间导出不含模型密钥。恢复前必须预览校验和。")+
+  `<div id="jobslot">${jobHtml()}</div>`+pwHint+
   `<div class="split">
     <div class="card">
       <h2>导出</h2>
@@ -904,9 +1045,15 @@ $("#main").addEventListener("click",async e=>{
       S.subject=d;S.subjectSel=null;render(); toast(mode==="correct"?"已纠正":"已撤回","ok");
     }
     else if(act==="backup-full"||act==="backup-space"){
-      const password=$("#bpass").value||undefined;
-      const r=await api("admin/backups","POST",{...(act==="backup-space"?{spaceId:S.space}:{}),password});
-      S.backupId=r.backupId; render(); toast("备份已生成："+r.backupId,"ok");
+      const password=bpassVal()||undefined;
+      // 先挡住明显的填错：服务端只说「密码至少 8 位」，用户要等一轮请求才知道。
+      // 空间导出允许不加密（密码留空），完整备份必须给密码。
+      if(act==="backup-full"&&(!password||password.length<8))throw new Error("完整备份密码至少 8 位");
+      beginJob(act==="backup-space"?"正在导出空间备份":"正在生成完整备份");
+      try{
+        const r=await api("admin/backups","POST",{...(act==="backup-space"?{spaceId:S.space}:{}),password});
+        S.backupId=r.backupId; toast("备份已生成："+r.backupId,"ok");
+      }finally{ await endJob(); render(); }
     }
     else if(act==="backup-download"){
       const idv=$("#bid").value.trim(); if(!idv)throw new Error("填备份 ID");
@@ -918,22 +1065,36 @@ $("#main").addEventListener("click",async e=>{
     }
     else if(act==="backup-preview"){
       const idv=$("#bid").value.trim(); if(!idv)throw new Error("填备份 ID");
-      S.backupPreview=await api("admin/backups/"+encodeURIComponent(idv)+"/preview","POST",{password:$("#bpass").value});
-      S.backupPreview.id=idv; render(); toast("预览通过","ok");
+      const pwx=bpassVal();
+      beginJob("正在校验备份");
+      try{
+        S.backupPreview=await api("admin/backups/"+encodeURIComponent(idv)+"/preview","POST",{password:pwx});
+        S.backupPreview.id=idv; toast("预览通过","ok");
+      }catch(err){
+        // 最常见的失败是「密码框被清空后直接点预览」。别让用户以为是文件坏了。
+        if(err.code==="INVALID_BACKUP"&&!pwx)throw new Error("校验失败：密码为空。加密备份必须填导出时用的密码");
+        throw err;
+      }finally{ await endJob(); render(); }
     }
     else if(act==="backup-upload"){
       const f=$("#bfile").files[0]; if(!f)throw new Error("选文件");
-      const pw=btoa(String.fromCharCode(...new TextEncoder().encode($("#bpass").value)));
-      const r=await fetch("/api/v1/admin/backups",{method:"POST",headers:{authorization:"Bearer "+S.token,"content-type":"application/octet-stream","x-backup-password":pw},body:f});
-      const d=await r.json(); if(!r.ok)throw new Error(d.error||"上传失败");
-      S.backupId=d.backupId; render(); toast("已上传："+d.backupId,"ok");
+      const pw=btoa(String.fromCharCode(...new TextEncoder().encode(bpassVal())));
+      beginJob("正在上传备份");
+      try{
+        const r=await uploadBackup(f,pw);
+        S.backupId=r.backupId; toast("已上传："+r.backupId,"ok");
+      }finally{ await endJob(); render(); }
     }
     else if(act==="backup-restore"){
       const p=S.backupPreview; if(!p)throw new Error("先预览");
-      await api("admin/backups/"+encodeURIComponent(p.id)+"/restore","POST",{
-        password:$("#bpass").value,expectedChecksum:p.checksum,
-        spaceId:$("#bnew").value.trim()||undefined,owner:$("#bowner").value.trim()||undefined,replace:$("#breplace").checked});
-      toast("恢复完成，按提示用新目录启动","ok");
+      beginJob("正在准备恢复");
+      try{
+        const r=await api("admin/backups/"+encodeURIComponent(p.id)+"/restore","POST",{
+          password:bpassVal(),expectedChecksum:p.checksum,
+          spaceId:$("#bnew").value.trim()||undefined,owner:$("#bowner").value.trim()||undefined,replace:$("#breplace").checked});
+        toast("恢复完成"+(r.destination?"："+r.destination:""),"ok");
+        S.backupPreview=null;
+      }finally{ await endJob(); await refreshBase(); render(); }
     }
     else if(act==="settings-load"){
       S.settings=await api("admin/spaces/"+sid()+"/settings"); render(); toast("已读取设置","ok");
@@ -969,6 +1130,8 @@ $("#main").addEventListener("click",async e=>{
       S.spaces=await api("admin/spaces"); render(); toast("授权已保存","ok");
     }
   }catch(err){
+    // 维护态不是用户的错，也不该显示成一段英文错误 —— 直接把进度条接回来。
+    if(err.code==="MAINTENANCE"){ await resumeJobIfAny(); toast("备份/恢复正在进行，进度见上方","err"); return; }
     toast(err.message+(err.status?" · HTTP "+err.status:""),"err");
   }
 });
@@ -982,7 +1145,8 @@ $("#main").addEventListener("change",e=>{
 });
 $("#main").addEventListener("input",e=>{
   const el=e.target.closest("[data-input]");
-
+  // 密码存在内存里跟着页面走（不写进 HTML）：备份/预览/恢复三步用的是同一个密码。
+  if(e.target.id==="bpass")S.bpass=e.target.value;
 });
 $("#main").addEventListener("keydown",e=>{
   if(e.key!=="Enter")return;
@@ -1012,6 +1176,14 @@ function showGate(msg){
     await enter();
     return;
   }catch(err){
+    // 备份/恢复期间服务只读，读取空间表会 503。这时把用户丢到凭据页是错的 —— 他既没登出、
+    // 也没被拒绝，只是有任务在跑。直接进主界面（空间表稍后补），并接回进度条。
+    if(err.code==="MAINTENANCE"){
+      S.spaces={spaces:{},projects:[]};
+      S.anonymous=true;
+      await enter();
+      return;
+    }
     if(err.status&&err.status!==401){showGate("服务未就绪："+err.message);return;}
     if(!err.status){showGate("连不上服务（"+location.origin+"）");$("#gate-dot").classList.add("off");return;}
   }

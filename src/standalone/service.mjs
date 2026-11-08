@@ -6,6 +6,7 @@ import { MemoryError, digest } from '../core/durable-log.mjs';
 import { createSpaceEngine } from './engine.mjs';
 import { inspectAnyFile, restoreAnyFile } from './backup.mjs';
 import { runBackupTask } from './backup-runner.mjs';
+import { beginProgress, reportProgress, finishProgress, progressSnapshot } from './backup-progress.mjs';
 const IMPLEMENTATION_VERSION=JSON.parse(fs.readFileSync(new URL('../../package.json',import.meta.url),'utf8')).version;
 
 const id = value => {
@@ -136,6 +137,17 @@ export function createService({ root, engineFactory = createSpaceEngine, localAd
   }
   return {
     async handle({ method = 'GET', path: requestPath, token, body = {}, local = false }) {
+      const preUrl = new URL(requestPath, 'http://localhost');
+      const preParts = preUrl.pathname.split('/').filter(Boolean).map(decodeURIComponent);
+      // 进度查询故意放在维护闸之前、且不计入 active：
+      //   ① 备份/恢复全程 maintenance=true，放到闸后前端永远读不到进度，只能看到 503；
+      //   ② 计入 active 会让 exclusive() 的「排空在跑请求」一直等到轮询不再进来，进而互相等死。
+      if (method === 'GET' && preParts[0]==='api' && preParts[1]==='v1' && preParts[2]==='admin' && preParts[3]==='backups' && preParts[4]==='progress' && preParts.length===5) {
+        const access = read(accessFile);
+        const who = principal(token, access, local);
+        if (!who.admin) return {status:403,body:{ok:false,code:'FORBIDDEN',error:'Administrator credential required'}};
+        return {status:200,body:{ok:true,...progressSnapshot()}};
+      }
       if (maintenance) return {status:503,body:{ok:false,code:'MAINTENANCE',error:'Backup or import in progress; retry shortly'}};
       active++;
       try {
@@ -159,28 +171,56 @@ export function createService({ root, engineFactory = createSpaceEngine, localAd
             if (!parts[4] && method === 'POST') {
               const backupId = randomUUID();
               if (body.uploadPath) {
-                // 上传走临时文件：先校验，通过才落到正式文件名。
-                await inspectAnyFile(body.uploadPath, body.password);
-                fs.renameSync(body.uploadPath, file(backupId));
-              } else await exclusive(async () => {
-                if (body.spaceId) permit(access,who,id(body.spaceId));
-                await runBackupTask('create', {root, destination:file(backupId), spaceId:body.spaceId, password:body.password});
-              });
+                // 上传走临时文件：先校验，通过才落到正式文件名。校验放 worker —— 几百 MB 的
+                // gzip 解开算哈希留在主线程会让整个页面变慢。
+                beginProgress('upload', '正在校验上传的备份', 0);
+                try {
+                  await runBackupTask('inspect', {file: body.uploadPath, password: body.password}, {onProgress: patch => reportProgress(patch)});
+                  fs.renameSync(body.uploadPath, file(backupId));
+                  finishProgress(null, {backupId});
+                } catch (error) { finishProgress(error); throw error; }
+              } else {
+                // 进度在 exclusive 之前开始：关引擎/排空在跑请求那几秒也要显示「在动」。
+                beginProgress('create', body.spaceId ? '正在导出空间备份' : '正在生成完整备份', 0);
+                let failure = null;
+                try {
+                  await exclusive(async () => {
+                    if (body.spaceId) permit(access,who,id(body.spaceId));
+                    await runBackupTask('create', {root, destination:file(backupId), spaceId:body.spaceId, password:body.password}, {onProgress: patch => reportProgress(patch)});
+                  });
+                } catch (error) { failure = error; throw error; }
+                finally { finishProgress(failure, failure ? null : {backupId}); }
+              }
               return finish({backupId,download:'/api/v1/admin/backups/'+backupId});
             }
             if (parts[4] && parts[5] === 'preview' && method === 'POST') {
-              const archive = await runBackupTask('inspect', {file:file(parts[4]),password:body.password});
-              return finish({kind:archive.kind,files:archive.files.length,totalBytes:archive.totalBytes,checksum:archive.checksum,sourceSpaceId:archive.spaceId,automaticTasksSuspendedOnRestore:true});
+              beginProgress('inspect', '正在校验备份', 0);
+              try {
+                const archive = await runBackupTask('inspect', {file:file(parts[4]),password:body.password}, {onProgress: patch => reportProgress(patch)});
+                finishProgress(null);
+                return finish({kind:archive.kind,files:archive.files.length,totalBytes:archive.totalBytes,checksum:archive.checksum,sourceSpaceId:archive.spaceId,automaticTasksSuspendedOnRestore:true});
+              } catch (error) { finishProgress(error); throw error; }
             }
-            if (parts[4] && parts[5] === 'restore' && method === 'POST') return finish(await exclusive(async () => {
-              const source = file(parts[4]), archive = await inspectAnyFile(source,body.password);
+            if (parts[4] && parts[5] === 'restore' && method === 'POST') {
+              // 进度在 exclusive 之前就开始：关引擎/排空在跑请求那几秒同样要显示「在动」。
+              beginProgress('restore', '正在准备恢复（暂停后台任务）', 0);
+              let failure = null;
+              try {
+                return finish(await exclusive(async () => {
+              const onProgress = patch => reportProgress(patch);
+              reportProgress({label:'正在校验备份'});
+              const source = file(parts[4]), archive = await inspectAnyFile(source,body.password,onProgress);
               if (!body.expectedChecksum || body.expectedChecksum !== archive.checksum) throw new MemoryError('BACKUP_CHANGED','Preview and supply its checksum first',409);
-              if (archive.kind === 'service') {const result=await restoreAnyFile(source,root+'.restore-'+randomUUID(),body);await validateRestored(result.destination,'service');return {...result,validated:true};}
+              // 上面这一遍已经验过整份文件（密码 + 校验和），restore 里不必再解压一遍。
+              const verifiedChecksum = archive.checksum;
+              reportProgress({label:'正在恢复文件'});
+              if (archive.kind === 'service') {const result=await restoreAnyFile(source,root+'.restore-'+randomUUID(),{...body,onProgress,verifiedChecksum});reportProgress({phase:'validate',label:'正在校验恢复结果'});await validateRestored(result.destination,'service');return {...result,validated:true};}
               const sid = id(body.spaceId), owner = id(body.owner);
               if (!access.projects[owner]) throw new MemoryError('INVALID_OWNER','Known owner required');
               if (access.spaces[sid] && body.replace !== true) throw new MemoryError('ALREADY_EXISTS','Choose a new space or explicitly replace',409);
               const destination = path.join(root,'spaces',sid), staging = destination+'.import-'+randomUUID();
-              const result = await restoreAnyFile(source,staging,body);
+              const result = await restoreAnyFile(source,staging,{...body,onProgress,verifiedChecksum});
+              reportProgress({phase:'validate',label:'正在校验恢复结果'});
               await validateRestored(staging,'space');
               const rollback = fs.existsSync(destination) ? destination+'.rollback-'+randomUUID() : null;
               // Durable intent makes an interrupted pair of renames recoverable on startup.
@@ -188,9 +228,15 @@ export function createService({ root, engineFactory = createSpaceEngine, localAd
               saveJson(intentFile,{destination,staging,rollback,sid,owner});
               if (rollback) fs.renameSync(destination,rollback);
               fs.renameSync(staging,destination);
-              access.spaces[sid]={owner,readers:[]}; saveJson(accessFile,access); fs.unlinkSync(intentFile);
+              access.spaces[sid]={owner,readers:[]}; saveJson(accessFile,access);
+              // intent 文件删不掉不该让「已经成功的恢复」被报成失败：启动时的重放逻辑是幂等的
+              // （destination 已存在就什么都不做），残留只是一个下次启动会顺手清掉的小文件。
+              try { fs.unlinkSync(intentFile); } catch { /* 幂等重放兜底 */ }
               return {...result,destination,spaceId:sid,rollback};
-            }));
+                }));
+              } catch (error) { failure = error; throw error; }
+              finally { finishProgress(failure); }
+            }
           }
           if (parts[3] === 'projects' && parts.length === 4 && method === 'POST') {
             const projectId = id(body.projectId);

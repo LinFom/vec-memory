@@ -1,11 +1,12 @@
 // 主线程侧的 worker 包装 [by:WorkBuddy 2026-11-08]
 // 只负责起线程、等结果、超时与异常归一；所有备份逻辑都在 backup-worker.mjs 里。
+// onProgress：worker 每 150ms 最多回传一条进度，这里原样转给调用方（写进 backup-progress 登记表）。
 import {Worker} from 'node:worker_threads';
 import {MemoryError} from '../core/durable-log.mjs';
 
 const DEFAULT_TIMEOUT_MS = 2 * 60 * 60 * 1000;
 
-export function runBackupTask(action, args, {timeoutMs = DEFAULT_TIMEOUT_MS, memoryMb = 768} = {}) {
+export function runBackupTask(action, args, {timeoutMs = DEFAULT_TIMEOUT_MS, memoryMb = 768, onProgress} = {}) {
   return new Promise((resolve, reject) => {
     let worker;
     try {
@@ -29,10 +30,17 @@ export function runBackupTask(action, args, {timeoutMs = DEFAULT_TIMEOUT_MS, mem
       fn();
     };
     const timer = setTimeout(() => finish(() => reject(new MemoryError('BACKUP_TIMEOUT', 'Backup task timed out', 504))), timeoutMs);
-    worker.once('message', message => finish(() => {
-      if (message.ok) resolve(message.result);
-      else reject(new MemoryError(message.code || 'BACKUP_FAILED', message.message || 'Backup task failed', message.status || 500));
-    }));
+    worker.on('message', message => {
+      if (message && message.type === 'progress') {
+        // 进度回调自己的异常不能变成任务失败。
+        if (typeof onProgress === 'function' && !settled) { try { onProgress(message.progress); } catch { /* ignore */ } }
+        return;
+      }
+      finish(() => {
+        if (message.ok) resolve(message.result);
+        else reject(new MemoryError(message.code || 'BACKUP_FAILED', message.message || 'Backup task failed', message.status || 500));
+      });
+    });
     worker.once('error', error => finish(() => reject(new MemoryError('BACKUP_FAILED', error.message, 500))));
     worker.once('exit', code => { if (code !== 0) finish(() => reject(new MemoryError('BACKUP_FAILED', `Backup worker exited with code ${code}`, 500))); });
   });

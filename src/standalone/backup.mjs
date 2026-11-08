@@ -16,6 +16,7 @@ import {gzipSync, gunzipSync, createGzip, createGunzip} from 'node:zlib';
 import {Readable, Transform, PassThrough, pipeline} from 'node:stream';
 import {promisify} from 'node:util';
 import {MemoryError} from '../core/durable-log.mjs';
+import {makeTicker} from './backup-progress.mjs';
 
 const pipe = promisify(pipeline);
 
@@ -108,8 +109,9 @@ export function createBackup(root, {spaceId, password} = {}) {
 //   chunk := [len u32][bytes]            len === 0 表示该 entry 结束
 //   tail  := [0xFFFFFFFF][trailerLen u32][trailer JSON]
 // 每个文件的 sha256 只能事后补，所以放在 tail 里。
-async function* payloadOf(files, spaceId) {
+async function* payloadOf(files, spaceId, tick = () => {}, totalBytes = 0) {
   const records = [];
+  let done = 0;
   for (const item of files) {
     const name = Buffer.from(item.name, 'utf8');
     yield u32(name.length); yield name;
@@ -130,8 +132,12 @@ async function* payloadOf(files, spaceId) {
         if (!chunk.length) continue;
         hash.update(chunk); size += chunk.length;
         yield u32(chunk.length); yield chunk;
+        done += chunk.length;
+        tick({phase: 'read', done, total: totalBytes});
       }
     }
+    done += special ? size : 0;
+    tick({phase: 'read', done, total: totalBytes});
     yield u32(0);
     records.push({name: item.name, size, sha256: hash.digest('hex')});
   }
@@ -152,11 +158,14 @@ function headerOf({kind, spaceId, createdAt, fileCount, totalBytes, encrypted, s
   return {fixed, header};
 }
 
-export async function createBackupTo(root, destination, {spaceId, password, limit = MAX_STREAM} = {}) {
+export async function createBackupTo(root, destination, {spaceId, password, limit = MAX_STREAM, onProgress} = {}) {
   if (!spaceId && (typeof password !== 'string' || password.length < 8)) throw new MemoryError('PASSWORD_REQUIRED','Full backups require a password of at least 8 characters');
   if (spaceId && !SPACE_ID_RE.test(spaceId)) fail('Invalid space ID');
+  const tick = makeTicker(onProgress);
+  tick({phase: 'scan', done: 0, total: 0}, true);
   const source = spaceId ? path.join(root, 'spaces', spaceId) : root;
   const {files, totalBytes} = collect(source, limit);
+  tick({phase: 'read', done: 0, total: totalBytes}, true);
 
   const encrypted = typeof password === 'string' && password.length > 0;
   const salt = encrypted ? randomBytes(16) : Buffer.alloc(16);
@@ -184,12 +193,13 @@ export async function createBackupTo(root, destination, {spaceId, password, limi
       // 先喂头再喂正文，顺序必须与读取侧一致。
       digest.update(head);
       const out = fs.createWriteStream(null, {fd, start: head.length, autoClose: false});
-      await pipe(Readable.from(payloadOf(files, spaceId)), ...stages, tap, out);
+      await pipe(Readable.from(payloadOf(files, spaceId, tick, totalBytes)), ...stages, tap, out);
       if (cipher) {
         const tag = cipher.getAuthTag();
         fs.writeSync(fd, tag, 0, tag.length, fs.fstatSync(fd).size);
       }
       fs.fsyncSync(fd);
+      tick({phase: 'finalize', done: totalBytes, total: totalBytes}, true);
     } finally { fs.closeSync(fd); }
     await fsp.rename(partial, destination);
     const stat = await fsp.stat(destination);
@@ -314,8 +324,12 @@ async function readHeaderFromFile(file) {
     fixed, headerEnd, endExclusive, tags: {tagLength: fixed.readUInt32LE(33)}};
 }
 
-async function streamPayload(meta, password, onEntry) {
+async function streamPayload(meta, password, onEntry, onProgress, phase = 'read') {
   const digest = createHash('sha256');
+  const tick = makeTicker(onProgress);
+  const streamTotal = Math.max(1, meta.endExclusive - meta.headerEnd);
+  let seen = 0;
+  tick({phase, done: 0, total: streamTotal}, true);
   digest.update(meta.fixed);
   const headerHandle = await fsp.open(meta.file, 'r');
   try {
@@ -324,7 +338,7 @@ async function streamPayload(meta, password, onEntry) {
     digest.update(headerBytes);
   } finally { await headerHandle.close(); }
 
-  const tap = new Transform({ transform(chunk, _enc, callback) { digest.update(chunk); callback(null, chunk); } });
+  const tap = new Transform({ transform(chunk, _enc, callback) { digest.update(chunk); seen += chunk.length; tick({phase, done: seen, total: streamTotal}); callback(null, chunk); } });
   const stages = decodeStages(meta.encrypted, meta.salt, meta.iv, password);
   if (meta.encrypted) {
     const tag = Buffer.alloc(TAG_LEN);
@@ -346,28 +360,36 @@ async function streamPayload(meta, password, onEntry) {
   }
 }
 
-export async function inspectBackupFile(file, password) {
+export async function inspectBackupFile(file, password, onProgress) {
   const meta = await readHeaderFromFile(file);
   assertArchiveHeader(meta.header);
-  const {trailer, checksum} = await streamPayload(meta, password, null);
+  const {trailer, checksum} = await streamPayload(meta, password, null, onProgress, 'verify');
   if (!trailer || !Array.isArray(trailer.files)) fail('Backup trailer is missing');
   if (trailer.files.length !== meta.header.fileCount) fail('File count mismatch');
   if (meta.header.kind === 'service' && !trailer.files.some(f => f.name === 'access.json')) fail('Missing service credentials');
   return {...meta.header, files: trailer.files, totalBytes: trailer.files.reduce((sum, f) => sum + f.size, 0), checksum};
 }
 
-export async function restoreBackupFile(file, destination, {password, expectedChecksum} = {}) {
-  const archive = await inspectBackupFile(file, password);
-  if (expectedChecksum && expectedChecksum !== archive.checksum) throw new MemoryError('BACKUP_CHANGED','Backup differs from reviewed preview',409);
-  destination = path.resolve(destination);
+// verifiedChecksum：调用方（服务层）已经完整校验过同一文件、同一密码得到的校验和。
+// 传了它就不必再解压一遍 —— 一次流式读写同时算出的校验和与独立验一遍等价，
+// 而「先验 6.7s 再写 22s」对 568MB 的库是白扔掉一半时间。写盘前后节点不变，安全语义不变。
+export async function restoreBackupFile(file, destination, {password, expectedChecksum, verifiedChecksum, onProgress} = {}) {
+  const trusted = typeof verifiedChecksum === 'string' && /^[0-9a-f]{64}$/.test(verifiedChecksum);
+  const meta = await readHeaderFromFile(file);
+  assertArchiveHeader(meta.header);
+  let archive = null;
+  if (!trusted) {
+    archive = await inspectBackupFile(file, password, onProgress);
+    if (expectedChecksum && expectedChecksum !== archive.checksum) throw new MemoryError('BACKUP_CHANGED','Backup differs from reviewed preview',409);
+  }  destination = path.resolve(destination);
   if (fs.existsSync(destination)) throw new MemoryError('DESTINATION_EXISTS','Restore requires a new destination',409);
   const staging = destination + '.staging-' + randomUUID();
   fs.mkdirSync(staging, {recursive: true});
   const written = [];
+  const handles = new Map();
+  let summary = null;
   try {
-    const meta = await readHeaderFromFile(file);
-    const handles = new Map();
-    await streamPayload(meta, password, async name => {
+    const {trailer, checksum: actual} = await streamPayload(meta, password, async name => {
       const target = path.join(staging, ...name.split('/'));
       fs.mkdirSync(path.dirname(target), {recursive: true});
       const handle = await fsp.open(target, 'wx', 0o600);
@@ -377,8 +399,15 @@ export async function restoreBackupFile(file, destination, {password, expectedCh
         write: chunk => handle.write(chunk),
         end: async () => { await handle.sync().catch(() => {}); await handle.close(); handles.delete(name); }
       };
-    });
+    }, onProgress, 'write');
     for (const handle of handles.values()) await handle.close().catch(() => {});
+    if (!trailer || !Array.isArray(trailer.files)) fail('Backup trailer is missing');
+    if (trailer.files.length !== meta.header.fileCount) fail('File count mismatch');
+    if (meta.header.kind === 'service' && !trailer.files.some(f => f.name === 'access.json')) fail('Missing service credentials');
+    // 快路径的校验和在这里落地：内容真的被换过就整批丢弃，与「先验后写」的结论一致。
+    if (trusted && actual !== verifiedChecksum) throw new MemoryError('BACKUP_CHANGED','Backup changed since it was verified',409);
+    summary = {kind: meta.header.kind, files: trailer.files.length, checksum: actual,
+      totalBytes: trailer.files.reduce((sum, f) => sum + (Number(f.size) || 0), 0)};
     // 恢复后自动任务一律暂停，等人工确认再开 —— 恢复出来的库不该自己跑起来。
     for (const item of written.filter(w => w.name === 'settings.json' || /^spaces\/[^/]+\/settings\.json$/.test(w.name))) {
       const settings = JSON.parse(fs.readFileSync(item.target));
@@ -392,9 +421,13 @@ export async function restoreBackupFile(file, destination, {password, expectedCh
     }
     fs.renameSync(staging, destination);
   } catch (error) {
-    throw new MemoryError('RESTORE_FAILED', `Restore failed; incomplete staging retained at ${staging}: ${error.message}`, 500);
+    for (const handle of handles.values()) await handle.close().catch(() => {});
+    // 半成品一律清掉：一次失败的恢复能留几百 MB 到几 GB 的垃圾，且它永远不会被用到。
+    await fsp.rm(staging, {recursive: true, force: true}).catch(() => {});
+    if (error instanceof MemoryError) throw error;
+    throw new MemoryError('RESTORE_FAILED', `Restore failed; staging was discarded: ${error.message}`, 500);
   }
-  return {ok:true,destination,kind:archive.kind,files:archive.files.length,totalBytes:archive.totalBytes,checksum:archive.checksum,automaticTasksSuspended:true};
+  return {ok:true,destination,kind:summary.kind,files:summary.files,totalBytes:summary.totalBytes,checksum:summary.checksum,automaticTasksSuspended:true};
 }
 
 // ---------------------------------------------------------------- 统一入口
@@ -404,11 +437,11 @@ export function isStreamingArchive(bytes) {
 }
 
 // 按文件入口：旧 .vmb（v1，最大 512MiB，整体读入没问题）与新 .vmb（v2，流式）自动分流。
-export async function inspectAnyFile(file, password) {
+export async function inspectAnyFile(file, password, onProgress) {
   const handle = await fsp.open(file, 'r');
   let head;
   try { head = Buffer.alloc(4); await handle.read(head, 0, 4, 0); } finally { await handle.close(); }
-  if (head.equals(MAGIC)) return inspectBackupFile(file, password);
+  if (head.equals(MAGIC)) return inspectBackupFile(file, password, onProgress);
   return inspectLegacy(fs.readFileSync(file), password);
 }
 

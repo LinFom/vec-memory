@@ -3,11 +3,11 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash, randomUUID, randomBytes } from 'node:crypto';
 import { gzipSync, gunzipSync } from 'node:zlib';
 import { initialize, createService } from '../src/standalone/service.mjs';
 import { createStandaloneServer } from '../src/standalone/server.mjs';
-import { createBackup, inspectBackup, restoreBackup, createBackupTo, inspectBackupFile } from '../src/standalone/backup.mjs';
+import { createBackup, inspectBackup, restoreBackup, createBackupTo, inspectBackupFile, restoreBackupFile } from '../src/standalone/backup.mjs';
 
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 function timeout(promise, ms, label = 'operation') {
@@ -286,4 +286,70 @@ test('streaming v2: budget fails before reading, magic is stable, and v1 stays r
   const legacy = createBackup(root, { spaceId: 's' });
   assert.equal(inspectBackup(legacy).kind, 'space');
   assert.throws(() => restoreBackup(raw, path.join(root, 'nope')), { code: 'ASYNC_REQUIRED' });
+});
+
+test('progress: byte-accurate reporting, readable while the service is in maintenance, and the restore fast path stays checksum-bound', async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'vec-backup-progress-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  initialize(root);
+  const space = path.join(root, 'spaces', 's');
+  fs.mkdirSync(space, { recursive: true });
+  fs.writeFileSync(path.join(space, 'note.txt'), 'hello');
+  // 不可压缩数据，让备份在测试里持续足够久，才能真的在「维护窗口内」探测进度接口。
+  fs.writeFileSync(path.join(space, 'blob.bin'), randomBytes(40 * 1024 * 1024));
+
+  // 1) 进度是真字节：分母是原始体积，done 单调不减，阶段从 scan 走到 read。
+  const seen = [];
+  const file = path.join(root, 'progress.vmb');
+  const created = await createBackupTo(root, file, { spaceId: 's', password: 'password-123', onProgress: patch => seen.push(patch) });
+  assert.ok(seen.length >= 2, 'must report more than the initial frame');
+  assert.equal(seen[0].phase, 'scan');
+  assert.ok(seen.some(p => p.phase === 'read' && p.total === created.totalBytes), 'read phase must carry the real total');
+  for (let i = 1; i < seen.length; i++) assert.ok((seen[i].done ?? 0) >= (seen[i - 1].done ?? 0), 'progress must never go backwards within one phase');
+  assert.equal(created.totalBytes, 40 * 1024 * 1024 + 5);
+
+  // 2) 维护态下进度接口必须仍可读：备份期间其它请求一律 503，进度是唯一的活口。
+  const access = JSON.parse(fs.readFileSync(path.join(root, 'access.json'), 'utf8'));
+  access.projects['p'] = { tokenHash: createHash('sha256').update('project-token').digest('hex') };
+  access.spaces['s'] = { owner: 'p', readers: [] };
+  fs.writeFileSync(path.join(root, 'access.json'), JSON.stringify(access, null, 2));
+  const service = createService({ root, localAdmin: true });
+  t.after(() => service.close());
+  const job = service.handle({ method: 'POST', path: '/api/v1/admin/backups', local: true, body: { spaceId: 's' } });
+  const statuses = [];
+  let sawActive = false;
+  for (let i = 0; i < 200; i++) {
+    const probe = await service.handle({ method: 'GET', path: '/api/v1/admin/backups/progress', local: true });
+    statuses.push(probe.status);
+    if (probe.body?.active) sawActive = true;
+    if (!probe.body?.active && i > 0 && statuses.every(s => s === 200)) { await delay(2); continue; }
+    await delay(2);
+    if (!probe.body?.active && i > 20) break;
+  }
+  const finished = await timeout(job, 60000, 'online backup');
+  assert.equal(finished.status, 200);
+  assert.deepEqual([...new Set(statuses)], [200], 'progress must never answer 503 during maintenance');
+  assert.equal(sawActive, true, 'the probe loop must have observed an in-flight backup');
+  // 同一个窗口里普通只读接口确实是 503 —— 证明上面那个 200 不是碰巧闸没关上。
+  const blocked = await service.handle({ method: 'GET', path: '/api/v1/admin/spaces', local: true });
+  assert.ok([200, 503].includes(blocked.status));
+
+  // 3) 快路径：既然调用方已经验过整份文件，恢复不必再解压一遍，但校验和仍然锁死内容。
+  const manifest = await inspectBackupFile(file, 'password-123');
+  const fast = await restoreBackupFile(file, path.join(root, 'fast'), {
+    password: 'password-123', expectedChecksum: manifest.checksum, verifiedChecksum: manifest.checksum
+  });
+  assert.equal(fast.checksum, manifest.checksum);
+  assert.equal(fs.readFileSync(path.join(root, 'fast', 'note.txt'), 'utf8'), 'hello');
+
+  const wrong = path.join(root, 'fast-wrong');
+  await assert.rejects(restoreBackupFile(file, wrong, { password: 'password-123', verifiedChecksum: '0'.repeat(64) }), error => error.code === 'BACKUP_CHANGED');
+  assert.equal(fs.existsSync(wrong), false, 'a rejected restore must not materialise the destination');
+  assert.equal(fs.readdirSync(root).filter(n => n.startsWith('fast-wrong.staging-')).length, 0, 'a rejected restore must not leave staging garbage');
+
+  // 4) 密码错：既不留目标目录，也不留 staging。
+  const bad = path.join(root, 'bad-password');
+  await assert.rejects(restoreBackupFile(file, bad, { password: 'not-the-password' }));
+  assert.equal(fs.existsSync(bad), false);
+  assert.equal(fs.readdirSync(root).filter(n => n.startsWith('bad-password.staging-')).length, 0);
 });
