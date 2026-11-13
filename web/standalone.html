@@ -72,6 +72,7 @@ header{display:flex;align-items:center;gap:14px;padding:10px 16px;background:var
 header .spacer{flex:1}
 header .hp{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted);white-space:nowrap}
 header select{background:var(--card-2);border:1px solid var(--line);border-radius:var(--radius-sm);padding:5px 8px;font-size:12.5px}
+@media(max-width:640px){header{flex-wrap:wrap;row-gap:8px;padding:10px 12px}header .spacer{display:none}header select{max-width:min(190px,44vw)}}
 .layout{flex:1;display:flex;min-height:0}
 nav{width:172px;flex:0 0 auto;padding:12px 10px;border-right:1px solid var(--line);background:var(--card);overflow:auto}
 nav a{display:flex;align-items:center;gap:9px;padding:8px 10px;border-radius:var(--radius-sm);color:var(--muted);font-size:13px;font-weight:550;margin-bottom:2px}
@@ -162,6 +163,13 @@ pre{margin:8px 0 0;padding:10px;background:var(--card-2);border:1px solid var(--
 .toast.ok{border-left-color:var(--green)}
 @keyframes in{from{opacity:0;transform:translateY(6px)}}
 .busy{position:fixed;left:50%;top:12px;transform:translateX(-50%);background:var(--text);color:var(--bg);font-size:12px;padding:5px 12px;border-radius:999px;z-index:50}
+.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+.section-title{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px}
+.section-title h2{display:flex;align-items:center;gap:8px}
+.section-title .space{margin-left:auto;color:var(--muted);font-size:12px;overflow-wrap:anywhere}
+.diagnostic{display:flex;align-items:flex-start;gap:8px;min-width:0}
+.diagnostic code{flex:1;min-width:0;overflow-wrap:anywhere;word-break:break-word}
+.acceptance-note{font-size:12px;color:var(--muted);margin-top:6px}
 [hidden]{display:none!important}
 </style>
 <link rel="stylesheet" href="/galaxy.css">
@@ -224,12 +232,14 @@ pre{margin:8px 0 0;padding:10px;background:var(--card-2);border:1px solid var(--
 "use strict";
 const $=(s,r=document)=>r.querySelector(s),$$=(s,r=document)=>Array.from(r.querySelectorAll(s));
 const esc=v=>String(v==null?"":v).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+function freshHistoryState(){return {job:null,submitOperationId:null,submitting:false,readError:"",pollError:"",pollTimer:null,polling:false,controller:new AbortController()};}
 const S={
   token:"", spaces:null, space:"", ws:null, status:null, ver:null,
-  page:"overview", scope:{kind:"group",id:""},
+  page:"overview", scope:{kind:"group",id:""},spaceEpoch:0,baseAbort:null,
   person:null, personCtx:"", personSel:null, entry:null, entryPreview:null,
   scene:"", subject:null, subjectSel:null, recall:null, jobs:null,
-  settings:null, backupPreview:null, busy:0, job:null, jobTimer:null, bpass:"", backupMode:"evidence"
+  settings:null, backupPreview:null, restoreResult:null, busy:0, job:null, jobTimer:null, bpass:"", backupMode:"evidence",
+  history:freshHistoryState(),scrollHistory:false
 };
 const LS_THEME="memory-console-theme", LS_TOKEN="memory-console-token";
 const NAV=[
@@ -256,14 +266,15 @@ function syncBusyChip(){
   const box=$("#busybox"); if(!box)return;
   box.innerHTML=(S.busy&&!S.job?.active)?'<div class="busy">处理中…</div>':"";
 }
-async function api(route,method="GET",body){
-  busy(true);
+async function api(route,method="GET",body,options={}){
+  if(!options.quiet)busy(true);
   try{
     const r=await fetch("/api/v1/"+route,{
       method,
       headers:{...(S.token?{authorization:"Bearer "+S.token}:{}),...(body?{"content-type":"application/json"}:{})},
       // 备份/恢复按体积能跑几分钟，30 分钟只防彻底没响应；真实进度靠进度接口，不靠这个超时。
-      signal:AbortSignal.timeout(route.includes('backups')?1800000:30000),
+      // 空间切换会传入 AbortSignal：旧请求即使稍后返回，也不能覆盖新空间。
+      signal:options.signal||AbortSignal.timeout(route.includes('backups')?1800000:30000),
       ...(body?{body:JSON.stringify(body)}:{})
     });
     let data=null; try{data=await r.json();}catch{}
@@ -272,7 +283,7 @@ async function api(route,method="GET",body){
       e.status=r.status;e.code=data&&data.code;e.body=data;throw e;
     }
     return data||{};
-  }catch(e){if(e.name==="TimeoutError"){const error=new Error("请求超时，请刷新重试；已提交的任务可在任务列表查看。");error.code="REQUEST_TIMEOUT";throw error;}throw e;}finally{busy(false);}
+  }catch(e){if(e.name==="TimeoutError"){const error=new Error("请求超时，请刷新重试；已提交的任务可在任务列表查看。");error.code="REQUEST_TIMEOUT";throw error;}throw e;}finally{if(!options.quiet)busy(false);}
 }
 const sid=()=>encodeURIComponent(S.space);
 const wsAction=(action,body={})=>api("spaces/"+sid()+"/workspace","POST",{action,...body});
@@ -420,6 +431,7 @@ async function enter(){
   render();
   // 刷新页面/重进工作台时，后台可能还在跑备份：直接接回进度，而不是让用户以为卡住了。
   void resumeJobIfAny();
+  resumeHistoryJobIfAny();
 }
 // 空间下拉单独抽出来：维护窗口里 boot 拿不到空间表，进度结束后要能就地补上。
 function applySpaces(){
@@ -430,7 +442,17 @@ function applySpaces(){
     : '<option value="">（没有已登记的空间）</option>';
   if(!spaces.includes(S.space))S.space=spaces[0]||"";
   sel.value=S.space;
-  sel.onchange=async()=>{S.space=sel.value;S.ws=null;S.status=null;S.scene="";S.person=null;await refreshBase();render();};
+  sel.onchange=()=>switchSpace(sel.value);
+}
+async function switchSpace(space){
+  if(space===S.space)return;
+  // 代次 + AbortController 双保险：旧空间的慢响应既会被取消，也无法在取消不及时时落进新状态。
+  S.spaceEpoch++;S.baseAbort?.abort();stopHistoryPolling(true);
+  S.space=space;S.ws=null;S.status=null;S.scene="";S.person=null;S.personSel=null;S.entry=null;S.entryPreview=null;
+  S.subject=null;S.subjectSel=null;S.recall=null;S.jobs=null;S.settings=null;S.backupPreview=null;S.restoreResult=null;
+  S.history=freshHistoryState();S.degraded="";
+  render();
+  await refreshBase();render();resumeHistoryJobIfAny();
 }
 function buildNav(){
   $("#nav").innerHTML='<div class="grp">日常</div>'+
@@ -440,26 +462,33 @@ function buildNav(){
   addEventListener("hashchange",()=>render());
 }
 async function refreshBase(){
-  if(!S.space){S.ws=null;return;}
+  if(!S.space){S.ws=null;S.status=null;return;}
+  const space=S.space,epoch=S.spaceEpoch,controller=new AbortController();
+  S.baseAbort?.abort();S.baseAbort=controller;
+  const spaceId=encodeURIComponent(space),options={signal:controller.signal};
   // 服务刚重启时会有几秒冷启动（要读整库索引），这时打过去会全部失败。
   // 不重试的后果是页面静默显示成一屏 0 —— 所以这里重试一次，仍失败就明确报出来。
   const attempt=async(fn)=>{
     try{return {ok:true,value:await fn()};}
     catch(e){
+      if(e.name==="AbortError"||epoch!==S.spaceEpoch)return {ok:false,error:e};
       // 维护态是「服务此刻只读」，不是它慢：重试只会把 503 刷成一串红字。
       if(e.code==="MAINTENANCE")return {ok:false,error:e};
       if(e.status&&e.status<500&&e.status!==429)return {ok:false,error:e};
       await new Promise(r=>setTimeout(r,1200));
+      if(epoch!==S.spaceEpoch)return {ok:false,error:e};
       try{return {ok:true,value:await fn()};}catch(e2){return {ok:false,error:e2};}
     }
   };
   const [wsR,stR,verR]=await Promise.all([
-    attempt(()=>api("spaces/"+sid()+"/workspace","POST",{action:"state"})),
-    attempt(()=>api("spaces/"+sid()+"/status")),
-    attempt(()=>api("version"))
+    attempt(()=>api("spaces/"+spaceId+"/workspace","POST",{action:"state"},options)),
+    attempt(()=>api("spaces/"+spaceId+"/status","GET",undefined,options)),
+    attempt(()=>api("version","GET",undefined,options))
   ]);
+  if(epoch!==S.spaceEpoch||space!==S.space)return;
   if(wsR.ok)S.ws=wsR.value;
-  if(stR.ok)S.status=stR.value;
+  if(stR.ok){S.status=stR.value;S.history.readError="";}
+  else S.history.readError=String(stR.error?.message||"索引状态读取失败");
   if(verR.ok)S.ver=verR.value;
   const failed=[wsR,stR].filter(r=>!r.ok);
   // 备份/恢复窗口内服务按设计只读（503 MAINTENANCE）。这不是故障，不该弹红；直接把
@@ -483,6 +512,7 @@ async function refreshBase(){
 }
 
 $("#logout").onclick=()=>{
+  S.spaceEpoch++;S.baseAbort?.abort();stopHistoryPolling(true);
   localStorage.removeItem(LS_TOKEN); S.token="";
   $("#app").hidden=true; $("#gate").hidden=false; $("#token").value="";
   $("#gate-msg").textContent="已退出";
@@ -493,6 +523,7 @@ function render(){
   galaxyGeneration++;galaxyPage?.dispose();galaxyPage=null;
   const page=(location.hash.slice(2)||"overview").split("/")[0]||"overview";
   S.page=NAV.some(n=>n[1]===page)?page:"overview";
+  if(S.page!=="backup")stopHistoryPolling(true);
   $$("#nav a").forEach(a=>{
     if(a.dataset.page===S.page)a.setAttribute("aria-current","page"); else a.removeAttribute("aria-current");
   });
@@ -501,7 +532,11 @@ function render(){
   $("#main").scrollTop=0;
   // 每次 render 都会重建表单，密码框必须回填 —— 否则「备份完成后接着点预览」必然报
   // INVALID_BACKUP（密码被清空），而且提示写的是「文件损坏」，完全误导。
-  if(S.page==="backup"){const pw=$("#bpass");if(pw)pw.value=S.bpass||"";}
+  if(S.page==="backup"){
+    const pw=$("#bpass");if(pw)pw.value=S.bpass||"";
+    resumeHistoryJobIfAny();
+    if(S.scrollHistory){S.scrollHistory=false;requestAnimationFrame(()=>$("#index-recovery")?.scrollIntoView({block:"start"}));}
+  }
   if(S.page==="overview")loadOverviewExtra();
   if(S.page==="scene"&&S.ws)bindSceneSelect();
   if(S.page==="star")renderStar();
@@ -577,11 +612,18 @@ function viewOverview(){
           <div class="ops"><span class="chip">${n} 条</span></div></div>`;
       }).join("")}</div>`: '<div class="empty">这个空间还没有场景。到「场景记忆」新建。</div>'}
     </div>
+  </div>
+  <div class="card">
+    <h2>历史索引<span class="hint">${esc(S.space||"未选空间")}</span></h2>
+    ${historyOverviewHtml()}
+    <div class="toolbar" style="margin-top:12px"><div class="acts"><button class="btn" data-act="open-history">前往「索引与恢复」</button></div></div>
   </div>`;
 }
 async function loadOverviewExtra(){
+  const space=S.space,epoch=S.spaceEpoch;
   try{
-    const jobs=await api("spaces/"+sid()+"/jobs");
+    const jobs=await api("spaces/"+encodeURIComponent(space)+"/jobs");
+    if(space!==S.space||epoch!==S.spaceEpoch||S.page!=="overview")return;
     S.jobs=jobs;
     const st=S.status||{};
     const bg=$("#bg");
@@ -599,7 +641,7 @@ async function loadOverviewExtra(){
         ? `<div class="rows" style="margin-top:12px">${rows.slice(-6).reverse().map(j=>`<div class="row"><div class="body"><div class="t">${esc(j.type||"任务")} <span class="chip">${esc(j.status||j.state||"")}</span></div><div class="m">${esc(j.startedAt?new Date(j.startedAt).toLocaleString():"")} ${j.error?"· "+esc(j.error):""}</div></div></div>`).join("")}</div>`
         : "";
     }
-  }catch(e){const bg=$("#bg");if(bg)bg.innerHTML=`<span class="chip bad">${esc(e.message)}</span>`;}
+  }catch(e){if(space!==S.space||epoch!==S.spaceEpoch)return;const bg=$("#bg");if(bg)bg.innerHTML=`<span class="chip bad">${esc(e.message)}</span>`;}
 }
 
 /* ---------------- people ---------------- */
@@ -783,8 +825,9 @@ function viewRecall(){
   :`<div class="card"><h2>结果<span class="hint">${list.length} 条</span></h2>
     ${list.length?`<div class="rows">${list.map(h=>`
       <div class="row"><div class="body">
-        <div class="t">${esc(h.text||h.content||h.statement||"")}</div>
-        <div class="m">${esc(h.kind||h.layer||h.source||"")}${h.score!=null?" · 得分 "+Number(h.score).toFixed(3):""}${h.actor?" · "+esc(h.actor):""}${h.at?" · "+esc(String(h.at).slice(0,10)):""}</div>
+        <div class="t">${esc(h.text||h.content||h.statement||h.quote||"")}</div>
+        <div class="m">${h.matchMethod==="history-lexical"?'<span class="chip acc">历史词法命中原话</span> ':''}${esc(h.kind||h.layer||h.source||"")}${h.score!=null?" · 得分 "+Number(h.score).toFixed(3):""}${h.actor?" · "+esc(h.actor):""}${h.at?" · "+esc(String(h.at).slice(0,10)):""}</div>
+        ${h.sourceRefs?.length?`<div class="m">来源：${h.sourceRefs.map(ref=>esc(typeof ref==="object"?(ref.messageId||ref.id||ref.sourceId||JSON.stringify(ref)):ref)).join(" · ")}</div>`:""}
       </div></div>`).join("")}</div>`:'<div class="empty">没有命中。</div>'}
     <details><summary>原始响应</summary><pre>${esc(JSON.stringify(r,null,2))}</pre></details>
   </div>`);
@@ -824,6 +867,204 @@ function viewSubject(){
   </div>`:"");
 }
 
+/* ---------------- 历史索引与恢复验收 ---------------- */
+const HISTORY_POLL_MS=1500;
+const historyJobStatus=j=>String(j?.status||j?.state||"");
+const historyJobId=j=>String(j?.id||j?.jobId||"");
+const historyJobActive=j=>["queued","running"].includes(historyJobStatus(j));
+const historyNumber=v=>{if(v==null||v==="")return null;const n=Number(v);return Number.isFinite(n)?n:null;};
+const fmtRows=v=>{const n=historyNumber(v);return n==null?"—":n.toLocaleString("zh-CN");};
+function latestHistoryJob(hi){return hi?.lastJob||hi?.recentJob||hi?.latestJob||null;}
+function historyCoverage(hi){
+  const total=historyNumber(hi?.sourceRows);
+  if(total===0)return "0 条消息";
+  if(total==null)return "原料行数未知";
+  return `${fmtRows(hi?.watermark)} / ${fmtRows(total)} 行`;
+}
+function historyOverviewHtml(){
+  if(!S.status)return `<p style="color:var(--muted);font-size:13px">${esc(S.history.readError||"正在读取索引状态…")}</p>`;
+  const hi=S.status.historyIndex;
+  if(!hi)return '<p style="color:var(--muted);font-size:13px">当前服务版本未提供索引状态。</p>';
+  const generation=hi.generation==null||hi.generation===""?"尚未建立持久化索引":`持久化索引代 ${hi.generation}`;
+  return `<dl class="kv"><dt>当前状态</dt><dd>${esc(generation)} ${hi.building?'<span class="chip acc">正在重建</span>':""}</dd>
+    <dt>日志覆盖</dt><dd>${esc(historyCoverage(hi))}</dd></dl>`;
+}
+function historyJobLabel(job){
+  return ({queued:"等待执行",running:"正在重建",completed:"已完成",failed:"已失败"})[historyJobStatus(job)]||historyJobStatus(job)||"未知状态";
+}
+function historyProgressHtml(hi,job){
+  const building=hi?.building,settled=["completed","failed"].includes(historyJobStatus(job));
+  const active=historyJobActive(job)||(!settled&&!!building);
+  if(!active)return "";
+  const status=historyJobStatus(job)||(building?"running":"");
+  const total=historyNumber(building?.sourceRows??hi?.sourceRows),done=historyNumber(building?.indexedRows);
+  const determinate=status!=="queued"&&total!=null&&total>0&&done!=null;
+  const pct=determinate?Math.max(0,Math.min(100,Math.round(done/total*1000)/10)):null;
+  const saving=status==="running"&&determinate&&done>=total;
+  const title=status==="queued"?"等待执行":saving?"正在保存索引":"正在重建";
+  const count=total===0?"0 条消息":determinate?`${fmtRows(done)} / ${fmtRows(total)} 行`:"进度信息暂不可用";
+  const valueText=`${title}，${count}`;
+  return `<div class="job" style="margin-top:14px">
+    <div class="row"><span>${esc(title)}</span><span class="pct">${total===0?"0 条消息":pct==null?(status==="queued"?"排队中":"进行中"):pct+"%"}</span></div>
+    <div class="track" role="progressbar" aria-label="历史索引重建进度" aria-valuemin="0" aria-valuemax="100" aria-valuetext="${esc(valueText)}" ${pct==null?"":`aria-valuenow="${pct}"`}><div class="fill${pct==null?" unk":""}" style="${pct==null?"":`width:${pct}%`}"></div></div>
+    <div class="meta"><span>${esc(count)}</span><span>${saving?"消息处理已完成，等待文件写入与激活":"重建期间仍可使用当前可读代"}</span></div>
+  </div>`;
+}
+function diagnosticValue(v){return typeof v==="object"?JSON.stringify(v):String(v);}
+function diagnosticRow(label,key,value){
+  if(value==null||value==="")return "";
+  return `<dt>${esc(label)}</dt><dd><div class="diagnostic"><code>${esc(diagnosticValue(value))}</code><button class="btn sm ghost" data-act="history-copy" data-field="${esc(key)}" aria-label="复制完整${esc(label)}">复制</button></div></dd>`;
+}
+function historyIndexHtml(){
+  if(!S.status){const e=S.history.readError;return `${e?`<p class="acceptance-note" style="color:var(--red)" role="alert">读取失败：${esc(e)}</p>`:`<div class="empty">正在读取索引状态…</div>`}<div class="acts"><button class="btn ghost" data-act="history-refresh">重新读取</button></div>`;}
+  const hi=S.status.historyIndex,h=S.history;
+  if(!hi)return `<div class="empty">当前服务版本未提供索引状态</div>${h.readError?`<p class="acceptance-note" style="color:var(--red)">读取失败：${esc(h.readError)}</p>`:""}<div class="acts"><button class="btn ghost" data-act="history-refresh">重新读取</button></div>`;
+  const latest=latestHistoryJob(hi),job=h.job||latest;
+  const generationMissing=hi.generation==null||hi.generation==="";
+  const settled=["completed","failed"].includes(historyJobStatus(job));
+  const active=historyJobActive(job)||(!settled&&!!hi.building);
+  const canRebuild=S.status.canRebuildHistoryIndex===true;
+  const submitLabel=h.submitOperationId?"重试提交":historyJobStatus(job)==="failed"?"重试重建":"重建历史索引";
+  const diagnostics=["format","encoding","sourceHead"].some(k=>hi[k]!=null&&hi[k]!=="");
+  return `${h.readError?`<div class="card alert" style="box-shadow:none;margin-bottom:12px"><p style="font-size:12px">读取失败，当前保留最近一次状态：${esc(h.readError)}</p></div>`:""}
+    <dl class="kv">
+      <dt>持久化索引代</dt><dd>${generationMissing?"尚未建立持久化索引":`<div class="diagnostic"><code>${esc(hi.generation)}</code><button class="btn sm ghost" data-act="history-copy" data-field="generation" aria-label="复制完整索引代号">复制</button></div>`}</dd>
+      <dt>当前索引水位</dt><dd>${esc(fmtRows(hi.watermark))} 行</dd>
+      <dt>原料行数</dt><dd>${esc(fmtRows(hi.sourceRows))}${historyNumber(hi.sourceRows)===0?" · 0 条消息":" 行"}</dd>
+      <dt>日志覆盖</dt><dd>${esc(historyCoverage(hi))}</dd>
+    </dl>
+    ${historyProgressHtml(hi,job)}
+    ${job?`<div class="hr"></div><dl class="kv">
+      <dt>最近一次任务</dt><dd><span class="chip ${historyJobStatus(job)==="failed"?"bad":historyJobStatus(job)==="completed"?"ok":"acc"}">${esc(historyJobLabel(job))}</span></dd>
+      ${historyJobId(job)?`<dt>任务 ID</dt><dd class="mono">${esc(historyJobId(job))}</dd>`:""}
+      ${job.createdAt?`<dt>提交时间</dt><dd>${esc(new Date(job.createdAt).toLocaleString())}</dd>`:""}
+      ${job.finishedAt?`<dt>结束时间</dt><dd>${esc(new Date(job.finishedAt).toLocaleString())}</dd>`:""}
+      ${historyJobStatus(job)==="failed"&&job.error?.message?`<dt>失败原因</dt><dd style="color:var(--red)">${esc(job.error.message)}</dd>`:""}
+    </dl>`:""}
+    ${h.pollError?`<p class="acceptance-note" style="color:var(--red)">${esc(h.pollError)}</p>`:""}
+    ${diagnostics?`<details><summary>可复制诊断信息</summary><dl class="kv" style="margin-top:10px">
+      ${diagnosticRow("格式","format",hi.format)}${diagnosticRow("编码","encoding",hi.encoding)}${diagnosticRow("原料头摘要","sourceHead",hi.sourceHead)}
+    </dl></details>`:""}
+    <div class="toolbar" style="margin-top:14px"><div class="acts">
+      ${canRebuild?`<button class="btn primary" data-act="history-rebuild" ${h.submitting||active?"disabled":""}>${esc(submitLabel)}</button>`:'<span class="chip">当前账号仅可查看</span>'}
+      <button class="btn ghost" data-act="history-refresh">重新读取</button>
+    </div></div>`;
+}
+function acceptanceRow(label,passed,detail){
+  return `<div class="row"><div class="body"><div class="t">${esc(label)}</div><div class="m">${esc(detail)}</div></div><span class="chip ${passed?"ok":""}">${passed?esc(label)+"通过":"尚未验收"}</span></div>`;
+}
+function recoveryAcceptanceHtml(){
+  const p=S.backupPreview||S.restoreResult?.archivePreview,r=S.restoreResult;
+  const archivePassed=!!p?.checksum;
+  const sidePassed=!!(r?.validated===true&&r?.destination&&!r.rollback);
+  const semanticPassed=!!(r?.semanticComparison?.passed===true||r?.acceptance?.semanticComparison?.passed===true||r?.acceptance?.semanticComparison==="passed");
+  const rollbackPassed=!!(r?.rollbackDrill?.passed===true||r?.acceptance?.rollbackDrill?.passed===true||r?.acceptance?.rollbackDrill==="passed");
+  const evidence=p&&(p.mode==="evidence"||p.evidenceOnly);
+  return `<div class="rows">
+    ${acceptanceRow("归档校验",archivePassed,archivePassed?`校验和 ${p.checksum}`:"先检查并预览一份备份")}
+    ${acceptanceRow("旁置恢复",sidePassed,sidePassed?"服务已返回旁置恢复及目录校验结果":"需要服务返回明确的旁置恢复凭据")}
+    ${acceptanceRow("语义对照",semanticPassed,semanticPassed?"服务已返回语义对照通过结果":"首版不从归档或恢复成功推断语义一致")}
+    ${acceptanceRow("回退演练",rollbackPassed,rollbackPassed?"服务已返回回退演练通过结果":"首版不提供线上切换或自动回退")}
+  </div>
+  ${p?`<dl class="kv" style="margin-top:12px">
+    <dt>备份模式</dt><dd>${evidence?"证据级":"全量"} · ${esc(p.kind||"")}</dd>
+    <dt>排除项</dt><dd>${p.excluded?.length?`${p.excluded.length} 类`:"无"}</dd>
+    <dt>恢复时后台任务</dt><dd>${p.automaticTasksSuspendedOnRestore?"自动暂停":"服务未声明自动暂停"}</dd>
+  </dl>
+  <p class="acceptance-note" style="${evidence?"color:var(--orange)":""}">${evidence?"证据级归档缺少完整原料，无法恢复全量历史检索。":"全量备份包含原始日志，可用来重建历史索引。"}</p>`:'<p class="acceptance-note">归档、恢复和语义验收分别取证；不会因为其中一步通过就自动点亮其他状态。</p>'}`;
+}
+function paintHistory(){const slot=$("#history-index");if(slot)slot.innerHTML=historyIndexHtml();}
+function announceHistory(message){
+  const live=$("#history-live");if(live&&message&&live.textContent!==message)live.textContent=message;
+}
+async function copyText(text){
+  if(navigator.clipboard?.writeText)return navigator.clipboard.writeText(text);
+  const area=document.createElement("textarea");area.value=text;area.style.position="fixed";area.style.opacity="0";document.body.append(area);area.select();
+  const ok=document.execCommand("copy");area.remove();if(!ok)throw new Error("复制失败");
+}
+async function readHistoryStatus(options={}){
+  const space=S.space,epoch=S.spaceEpoch,h=S.history;if(!space)return;
+  if(h.controller.signal.aborted)h.controller=new AbortController();
+  try{
+    const status=await api("spaces/"+encodeURIComponent(space)+"/status","GET",undefined,{...options,signal:h.controller.signal});
+    if(space!==S.space||epoch!==S.spaceEpoch||h!==S.history)return;
+    S.status=status;h.readError="";paintHistory();resumeHistoryJobIfAny();
+  }catch(err){
+    if(space!==S.space||epoch!==S.spaceEpoch||h!==S.history||err.name==="AbortError")return;
+    h.readError=err.message;paintHistory();if(!options.quiet)toast("索引状态读取失败："+err.message,"err");
+  }
+}
+function resumeHistoryJobIfAny(){
+  if(S.page!=="backup"||!S.space||S.history.polling)return;
+  const hi=S.status?.historyIndex,h=S.history,latest=latestHistoryJob(hi);
+  let job=historyJobActive(h.job)?h.job:historyJobActive(latest)?latest:null;
+  const buildingId=hi?.building?.jobId||hi?.building?.id;
+  if(!job&&buildingId)job={id:buildingId,status:"running"};
+  if(job){h.job=job;startHistoryPolling();}
+}
+function startHistoryPolling(){
+  const h=S.history;if(h.polling||h.pollTimer||S.page!=="backup"||!historyJobId(h.job))return;
+  if(h.controller.signal.aborted)h.controller=new AbortController();
+  h.polling=true;
+  const schedule=delay=>{h.pollTimer=setTimeout(()=>{h.pollTimer=null;void pollHistoryJob(h,schedule);},delay);};
+  schedule(0);
+}
+function stopHistoryPolling(abort=false){
+  const h=S.history;if(!h)return;if(h.pollTimer)clearTimeout(h.pollTimer);h.pollTimer=null;h.polling=false;
+  if(abort)h.controller?.abort();
+}
+async function pollHistoryJob(h,schedule){
+  if(!h.polling||h!==S.history)return;
+  const space=S.space,epoch=S.spaceEpoch,jobId=historyJobId(h.job),base="spaces/"+encodeURIComponent(space);
+  const [jobResult,statusResult]=await Promise.allSettled([
+    api(base+"/jobs/"+encodeURIComponent(jobId),"GET",undefined,{quiet:true,signal:h.controller.signal}),
+    api(base+"/status","GET",undefined,{quiet:true,signal:h.controller.signal})
+  ]);
+  if(!h.polling||h!==S.history||space!==S.space||epoch!==S.spaceEpoch)return;
+  if(statusResult.status==="fulfilled"){S.status=statusResult.value;h.readError="";}
+  else h.readError=statusResult.reason?.message||"索引状态读取失败";
+  if(jobResult.status==="fulfilled"){h.job=jobResult.value.job||jobResult.value;h.pollError="";}
+  else{
+    const err=jobResult.reason;h.pollError="任务进度读取失败，将保留最近状态并重试："+(err?.message||"网络错误");
+    if([401,403,404].includes(err?.status)){stopHistoryPolling();paintHistory();announceHistory("历史索引任务读取失败");return;}
+  }
+  const status=historyJobStatus(h.job);paintHistory();
+  if(status==="completed"){
+    stopHistoryPolling();
+    await readHistoryStatus({quiet:true});
+    if(h!==S.history||space!==S.space||epoch!==S.spaceEpoch)return;
+    paintHistory();announceHistory("历史索引重建完成，新索引已激活");toast("历史索引重建完成","ok");return;
+  }
+  if(status==="failed"){
+    stopHistoryPolling();paintHistory();announceHistory("历史索引重建失败，可重新提交");toast("历史索引重建失败："+(h.job?.error?.message||"未知错误"),"err");return;
+  }
+  schedule(HISTORY_POLL_MS);
+}
+async function submitHistoryRebuild(){
+  const h=S.history,hi=S.status?.historyIndex,job=h.job||latestHistoryJob(hi);
+  const settled=["completed","failed"].includes(historyJobStatus(job));
+  if(h.submitting||historyJobActive(job)||(!settled&&hi?.building)||S.status?.canRebuildHistoryIndex!==true)return;
+  const space=S.space,epoch=S.spaceEpoch;
+  if(!window.confirm(`重建 ${space} 的历史索引？`))return;
+  // submitOperationId 只在「未拿到 jobId 的传输失败」后保留；人工重试已失败任务会生成新 ID。
+  const operationId=h.submitOperationId||opId();h.submitOperationId=operationId;h.submitting=true;h.pollError="";paintHistory();
+  if(h.controller.signal.aborted)h.controller=new AbortController();
+  try{
+    const result=await api("spaces/"+encodeURIComponent(space)+"/jobs","POST",{type:"history-lexical",operationId},{signal:h.controller.signal});
+    if(space!==S.space||epoch!==S.spaceEpoch||h!==S.history)return;
+    h.job=result.job||{id:result.jobId,status:"queued",createdAt:new Date().toISOString()};h.submitOperationId=null;
+    announceHistory("历史索引重建任务已提交");toast("历史索引重建任务已提交","ok");startHistoryPolling();
+  }catch(err){
+    if(space!==S.space||epoch!==S.spaceEpoch||h!==S.history)return;
+    const transport=!err.status||err.code==="REQUEST_TIMEOUT";
+    if(!transport)h.submitOperationId=null;
+    h.pollError=transport?"提交传输失败；重试会沿用同一操作 ID，避免重复任务。":"提交失败："+err.message;
+    toast(h.pollError,"err");
+  }finally{
+    if(space===S.space&&epoch===S.spaceEpoch&&h===S.history){h.submitting=false;paintHistory();}
+  }
+}
+
 /* ---------------- backup ---------------- */
 function viewBackup(){
   const p=S.backupPreview;
@@ -834,12 +1075,21 @@ function viewBackup(){
     :"";
   return head("备份与导入","默认导出「证据级」：只带记忆块与支撑它的原文片段，不含全量原始聊天。要连原始记录一起带走，选完整镜像。恢复前必须预览校验和。")+
   `<div id="jobslot">${jobHtml()}</div>`+pwHint+
-  `<div class="split">
+  `<section class="card" id="index-recovery" aria-labelledby="index-recovery-title">
+    <div class="section-title"><h2 id="index-recovery-title">索引与恢复</h2><span class="space">当前空间：<b>${esc(S.space||"未选择")}</b></span></div>
+    <div class="split">
+      <div><h3 style="margin-bottom:10px">历史检索</h3><div id="history-index">${historyIndexHtml()}</div></div>
+      <div><h3 style="margin-bottom:10px">恢复验收</h3>${recoveryAcceptanceHtml()}</div>
+    </div>
+    <div id="history-live" class="sr-only" aria-live="polite" aria-atomic="true"></div>
+  </section>
+  <div class="split">
     <div class="card">
       <h2>导出</h2>
       <div class="field"><label>备份内容</label>
         <label class="hp" style="display:block"><input type="radio" name="bmode" value="evidence" ${S.backupMode!=="full"?"checked":""}> 证据级（推荐）· 记忆 + 证据片段，不含全量原始聊天</label>
         <label class="hp" style="display:block;margin-top:4px"><input type="radio" name="bmode" value="full" ${S.backupMode==="full"?"checked":""}> 完整镜像 · 连 <span class="mono">input/messages.jsonl</span> 一起带走，体积大一个数量级</label>
+        <p class="acceptance-note">全量备份包含原始日志，可用来重建历史索引；证据级备份不含完整原料。</p>
       </div>
       <div class="field"><label>备份密码（服务级备份至少 8 位；空间导出可留空）</label><input class="inp" id="bpass" type="password" autocomplete="new-password"></div>
       <div class="toolbar" style="margin-top:10px"><div class="acts">
@@ -868,10 +1118,12 @@ function viewBackup(){
       </div></div>
       ${p?`<div class="hr"></div><dl class="kv">
         <dt>类型</dt><dd>${esc(p.kind)}</dd>
-        <dt>内容</dt><dd>${p.evidenceOnly?"证据级 · 记忆与证据片段":"完整镜像 · 含全部原始记录"}</dd>
+        <dt>内容</dt><dd>${p.mode==="evidence"||p.evidenceOnly?"证据级 · 记忆与证据片段":"完整镜像 · 含全部原始记录"}</dd>
         <dt>文件</dt><dd>${esc(p.files)} 个 · ${esc((p.totalBytes/1048576).toFixed(2))} MB</dd>
-        <dt>校验和</dt><dd class="mono">${esc(p.checksum)}</dd>
-      </dl>${p.evidenceOnly?`<p class="sub" style="margin-top:8px;color:var(--orange)">这份备份不含全量原始消息：恢复后可读、可召回，但<b>不能重建索引</b>（重建需要 input/messages.jsonl）。</p>`:""}`:""}
+        <dt>校验和</dt><dd class="mono" style="overflow-wrap:anywhere">${esc(p.checksum)}</dd>
+        <dt>排除项</dt><dd>${p.excluded?.length?p.excluded.map(x=>esc(x.path||x.label||x.key||"未知项")).join("、"):"无"}</dd>
+        <dt>恢复时任务</dt><dd>${p.automaticTasksSuspendedOnRestore?"自动暂停":"服务未声明自动暂停"}</dd>
+      </dl>${p.mode==="evidence"||p.evidenceOnly?`<p class="sub" style="margin-top:8px;color:var(--orange)">这份备份不含全量原始消息：恢复后可读、可召回，但<b>无法恢复全量历史检索</b>（重建需要 input/messages.jsonl）。</p>`:`<p class="acceptance-note">这份全量备份包含原始日志，可用来重建历史索引。</p>`}`:""}
       <p class="sub" style="font-size:12px;color:var(--muted);margin-top:12px">恢复会短暂停写（请求返回 503 MAINTENANCE），聊天可继续、稍后重试；完整恢复生成新目录，需用新目录启动。</p>
     </div>
   </div>`;
@@ -932,6 +1184,16 @@ $("#main").addEventListener("click",async e=>{
   const act=el.dataset.act;
   try{
     if(act==="refresh"){await refreshBase();render();toast("已刷新","ok");}
+    else if(act==="open-history"){
+      S.scrollHistory=true;
+      if(S.page==="backup")render();else location.hash="#/backup";
+    }
+    else if(act==="history-rebuild"){await submitHistoryRebuild();}
+    else if(act==="history-refresh"){await readHistoryStatus();}
+    else if(act==="history-copy"){
+      const value=S.status?.historyIndex?.[el.dataset.field];if(value==null)throw new Error("没有可复制的诊断信息");
+      await copyText(diagnosticValue(value));toast("已复制完整内容","ok");
+    }
     else if(act==="job"){
       const type=el.dataset.type;
       const r=await api("spaces/"+sid()+"/jobs","POST",{type});
@@ -1072,6 +1334,8 @@ $("#main").addEventListener("click",async e=>{
     else if(act==="backup-preview"){
       const idv=$("#bid").value.trim(); if(!idv)throw new Error("填备份 ID");
       const pwx=bpassVal();
+      if(S.backupPreview?.id!==idv)S.restoreResult=null;
+      S.backupPreview=null;
       beginJob("正在校验备份");
       try{
         S.backupPreview=await api("admin/backups/"+encodeURIComponent(idv)+"/preview","POST",{password:pwx});
@@ -1098,9 +1362,9 @@ $("#main").addEventListener("click",async e=>{
         const r=await api("admin/backups/"+encodeURIComponent(p.id)+"/restore","POST",{
           password:bpassVal(),expectedChecksum:p.checksum,
           spaceId:$("#bnew").value.trim()||undefined,owner:$("#bowner").value.trim()||undefined,replace:$("#breplace").checked});
-        // 证据级恢复出来的库缺少 messages.jsonl：说清「现在能做什么、不能做什么」，
-        // 否则用户下一步点「重建索引」会得到一份空语料，还以为恢复成功了。
-        toast("恢复完成"+(r.destination?"："+r.destination:"")+(r.evidenceOnly?"（证据级：可读可召回，不能重建索引）":""),"ok");
+        S.restoreResult={...r,archivePreview:p};
+        // 文件路径只保留在内存中供验收判断，不拼进任务提示，也不写浏览器日志。
+        toast("恢复完成"+(r.evidenceOnly?"（证据级：可读可召回，不能重建索引）":""),"ok");
         S.backupPreview=null;
       }finally{ await endJob(); await refreshBase(); render(); }
     }

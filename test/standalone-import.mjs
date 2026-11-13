@@ -1,6 +1,7 @@
 import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';
 import {Normalizer} from '../src/core/normalize.mjs';import {openFactStore} from '../src/core/factstore.mjs';import {VecStore} from '../src/core/vecstore.mjs';import {listCorpus} from '../src/core/corpus.mjs';
 import {migrate} from '../tools/standalone-migrate.mjs';import {importSnapshot} from '../tools/standalone-import.mjs';import {createSpaceEngine} from '../src/standalone/engine.mjs';
+import {createBackupTo, restoreBackupFile} from '../src/standalone/backup.mjs';
 
 test('game evidence imports with its original channel ID and survives adapter replay without entering QQ scopes',async()=>{
  const temp=fs.mkdtempSync(path.join(os.tmpdir(),'vec-game-import-'));let engine;
@@ -45,11 +46,23 @@ test('offline import preserves evidence IDs, original labels, facts and indexed 
  let result=importSnapshot({spaceRoot});assert.equal(result.imported,1);assert.equal(result.archiveMatchedEvidence,1);assert.equal(result.corpus,1);assert.equal(importSnapshot({spaceRoot}).duplicates,1);
  const corpus=listCorpus(path.join(spaceRoot,'input'));assert(corpus.some(c=>c.id===chunkId&&c.chunk.summary.includes('露营')));
  fs.renameSync(sourceRoot,path.join(temp,'removed-host'));fs.renameSync(path.join(spaceRoot,'imported-source'),path.join(spaceRoot,'unused-snapshot'));
- engine=createSpaceEngine({root:spaceRoot});
+ const archive=path.join(temp,'full.vmb'),restoredRoot=path.join(temp,'restored');
+ const backup=await createBackupTo(to,archive,{spaceId:'qq-a',mode:'full',password:'synthetic-test-password'});
+ const restored=await restoreBackupFile(archive,restoredRoot,{
+   password:'synthetic-test-password',expectedChecksum:backup.checksum,
+ });
+ assert.equal(restored.mode,'full');
+ for(const file of ['input/messages.jsonl','input/evidence-aliases.json','input/corpus.json']){
+   assert.deepEqual(fs.readFileSync(path.join(restoredRoot,file)),fs.readFileSync(path.join(spaceRoot,file)),file);
+ }
+ for(const root of [spaceRoot,restoredRoot]){
+ engine=createSpaceEngine({root});
  const replay=await engine.call('ingest',{messages:[{messageId:`${chatKey}:1`,conversationId:chatKey,actorId:row.speakerId,role:'user',timestamp:new Date(ts).toISOString(),text:row.text,scope:{kind:'group',id:'123456'},mentions:[]}]});assert.equal(replay.duplicates,1);assert.equal(replay.accepted,0);
  const recalled=await engine.call('recall',{query:'露营',scope:{kind:'group',id:'123456'},actorIds:['1234567']});
  assert(!recalled.items.some(i=>i.layer==='semantic'&&i.text.includes('喜欢绿茶')));assert(recalled.items.some(i=>i.layer==='long-term'&&i.text.includes('露营')));
  const entity=await engine.call('entity',{entityId:'1234567',displayName:'Alice new'});assert.equal(entity.label,speaker);
  assert((await engine.call('recall',{query:'绿茶',scope:{kind:'group',id:'123456'},actorIds:['1234567']})).items.some(i=>i.layer==='semantic'&&i.sourceRefs.some(r=>r.id===row.id)));
+ await engine.close();engine=undefined;
+ }
  }finally{await engine?.close();fs.rmSync(temp,{recursive:true,force:true});}
 });

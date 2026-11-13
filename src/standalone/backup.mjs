@@ -99,6 +99,7 @@ function collect(root, limit, mode = 'full') {
     for (const name of fs.readdirSync(dir).sort()) {
       if (skippedEntry(name)) continue;
       const file = path.join(dir, name), stat = fs.lstatSync(file), relative = prefix + name;
+      if (stat.isDirectory() && /^(?:spaces\/[^/]+\/)?derived-history$/.test(relative)) continue;
       if (stat.isSymbolicLink()) fail('Symbolic links cannot be backed up');
       if (stat.isDirectory()) { visit(file, relative + '/'); continue; }
       if (!stat.isFile()) fail('Unsupported file type');

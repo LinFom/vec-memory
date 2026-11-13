@@ -57,7 +57,7 @@ test('real HTTP backup contract: encrypted full backup, binary upload, preview a
   assert.equal(ingested.status, 200);
   assert.equal(ingested.body.accepted, 1);
 
-  const created = await api(admin, 'admin/backups', 'POST', { password });
+  const created = await api(admin, 'admin/backups', 'POST', { password, mode: 'full' });
   assert.equal(created.status, 200);
   assert(created.body.backupId);
   assert.equal((await fetch(base + '/api/v1/admin/backups/' + created.body.backupId, { headers: { Authorization: 'Bearer ' + projectToken } })).status, 403);
@@ -72,7 +72,9 @@ test('real HTTP backup contract: encrypted full backup, binary upload, preview a
   assert.equal(archive.includes(Buffer.from(projectToken)), false, 'raw project credential must not appear');
   const manifest = inspectBackup(archive, password);
   assert.equal(manifest.kind, 'service');
+  assert.equal(manifest.mode, 'full');
   assert(manifest.files.some(file => file.name === 'access.json'));
+  assert(manifest.files.some(file => file.name === 'spaces/s/input/messages.jsonl'));
 
   const encodedPassword = Buffer.from(password, 'utf8').toString('base64');
   const forbiddenUpload = await fetch(base + '/api/v1/admin/backups', { method: 'POST', headers: { Authorization: 'Bearer ' + projectToken, 'content-type': 'application/octet-stream', 'x-backup-password': encodedPassword }, body: archive });

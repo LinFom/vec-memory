@@ -1,4 +1,5 @@
 import {createOperationQueue} from './operation-queue.mjs';
+import {createHistoryIndex} from './history-index.mjs';
 import {graphSimilarity} from '../core/graph-similarity.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -31,6 +32,7 @@ const root=path.resolve(workerData.root),input=path.join(root,'input'),legacy=pa
 fs.mkdirSync(input,{recursive:true});fs.mkdirSync(legacy,{recursive:true});
 if(!fs.existsSync(path.join(input,'source.json'))) fs.writeFileSync(path.join(input,'source.json'),JSON.stringify({version:1,kind:'canonical'}));
 const log=new DurableLog(path.join(input,'messages.jsonl'),()=>{});
+const historyIndex=createHistoryIndex(root,log);
 bindCanonicalMessages(input,()=>{log.assertReadable();return log.rows.map(r=>r.data.message);});
 const memoryOperations=new DurableLog(path.join(input,'memory-operations.jsonl'),()=>{});
 const corrections=new DurableLog(path.join(input,'correction-intents.jsonl'),()=>{});
@@ -113,6 +115,7 @@ function message(raw){
  const m={messageId:requireText(raw?.messageId,'messageId',200),conversationId:requireText(raw?.conversationId,'conversationId',200),actorId:requireText(raw?.actorId,'actorId',200),role:requireText(raw?.role,'role',20),timestamp:typeof raw?.timestamp==='number'?raw.timestamp:Date.parse(raw?.timestamp),text:typeof raw?.text==='string'?raw.text:null,scope:raw?.scope};
  canonicalChatKey(m.scope);m.scope={kind:m.scope.kind,id:m.scope.id.trim()};
  if(!['user','assistant','system','tool'].includes(m.role)||!Number.isFinite(m.timestamp)||m.timestamp<=0||m.text===null||m.text.length>100000)throw new MemoryError('INVALID_MESSAGE','Invalid role, timestamp or text');
+ if(!m.text.isWellFormed())throw new MemoryError('INVALID_MESSAGE','Message text contains an unpaired UTF-16 surrogate');
  if(raw.mentions!==undefined){if(!Array.isArray(raw.mentions)||raw.mentions.length>100)throw new MemoryError('INVALID_MESSAGE','mentions must be an array');m.mentions=raw.mentions.map(x=>requireText(typeof x==='string'?x:x?.actorId,'mention actorId',200));}
  if(raw.replyTo!=null)m.replyTo=requireText(raw.replyTo,'replyTo',200);
  return m;
@@ -199,11 +202,12 @@ async function recall(p){
  const chatKey=canonicalChatKey(p.scope),rt=await getRuntime();await ensureIdentity(rt);
  const query=typeof p.query==='string'?p.query.trim():'',scope=rt.normalizer.scopeLabel(chatKey),facts=memoryCoreOf(rt,factStoreOf(rt)).manual.readStore();if(facts.readOnlyReason)throw new MemoryError('STORAGE_UNAVAILABLE',facts.readOnlyReason,503);
  const lineage=readLineage(rt.dir);if(!lineage.ok)throw new MemoryError('STORAGE_UNAVAILABLE',lineage.error,503);
- const messages=canonicalMessages(input).filter(m=>canonicalChatKey(m.scope)===chatKey),entities=canonicalEntities(input);
+ const sourceMessages=canonicalMessages(input);
+ const messages=sourceMessages.filter(m=>canonicalChatKey(m.scope)===chatKey),entities=canonicalEntities(input);
  const named=mentionedPeople(query,[...rt.normalizer.entities.values(),...entities]);
  const latest=messages.filter(m=>m.role==='user'&&(!p.conversationId||m.conversationId===p.conversationId)).sort((a,b)=>b.timestamp-a.timestamp)[0];
  const actorIds=[...new Set((Array.isArray(p.actorIds)?p.actorIds:[...named.ids,...(latest?.mentions||[]),...messages.map(m=>m.actorId).reverse()]).flatMap(id=>workspace.accounts(id)))];
- const people=actorIds.map(id=>({id,name:canonicalEntities(input).find(e=>e.id===id||e.aliases?.includes(id))?.displayName||id}));
+ const people=actorIds.map(id=>({id,name:entities.find(e=>e.id===id||e.aliases?.includes(id))?.displayName||id}));
  // Raw evidence and impressions stay scoped; profiles can use explicit administrator sharing below.
  const winners=[...facts.slots.values()].filter(r=>r.scope===scope);
  const candidates=buildInjectCandidates({winners,people,normalizer:rt.normalizer,lineage:lineage.entries,nowScope:scope}),items=[];
@@ -239,7 +243,7 @@ async function recall(p){
 // 完整事件行（含 evidenceIds）读一次；老事件行没有该字段 ⇒ audit 直接放行、引用退回 window 级。
 const eventFullRows=new Map(readEventRows({libDir:rt.dir}).rows.map(e=>[e.id,e]));
 const messageById=new Map();
-for(const m of canonicalMessages(input)){let ck='';try{ck=canonicalChatKey(m.scope);}catch{}messageById.set(m.messageId,{...m,chatKey:ck});}
+for(const m of sourceMessages){let ck='';try{ck=canonicalChatKey(m.scope);}catch{}messageById.set(m.messageId,{...m,chatKey:ck});}
 const lookupMessage=id=>messageById.get(String(id));
 const quoteAudit={checked:0,blocked:0,failures:[]};
 // 把 evidenceIds 从完整账本行补到注入用的裁剪行，再跑三重校验；
@@ -265,8 +269,19 @@ if(query){const r=await router.handle({method:'POST',path:'/search',body:{q:quer
 }
  const subjects=subjectSection(memoryCoreOf(rt,factStoreOf(rt)).subjects,scope,query,4);
  for(const d of subjects.subjectDetails)items.push({id:`subject:${d.id||digest(d)}`,text:`${d.knowledgeStatus==='candidate'?'【待确认】':d.authority==='manual'?'【人工修订】':'【来源观察】'}${d.possibleConflict?'【存在不同说法】':''}${d.subject.label} · ${d.aspect}：${d.statement}`,layer:'subject',knowledgeStatus:d.knowledgeStatus||'observed',authority:d.authority||'automatic',possibleConflict:!!d.possibleConflict,sourceRefs:d.provenance||[]});
- const working=canonicalMessages(input).filter(m=>canonicalChatKey(m.scope)===chatKey&&(!p.conversationId||m.conversationId===p.conversationId)).sort((a,b)=>b.timestamp-a.timestamp).slice(0,6).reverse();
+ const working=messages.filter(m=>!p.conversationId||m.conversationId===p.conversationId).sort((a,b)=>b.timestamp-a.timestamp).slice(0,6).reverse();
  for(const m of working)items.push({id:`message:${m.messageId}`,text:`${m.actorId}：${m.text}`,layer:'working',sourceRefs:[{type:'message',id:m.messageId,chatKey,fromTs:m.timestamp,toTs:m.timestamp}]});
+ if(query&&(p.historyLexical===true||p.historyLexical!==false&&p.purpose!=='automatic')){
+  const exclude=new Set(items.flatMap(item=>item.sourceRefs.filter(ref=>ref.type==='message').map(ref=>ref.id)));
+  const limit=Math.min(p.purpose==='automatic'?2:4,Math.max(1,Number(p.limit)||4));
+  for(const {message:m,score} of historyIndex.search(query,{
+   chatKey,conversationId:p.conversationId,exclude,limit,
+  })){
+   items.push({id:`message:${m.messageId}`,text:`[${m.role}] ${m.actorId}: ${Array.from(m.text).slice(0,600).join('')}`,
+    layer:'long-term',matchMethod:'history-lexical',score,
+    sourceRefs:[{type:'message',id:m.messageId,chatKey,fromTs:m.timestamp,toTs:m.timestamp}]});
+  }
+ }
  const sceneState=workspace.state();
  for(const e of workspace.query({scope:p.scope,sceneId:p.sceneId}).filter(e=>p.sceneId||sceneState.scenes[e.sceneId].bindings.some(b=>canonicalChatKey(b)===chatKey)).slice(0,Math.min(8,Math.max(1,Number(p.limit)||4)))){const same=e.sourceScope===chatKey;items.push({id:e.id,text:`${sceneState.scenes[e.sceneId].name} · ${e.kind}：${e.text}`,layer:'scene',sceneId:e.sceneId,status:e.status,sourceRefs:e.evidence.filter(ref=>ref.chatKey===chatKey),sourceScope:same?e.sourceScope:undefined,sourceVisibility:same?'visible':'restricted'});}
  const unique=[...new Map(items.map(i=>[i.id,i])).values()],receiptId=randomUUID();
@@ -283,9 +298,9 @@ async function adoption(p){const r=receipts.get(p.receiptId);if(!r||r.expires<=D
  const ids=fresh.filter(id=>id.startsWith('event:')).map(id=>id.slice(6));
  const docIds=fresh.filter(id=>id.startsWith('document:')).map(id=>id.slice(9)).filter(id=>r.eventIds.has(id));
  const rt=await getRuntime(),rehearsal=bumpEventHits({libDir:rt.dir,ids:[...new Set([...ids,...docIds])],now:Date.now()});fresh.forEach(id=>r.adopted.add(id));return {ok:true,accepted:true,replayed:!fresh.length,rehearsal};}
-async function job(p){const cfg=configuredSettings();if(p.type==='consolidate'){if(!cfg.llmBaseURL||!cfg.llmModel)throw new MemoryError('LLM_UNCONFIGURED','Consolidation requires llmBaseURL and llmModel');const result=await runConsolidateNow({force:true,limit:p.limit,chatKey:p.scope?canonicalChatKey(p.scope):undefined,reason:'v1-job'});if(result.failedWindows>0)throw new MemoryError('CONSOLIDATE_FAILED',result.details?.filter(d=>d.error).map(d=>d.error).join('; ')||'Consolidation failed',502,{result});return result;}
+async function job(p){if(p.type==='history-lexical')return historyIndex.rebuild();const cfg=configuredSettings();if(p.type==='consolidate'){if(!cfg.llmBaseURL||!cfg.llmModel)throw new MemoryError('LLM_UNCONFIGURED','Consolidation requires llmBaseURL and llmModel');const result=await runConsolidateNow({force:true,limit:p.limit,chatKey:p.scope?canonicalChatKey(p.scope):undefined,reason:'v1-job'});if(result.failedWindows>0)throw new MemoryError('CONSOLIDATE_FAILED',result.details?.filter(d=>d.error).map(d=>d.error).join('; ')||'Consolidation failed',502,{result});return result;}
  if(p.type==='index'){const rt=await getRuntime();if(!checkEndpoint(endpointOf(rt.settings)).ok)throw new MemoryError('EMBED_UNCONFIGURED','Indexing requires embedding endpoint and model');return await runIndex({reason:'v1-job'});}throw new MemoryError('INVALID_JOB','type must be consolidate or index');}
-async function status(){const rt=await getRuntime();return {ok:true,messages:canonicalMessages(input).length,entities:canonicalEntities(input).length,background:backgroundStatus,embeddingConfigured:checkEndpoint(endpointOf(rt.settings)).ok,llmConfigured:!!(rt.settings.llmBaseURL&&rt.settings.llmModel),dataRoot:legacy,sourceRoot:input};}
+async function status(){const rt=await getRuntime();return {ok:true,messages:canonicalMessages(input).length,entities:canonicalEntities(input).length,background:backgroundStatus,historyIndex:historyIndex.status(),embeddingConfigured:checkEndpoint(endpointOf(rt.settings)).ok,llmConfigured:!!(rt.settings.llmBaseURL&&rt.settings.llmModel),dataRoot:legacy,sourceRoot:input};}
 async function workspaceOp(p) {
  const {action,admin,...request}=p;
  if(action==='state')return {ok:true,...workspace.state(),accounts:canonicalEntities(input)};

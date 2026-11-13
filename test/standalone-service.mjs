@@ -28,6 +28,9 @@ test('credentials, project isolation, explicit sharing, revocation and adoption'
   const b=(await call(admin,'admin/projects','POST',{projectId:'b'})).body.token;
   for(const sid of ['a','b'])assert.equal((await call(admin,'admin/spaces','POST',{spaceId:sid,owner:sid})).status,200);
   assert.equal((await call(a,'admin/spaces')).status,403);
+  assert.equal((await call(a,'spaces/a/status')).body.canRebuildHistoryIndex,false);
+  assert.equal((await call(admin,'spaces/a/status')).body.canRebuildHistoryIndex,true);
+  assert.equal((await call(a,'spaces/a/jobs','POST',{type:'history-lexical'})).status,403);
   assert.equal((await call(a,'spaces/b/recall','POST',{})).status,403);
   await call(admin,'admin/spaces/b/readers','PUT',{projectIds:['a']});
   assert.equal((await call(a,'spaces/b/messages','POST',{messages:[]})).status,403);

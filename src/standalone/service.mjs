@@ -236,7 +236,7 @@ export function createService({ root, engineFactory = createSpaceEngine, localAd
               // intent 文件删不掉不该让「已经成功的恢复」被报成失败：启动时的重放逻辑是幂等的
               // （destination 已存在就什么都不做），残留只是一个下次启动会顺手清掉的小文件。
               try { fs.unlinkSync(intentFile); } catch { /* 幂等重放兜底 */ }
-              return {...result,destination,spaceId:sid,rollback};
+              return {...result,destination,spaceId:sid,rollback,validated:true};
                 }));
               } catch (error) { failure = error; throw error; }
               finally { finishProgress(failure); }
@@ -336,7 +336,8 @@ export function createService({ root, engineFactory = createSpaceEngine, localAd
           space.readers = [...new Set(body.projectIds)]; saveJson(accessFile, access); return finish({ spaceId: sid });
         }
         const writes = ['messages','entities','memories','jobs','adoptions','discoveries'];
-        permit(access, who, sid, writes.includes(operation) || operation === 'subjects' && method !== 'GET');
+        const readsJob = operation === 'jobs' && method === 'GET' && parts.length === 6;
+        permit(access, who, sid, writes.includes(operation) && !readsJob || operation === 'subjects' && method !== 'GET');
         if (operation === 'discoveries' && parts.length === 5 && method === 'POST') return finish(await serial(sid, () => invoke(sid, 'discover', body)));
         if (operation === 'subjects' && [5,6].includes(parts.length) && method === 'GET') {
           const scope = { kind: url.searchParams.get('scopeKind'), id: url.searchParams.get('scopeId') };
@@ -346,7 +347,15 @@ export function createService({ root, engineFactory = createSpaceEngine, localAd
         if (operation === 'messages' && method === 'POST') return finish(await serial(sid, () => engine(sid).call('ingest', body)));
         if (operation === 'entities' && method === 'PUT') return finish(await serial(sid, () => engine(sid).call('entity', { ...body, entityId: decodeURIComponent(parts[5] || '') })));
         if (operation === 'memories' && method === 'POST') return finish(await serial(sid, () => engine(sid).call('remember', body)));
-        if (operation === 'status' && method === 'GET') return finish(await engine(sid).call('status', {}));
+        if (operation === 'status' && method === 'GET') {
+          const result = await engine(sid).call('status', {});
+          if (result.historyIndex) {
+            const latest = Object.values(state(sid).jobs).filter(job => job.type === 'history-lexical').reverse();
+            const lastJob = latest.find(job => job.status === 'running') ?? latest.find(job => job.status === 'queued') ?? latest[0];
+            if (lastJob) result.historyIndex.lastJob = lastJob;
+          }
+          return finish({ ...result, canRebuildHistoryIndex: who.admin });
+        }
         if (operation === 'recall' && method === 'POST') {
           if (!Array.isArray(body.sharedSpaceIds ?? [])) throw new MemoryError('INVALID_ARGUMENT', 'sharedSpaceIds must be an array');
           const sources = [...new Set([sid, ...(body.sharedSpaceIds || [])])];
@@ -390,7 +399,8 @@ export function createService({ root, engineFactory = createSpaceEngine, localAd
           return { adopted: pending.length, replayed: !pending.length };
         }));
         if (operation === 'jobs' && method === 'POST') {
-          if (!['consolidate','index'].includes(body.type)) throw new MemoryError('INVALID_JOB', 'type must be consolidate or index');
+          if (!['consolidate','index','history-lexical'].includes(body.type)) throw new MemoryError('INVALID_JOB', 'type must be consolidate, index or history-lexical');
+          if (body.type === 'history-lexical' && !who.admin) throw new MemoryError('FORBIDDEN', 'Administrator credential required', 403);
           const result = await serial(sid, async () => {
             const current = state(sid);
             if (body.operationId) { const old = Object.values(current.jobs).find(j => j.operationId === body.operationId); if (old) { if (old.fingerprint !== digest(body)) throw new MemoryError('OPERATION_CONFLICT', 'Job operation conflict', 409); return old; } }
@@ -399,7 +409,14 @@ export function createService({ root, engineFactory = createSpaceEngine, localAd
           });
           setImmediate(() => void runJob(sid, result.id)); return finish({ job: result, jobId: result.id });
         }
-        if (operation === 'jobs' && method === 'GET') { const jobs = state(sid).jobs; if (parts[5]) { const job = jobs[parts[5]]; if (!job) throw new MemoryError('NOT_FOUND', 'Job not found', 404); return finish({ job }); } return finish({ jobs: Object.values(jobs) }); }
+        if (operation === 'jobs' && method === 'GET') {
+          const jobs = state(sid).jobs;
+          if (!parts[5]) return finish({ jobs: Object.values(jobs) });
+          const job = jobs[parts[5]];
+          if (job?.type !== 'history-lexical') permit(access, who, sid, true);
+          if (!job) throw new MemoryError('NOT_FOUND', 'Job not found', 404);
+          return finish({ job });
+        }
         throw new MemoryError('NOT_FOUND', 'Unknown route', 404);
       } catch (error) { return { status: error.status || 500, body: { ok: false, code: error.code || 'INTERNAL_ERROR', error: error.status ? error.message : 'Internal service error' } }; }
       finally { active--; }
