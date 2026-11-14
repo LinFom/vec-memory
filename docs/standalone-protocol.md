@@ -78,3 +78,21 @@ npm run serve:standalone -- --root E:\vec-standalone-data
 Node.js 与 Python 完整示例位于 [examples/standalone](../examples/standalone)。历史库迁移、语义验收及回退导出见 [迁移操作说明](operations/standalone-migration.md)。
 
 非人工事实的 evidenceIds 必须指向已接收、同场合的 user 消息；assistant/system/tool 机器输出不能作为非人工事实证据。自动整理与派生语料也仅消费 user 消息，原始上下文仍保留全部角色。
+
+## Time-qualified memory
+
+`POST /api/v1/spaces/{spaceId}/temporal-memory` adds an explicit observation. The space owner or administrator sends `{operationId, scope, actorId, attribute, messageId, value, effectiveAt?}`. The source must be an accepted user message from that actor in that scope, and the value must occur in its text. Use distinct attributes such as `residence` and `current_location`. The caller is responsible for determining what the statement means. `effectiveAt` is an optional Unix timestamp in milliseconds, supplied only when the statement establishes it. The source message supplies the statement time.
+
+An explicit correction uses the same endpoint with `{operationId, scope, actorId, attribute, messageId, action:"retract", targetId}`. The target is a previous observation ID. A move is recorded as a new observation, so the prior residence remains in history.
+
+`POST /api/v1/spaces/{spaceId}/temporal-memory/query` accepts `{scope, actorId, attribute, view:"current"|"history"}`. Results carry values, statement times, optional effective times, and source references. Current observations are ordered by effective time when known, otherwise by statement time. If the latest applicable observation was retracted or its evidence is unavailable, current is empty pending a new assertion. History omits retracted observations. An authorized client can still look up the original message under the normal rules.
+
+Temporal observations are explicitly registered against existing messages. Legacy chat and fact revisions remain available through their existing paths. This endpoint does not infer observations or move dates from old prose. To transfer usable temporal observations with their sources, use a full backup. Evidence-only restores may lack those message sources, in which case affected observations are withheld.
+
+## Role notes and continuity tasks
+
+POST `/api/v1/spaces/{spaceId}/role-notes` creates a role note with `{operationId, scope, roleId, text, messageId?}`. POST `/api/v1/spaces/{spaceId}/continuity-tasks` creates a transferable task with `{operationId, scope, text, messageId}`. Supplied evidence must be an accepted user message in that scope. The caller owns the interpretation of the evidence.
+
+For either endpoint, send `{operationId, scope, id, expectedRevision, status}` to complete or cancel an open item, including `roleId` for notes. Query via POST to the same endpoint with `/query` appended, sending `{scope, status?, roleId?}`. The default status is open. An authorized space credential can address any scope or role in that space, so the trusted host must bind the actual chat and role before invoking these endpoints.
+
+Backup creation accepts `includeRoleNotes:true` to carry role notes. Use full mode to carry the original message log required by evidence-backed records.

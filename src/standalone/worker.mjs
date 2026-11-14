@@ -1,5 +1,7 @@
+import {openContinuity} from './continuity.mjs';
 import {createOperationQueue} from './operation-queue.mjs';
 import {createHistoryIndex} from './history-index.mjs';
+import {openTemporalMemory} from './temporal-memory.mjs';
 import {graphSimilarity} from '../core/graph-similarity.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -33,6 +35,13 @@ fs.mkdirSync(input,{recursive:true});fs.mkdirSync(legacy,{recursive:true});
 if(!fs.existsSync(path.join(input,'source.json'))) fs.writeFileSync(path.join(input,'source.json'),JSON.stringify({version:1,kind:'canonical'}));
 const log=new DurableLog(path.join(input,'messages.jsonl'),()=>{});
 const historyIndex=createHistoryIndex(root,log);
+const lookupSourceMessage = id => {
+ log.assertReadable();
+ return log.operations.get(digest(id))?.data.message;
+};
+const temporalMemory = openTemporalMemory(path.join(input,'temporal-memory.jsonl'), lookupSourceMessage);
+const roleNotes = openContinuity(path.join(root,'role-notes.jsonl'), lookupSourceMessage, true);
+const tasks = openContinuity(path.join(input,'continuity-tasks.jsonl'), lookupSourceMessage);
 bindCanonicalMessages(input,()=>{log.assertReadable();return log.rows.map(r=>r.data.message);});
 const memoryOperations=new DurableLog(path.join(input,'memory-operations.jsonl'),()=>{});
 const corrections=new DurableLog(path.join(input,'correction-intents.jsonl'),()=>{});
@@ -368,7 +377,18 @@ async function recoverCorrections(){
 }
 const operations={graphEvidence,graphIdentity,graph,relationship,graphMemories,relationBackfill,ingest,entity,remember,discover,subjects,subject,subjectRevision,recall,adoption,job,status,workspace:workspaceOp,person,quiesce:async()=>{paused=true;return {ok:true};},audit:async()=>{relationshipGraph.revisions.assertReadable();graphIdentities.assertReadable();log.assertReadable();memoryOperations.assertReadable();workspace.state();const rt=await getRuntime();if(factStoreOf(rt).readOnlyReason)throw new MemoryError('STORAGE_UNAVAILABLE','Fact store damaged',503);memoryCoreOf(rt,factStoreOf(rt)).manual.items();openSubjectStore(rt.dir).snapshot();const lineage=readLineage(rt.dir);if(!lineage.ok)throw new MemoryError('STORAGE_UNAVAILABLE',lineage.error,503);return {ok:true};}};
 const operationQueue=createOperationQueue(async()=>{await recoverCorrections();await getRuntime();});
+Object.assign(operations, {roleNotesWrite: roleNotes.write, roleNotesQuery: roleNotes.query, tasksWrite: tasks.write, tasksQuery: tasks.query});
+operations.temporalWrite = temporalMemory.write;
+operations.temporalQuery = temporalMemory.query;
+const auditSpace = operations.audit;
+operations.audit = async () => {
+ temporalMemory.audit();
+ roleNotes.audit();
+ tasks.audit();
+ return auditSpace();
+};
 function isReadOnly(operation,p){
+ if(['temporalQuery','roleNotesQuery','tasksQuery'].includes(operation))return true;
  if(['status','graph','graphMemories','graphEvidence','subjects','subject','recall'].includes(operation))return true;
  if(operation==='workspace')return ['state','scenes','query','preview'].includes(p?.action);
  return operation==='person'&&p?.action!=='revision';

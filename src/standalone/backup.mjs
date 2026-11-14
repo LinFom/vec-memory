@@ -91,7 +91,7 @@ function evidenceExcludeKey(name) {
 }
 
 // 只做 lstat，不读内容 —— 体积判定必须发生在任何一次 readFile 之前。
-function collect(root, limit, mode = 'full') {
+function collect(root, limit, mode = 'full', includeRoleNotes = false) {
   if (!fs.existsSync(root)) return {files: [], totalBytes: 0, largest: null, excluded: []};
   const files = []; let totalBytes = 0; let largest = null;
   const excluded = new Map();
@@ -99,6 +99,7 @@ function collect(root, limit, mode = 'full') {
     for (const name of fs.readdirSync(dir).sort()) {
       if (skippedEntry(name)) continue;
       const file = path.join(dir, name), stat = fs.lstatSync(file), relative = prefix + name;
+      if (!includeRoleNotes && /^(?:spaces\/[^/]+\/)?role-notes\.jsonl$/.test(relative)) continue;
       if (stat.isDirectory() && /^(?:spaces\/[^/]+\/)?derived-history$/.test(relative)) continue;
       if (stat.isSymbolicLink()) fail('Symbolic links cannot be backed up');
       if (stat.isDirectory()) { visit(file, relative + '/'); continue; }
@@ -134,13 +135,13 @@ function collect(root, limit, mode = 'full') {
 
 // ---------------------------------------------------------------- v1（同步，兼容保留）
 
-export function createBackup(root, {spaceId, password, mode = 'full'} = {}) {
+export function createBackup(root, {spaceId, password, mode = 'full', includeRoleNotes = false} = {}) {
   if (!spaceId && (typeof password !== 'string' || password.length < 8)) throw new MemoryError('PASSWORD_REQUIRED','Full backups require a password of at least 8 characters');
   if (spaceId && !SPACE_ID_RE.test(spaceId)) fail('Invalid space ID');
   const source = spaceId ? path.join(root,'spaces',spaceId) : root;
   // 先量体积再读文件：超限时不应该已经吃掉 512MB 内存。v1 是兼容路径，默认仍是完整镜像；
   // 证据级只对 v2 是默认（v1 的调用方是旧代码与测试，语义不该被悄悄换掉）。
-  const {files: listing} = collect(source, MAX_INLINE, normalizeBackupMode(mode));
+  const {files: listing} = collect(source, MAX_INLINE, normalizeBackupMode(mode), includeRoleNotes);
   const files = [];
   for (const item of listing) {
     let data = fs.readFileSync(item.file);
@@ -221,14 +222,14 @@ function headerOf({kind, spaceId, createdAt, fileCount, totalBytes, encrypted, s
   return {fixed, header};
 }
 
-export async function createBackupTo(root, destination, {spaceId, password, limit = MAX_STREAM, onProgress, mode} = {}) {
+export async function createBackupTo(root, destination, {spaceId, password, limit = MAX_STREAM, onProgress, mode, includeRoleNotes = false} = {}) {
   const backupMode = normalizeBackupMode(mode);
   if (!spaceId && (typeof password !== 'string' || password.length < 8)) throw new MemoryError('PASSWORD_REQUIRED','Full backups require a password of at least 8 characters');
   if (spaceId && !SPACE_ID_RE.test(spaceId)) fail('Invalid space ID');
   const tick = makeTicker(onProgress);
   tick({phase: 'scan', done: 0, total: 0}, true);
   const source = spaceId ? path.join(root, 'spaces', spaceId) : root;
-  const {files, totalBytes, excluded} = collect(source, limit, backupMode);
+  const {files, totalBytes, excluded} = collect(source, limit, backupMode, includeRoleNotes);
   tick({phase: 'read', done: 0, total: totalBytes}, true);
 
   const encrypted = typeof password === 'string' && password.length > 0;

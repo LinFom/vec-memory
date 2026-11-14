@@ -157,7 +157,7 @@ export function createService({ root, engineFactory = createSpaceEngine, localAd
         const parts = url.pathname.split('/').filter(Boolean).map(decodeURIComponent);
         if (parts[0] !== 'api' || parts[1] !== 'v1') throw new MemoryError('NOT_FOUND', 'Unknown route', 404);
         const finish = value => ({ status: 200, body: { ok: true, ...value } });
-        if (parts[2] === 'version' && method === 'GET') return finish({ protocolVersion: 1, implementationVersion: IMPLEMENTATION_VERSION, capabilities: ['spaces', 'messages', 'entities', 'memories', 'recall', 'adoptions', 'jobs', 'sharing', 'subjects', 'discoveries', 'subject-revisions','backups','scenes','account-links','person-revisions','relationship-graph','relationship-revisions','relation-backfill'] });
+        if (parts[2] === 'version' && method === 'GET') return finish({ protocolVersion: 1, implementationVersion: IMPLEMENTATION_VERSION, capabilities: ['spaces', 'messages', 'entities', 'memories', 'recall', 'adoptions', 'jobs', 'sharing', 'subjects', 'discoveries', 'subject-revisions','backups','scenes','account-links','person-revisions','relationship-graph','relationship-revisions','relation-backfill','temporal-memory','role-notes','continuity-tasks'] });
         if (parts[2] === 'admin') {
           if (!who.admin) throw new MemoryError('FORBIDDEN', 'Administrator credential required', 403);
           if (parts[3] === 'backups') {
@@ -189,7 +189,7 @@ export function createService({ root, engineFactory = createSpaceEngine, localAd
                 try {
                   await exclusive(async () => {
                     if (body.spaceId) permit(access,who,id(body.spaceId));
-                    await runBackupTask('create', {root, destination:file(backupId), spaceId:body.spaceId, password:body.password, mode}, {onProgress: patch => reportProgress(patch)});
+                    await runBackupTask('create', {root, destination:file(backupId), spaceId:body.spaceId, password:body.password, mode, includeRoleNotes:body.includeRoleNotes === true}, {onProgress: patch => reportProgress(patch)});
                   });
                 } catch (error) { failure = error; throw error; }
                 finally { finishProgress(failure, failure ? null : {backupId}); }
@@ -334,6 +334,22 @@ export function createService({ root, engineFactory = createSpaceEngine, localAd
           const space = permit(access, who, sid, true);
           if (!Array.isArray(body.projectIds) || body.projectIds.some(p => !access.projects[p])) throw new MemoryError('INVALID_ARGUMENT', 'Known projectIds required');
           space.readers = [...new Set(body.projectIds)]; saveJson(accessFile, access); return finish({ spaceId: sid });
+        }
+        if (['temporal-memory', 'role-notes', 'continuity-tasks'].includes(operation) && method === 'POST') {
+          const engineOperation = operation === 'temporal-memory' ? 'temporal' : operation === 'role-notes' ? 'roleNotes' : 'tasks';
+          const write = parts.length === 5;
+          if (write || parts.length === 6 && parts[5] === 'query') {
+            permit(access, who, sid, write);
+            if (write) return finish(await serial(sid, () => {
+              const latest = read(accessFile);
+              permit(latest, principal(token, latest, local), sid, true);
+              return invoke(sid, engineOperation + 'Write', body);
+            }));
+            const result = await invoke(sid, engineOperation + 'Query', body);
+            const latest = read(accessFile);
+            permit(latest, principal(token, latest, local), sid);
+            return finish(result);
+          }
         }
         const writes = ['messages','entities','memories','jobs','adoptions','discoveries'];
         const readsJob = operation === 'jobs' && method === 'GET' && parts.length === 6;
