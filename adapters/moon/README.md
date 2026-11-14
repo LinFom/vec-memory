@@ -8,6 +8,8 @@
 
 ## inner-life 1.54.0
 
+会话适配器通过 `notes({kind: 'concern'})` 读取心事，通过 `notes()` 读取念想。写入使用 `writeNote`，生活时间线使用 `day` 和 `writeDay`。内心层沿原有的私聊首轮恢复入口读取这些记录。首版在恢复时显示当前时间前后各 24 小时内按事件时间排序的最后一条生活记录，并标注计划、已发生或虚构。写入由可信宿主显式调用。
+
 宿主启动时用同一个对接实例调用 `installInnerLifeMemory(adapter)`，并在卸载时执行返回的清理函数。它使用 v3.0.62 交付包中 inner-life 实际调用的 `recallFor` / `restoreFor` 门面。
 
 隔离实例启用 inner-life 的 `membusInjectEnabled`，关闭 `eventMemEnabled`，停用原 `moon-membus`、`moon-memory`、`moon-memlib` / `local-memory` 和离线抽取。首次验证可把 `membusGroupEnabled` 设为 false。已有旧门面时安装会失败。保持宿主的通用消息摄入开启。

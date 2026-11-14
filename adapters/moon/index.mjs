@@ -33,9 +33,12 @@ export function createMoonMemoryAdapter({baseURL, spaceId, roleId, token, fetche
       }),
       temporalQuery: ({actorId, attribute, view} = {}) =>
         request('temporal-memory/query', {actorId, attribute, view, scope}),
-      notes: () => request('role-notes/query', {roleId, scope}),
+      notes: ({kind, status} = {}) => request('role-notes/query', {kind, status, roleId, scope}),
+      day: ({dayKind, from, to, status} = {}) =>
+        request('role-notes/query', {kind: 'day', dayKind, from, to, status, roleId, scope}),
       tasks: () => request('continuity-tasks/query', {scope}),
       writeNote: input => request('role-notes', {...input, roleId, scope}),
+      writeDay: input => request('role-notes', {...input, kind: 'day', roleId, scope}),
       writeTask: input => request('continuity-tasks', {...input, scope}),
     };
   }

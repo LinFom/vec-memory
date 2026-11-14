@@ -1,4 +1,6 @@
 const chatKeyPattern = /^(private|group):(.+)$/;
+const dayLabels = {planned: '计划', occurred: '已发生', fictional: '虚构'};
+const dayMs = 24 * 60 * 60 * 1000;
 
 export function installInnerLifeMemory(adapter, host = globalThis) {
   const key = '__MOON_MEMBUS__';
@@ -27,11 +29,22 @@ export function installInnerLifeMemory(adapter, host = globalThis) {
     }),
     restoreFor: input => load(input, async chat => {
       if (!input.chatKey.startsWith('private:')) return [];
-      const [{items: tasks}, {items: notes}] = await Promise.all([chat.tasks(), chat.notes()]);
-      return [...tasks.map(item => ({...item, id: 'task:' + item.id})),
-        ...notes.map(item => ({...item, id: 'note:' + item.id}))]
+      const now = Date.now();
+      const [{items: tasks}, {items: notes}, {items: concerns}, {items: day}] = await Promise.all([
+        chat.tasks(), chat.notes(), chat.notes({kind: 'concern'}),
+        chat.day({from: now - dayMs, to: now + dayMs}),
+      ]);
+      const open = [...tasks.map(item => ({...item, id: 'task:' + item.id})),
+        ...notes.map(item => ({...item, id: 'note:' + item.id})),
+        ...concerns.map(item => ({...item, id: 'concern:' + item.id, text: '心事：' + item.text}))]
         .slice(0, input.limitOpen ?? 3)
         .map(item => ({id: item.id, text: item.text, kind: 'open', sourceRefs: item.sourceRefs}));
+      const latest = day.at(-1);
+      if (latest && dayLabels[latest.dayKind]) {
+        open.push({id: 'day:' + latest.id, text: '她的一天（' + dayLabels[latest.dayKind] + '）：' + latest.text,
+          kind: latest.dayKind === 'planned' ? 'open' : 'event', sourceRefs: latest.sourceRefs});
+      }
+      return open;
     }),
   });
   host[key] = facade;
