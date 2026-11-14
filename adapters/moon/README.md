@@ -13,3 +13,7 @@
 隔离实例启用 inner-life 的 `membusInjectEnabled`，关闭 `eventMemEnabled`，停用原 `moon-membus`、`moon-memory`、`moon-memlib` / `local-memory` 和离线抽取。首次验证可把 `membusGroupEnabled` 设为 false。已有旧门面时安装会失败。保持宿主的通用消息摄入开启。
 
 相关记忆只消费当前会话可追溯到原消息的候选，使用自动召回策略。未完事项仅从收到的私聊会话恢复。请求失败返回空命中，不启用旧记忆库。当前模块由启动层显式安装。
+
+### 洛版加载
+
+将本目录复制到洛版的插件目录，插件 ID 为 moon-vec-memory。按洛版既有流程信任并启用该本地插件，设置 vec-memory URL、空间 ID 和角色 ID。以启动进程的 MOON_VEC_MEMORY_TOKEN 环境变量提供该空间的项目凭据。启用时安装门面，停用时释放门面。

@@ -1,0 +1,27 @@
+{
+  "id": "moon-vec-memory",
+  "name": "Moon vec-memory",
+  "version": "0.1.0",
+  "apiVersion": 1,
+  "entry": "host.mjs",
+  "enabledByDefault": false,
+  "settings": {
+    "baseURL": "http://127.0.0.1:8088",
+    "spaceId": "",
+    "roleId": ""
+  },
+  "configSchema": {
+    "baseURL": {
+      "type": "string",
+      "label": "vec-memory URL"
+    },
+    "spaceId": {
+      "type": "string",
+      "label": "Space ID"
+    },
+    "roleId": {
+      "type": "string",
+      "label": "Stable role ID"
+    }
+  }
+}
