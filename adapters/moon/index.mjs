@@ -28,7 +28,9 @@ export function createMoonMemoryAdapter({baseURL, spaceId, roleId, token, fetche
     if (!scopeKinds.has(kind) || typeof id !== 'string' || !id.trim()) throw new TypeError('Invalid conversation scope');
     const scope = {kind, id: id.trim()};
     return {
-      recall: ({query, limit} = {}) => request('recall', {query, limit, scope, purpose: 'query'}),
+      recall: ({query, limit, mode, automatic = false} = {}) => request('recall', {
+        query, limit, mode, scope, purpose: automatic ? 'automatic' : 'query',
+      }),
       temporalQuery: ({actorId, attribute, view} = {}) =>
         request('temporal-memory/query', {actorId, attribute, view, scope}),
       notes: () => request('role-notes/query', {roleId, scope}),

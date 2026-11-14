@@ -30,3 +30,31 @@ test('adapter surfaces service errors without falling back to another store', as
   });
   await assert.rejects(adapter.forConversation({kind:'group',id:'g'}).tasks(), {status:403,code:'FORBIDDEN'});
 });
+
+test('inner-life facade returns scoped hits, restores only private continuity, and releases its slot', async () => {
+  const {installInnerLifeMemory} = await import('./inner-life.mjs');
+  const host = {};
+  const adapter = {forConversation(scope) {
+    assert.equal(scope.id, 'a');
+    return {
+      async recall(request) {
+        assert.equal(request.automatic, true);
+        return {items: [
+          {id:'match', text:'Pick a book', sourceRefs:[{type:'message',chatKey:'private:a'}]},
+          {id:'other', text:'Unavailable', sourceRefs:[{type:'message',chatKey:'private:b'}]},
+        ]};
+      },
+      tasks: async () => ({items:[{id:'same',text:'Choose book'}]}),
+      notes: async () => ({items:[{id:'same',text:'Read sample'}]}),
+    };
+  }};
+  const remove = installInnerLifeMemory(adapter, host);
+  const bridge = host.__MOON_MEMBUS__;
+  assert.throws(() => installInnerLifeMemory(adapter, host));
+  assert.deepEqual((await bridge.recallFor({chatKey:'private:a',query:'book'})).hits.map(x => x.id), ['match']);
+  assert.deepEqual((await bridge.restoreFor({chatKey:'private:a'})).hits.map(x => x.id), ['task:same','note:same']);
+  assert.deepEqual((await bridge.restoreFor({chatKey:'group:a'})).hits, []);
+  assert.deepEqual((await bridge.restoreFor({chatKey:'private:b'})).hits, []);
+  remove();
+  assert.equal(host.__MOON_MEMBUS__, undefined);
+});

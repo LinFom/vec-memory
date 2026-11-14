@@ -5,3 +5,11 @@
 `recall` 提供主动查询，`temporalQuery` 区分现状与历史，`notes` 和 `tasks` 读取当前会话的开放事项。写入方法沿用服务的操作 ID 与修订规则。请求超时或失败会抛错，宿主可在该轮略过记忆材料。避免把第二套聊天记忆作为失败回退。
 
 接入原运行包前，在隔离实例停用原来的聊天抽取与注入路径，确认 inner-life 的取证入口只调用该模块。当前交付可由宿主导入，原插件入口仍待实际联调。
+
+## inner-life 1.54.0
+
+宿主启动时用同一个对接实例调用 `installInnerLifeMemory(adapter)`，并在卸载时执行返回的清理函数。它使用 v3.0.62 交付包中 inner-life 实际调用的 `recallFor` / `restoreFor` 门面。
+
+隔离实例启用 inner-life 的 `membusInjectEnabled`，关闭 `eventMemEnabled`，停用原 `moon-membus`、`moon-memory`、`moon-memlib` / `local-memory` 和离线抽取。首次验证可把 `membusGroupEnabled` 设为 false。已有旧门面时安装会失败。保持宿主的通用消息摄入开启。
+
+相关记忆只消费当前会话可追溯到原消息的候选，使用自动召回策略。未完事项仅从收到的私聊会话恢复。请求失败返回空命中，不启用旧记忆库。当前模块由启动层显式安装。
