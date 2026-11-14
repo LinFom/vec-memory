@@ -46,6 +46,42 @@ bindCanonicalMessages(input,()=>{log.assertReadable();return log.rows.map(r=>r.d
 const memoryOperations=new DurableLog(path.join(input,'memory-operations.jsonl'),()=>{});
 const corrections=new DurableLog(path.join(input,'correction-intents.jsonl'),()=>{});
 const workspace=new SceneMemory(input);let paused=false;
+function channelScope(chatKey) {
+  const split = chatKey.indexOf(':');
+  return {kind:chatKey.slice(0,split),id:chatKey.slice(split+1)};
+}
+const sceneCulture = {
+  context(chatKey) {
+    return workspace.query({scope:channelScope(chatKey),sceneId:chatKey})
+      .filter(entry => entry.sourceScope === chatKey)
+      .slice(0,12).map(({kind,text}) => ({kind,text:text.slice(0,220)}));
+  },
+  async apply(win, candidates, windowId) {
+    const scope = channelScope(win.chatKey), sceneId = win.chatKey;
+    const frozen = new Set(win.rows.map(row => String(row.id)));
+    const messages = new Map(canonicalMessages(input).filter(message =>
+      message.role === 'user' && frozen.has(message.messageId) && canonicalChatKey(message.scope) === sceneId
+    ).map(message => [message.messageId, message]));
+    const accepted = candidates.slice(0,4).flatMap(candidate => {
+      if (!['meme','term','topic','rule'].includes(candidate?.kind) ||
+          typeof candidate.text !== 'string' || !candidate.text.trim() || candidate.text.length > 220 ||
+          !Array.isArray(candidate.evidenceIds) || !candidate.evidenceIds.length || candidate.evidenceIds.length > 6 ||
+          !candidate.evidenceIds.every(id => messages.has(id))) return [];
+      const ids = [...new Set(candidate.evidenceIds)].sort();
+      if (candidate.kind === 'topic' && ids.length < 2) return [];
+      return [{kind:candidate.kind,text:candidate.text.trim(),ids}];
+    });
+    if (!accepted.length) return;
+    workspace.ensureScene({operationId:'culture-scene:'+digest(sceneId),sceneId,scope});
+    const manual = new Set(workspace.query({scope,sceneId}).filter(entry => entry.authority === 'manual')
+      .map(entry => digest([sceneId,entry.kind,entry.text.normalize('NFKC').trim()])));
+    for (const {kind,text,ids} of accepted) {
+      if (manual.has(digest([sceneId,kind,text.normalize('NFKC').trim()]))) continue;
+      workspace.entry({operationId:'culture:'+digest([sceneId,windowId,kind,text,ids]),sceneId,scope,kind,text},
+        {evidence:ids.map(id => ({type:'message',id,chatKey:sceneId}))});
+    }
+  }
+};
 const relationshipGraph=openRelationshipGraph(input);
 const graphIdentities=new DurableLog(path.join(input,'graph-identities.jsonl'),()=>{});
 function graphIdentity(p){
@@ -307,7 +343,7 @@ async function adoption(p){const r=receipts.get(p.receiptId);if(!r||r.expires<=D
  const ids=fresh.filter(id=>id.startsWith('event:')).map(id=>id.slice(6));
  const docIds=fresh.filter(id=>id.startsWith('document:')).map(id=>id.slice(9)).filter(id=>r.eventIds.has(id));
  const rt=await getRuntime(),rehearsal=bumpEventHits({libDir:rt.dir,ids:[...new Set([...ids,...docIds])],now:Date.now()});fresh.forEach(id=>r.adopted.add(id));return {ok:true,accepted:true,replayed:!fresh.length,rehearsal};}
-async function job(p){if(p.type==='history-lexical')return historyIndex.rebuild();const cfg=configuredSettings();if(p.type==='consolidate'){if(!cfg.llmBaseURL||!cfg.llmModel)throw new MemoryError('LLM_UNCONFIGURED','Consolidation requires llmBaseURL and llmModel');const result=await runConsolidateNow({force:true,limit:p.limit,chatKey:p.scope?canonicalChatKey(p.scope):undefined,reason:'v1-job'});if(result.failedWindows>0)throw new MemoryError('CONSOLIDATE_FAILED',result.details?.filter(d=>d.error).map(d=>d.error).join('; ')||'Consolidation failed',502,{result});return result;}
+async function job(p){if(p.type==='history-lexical')return historyIndex.rebuild();const cfg=configuredSettings();if(p.type==='consolidate'){if(!cfg.llmBaseURL||!cfg.llmModel)throw new MemoryError('LLM_UNCONFIGURED','Consolidation requires llmBaseURL and llmModel');const result=await runConsolidateNow({force:true,limit:p.limit,chatKey:p.scope?canonicalChatKey(p.scope):undefined,reason:'v1-job',sceneCulture:cfg.sceneCultureEnabled===true?sceneCulture:null});if(result.failedWindows>0)throw new MemoryError('CONSOLIDATE_FAILED',result.details?.filter(d=>d.error).map(d=>d.error).join('; ')||'Consolidation failed',502,{result});return result;}
  if(p.type==='index'){const rt=await getRuntime();if(!checkEndpoint(endpointOf(rt.settings)).ok)throw new MemoryError('EMBED_UNCONFIGURED','Indexing requires embedding endpoint and model');return await runIndex({reason:'v1-job'});}throw new MemoryError('INVALID_JOB','type must be consolidate or index');}
 async function status(){const rt=await getRuntime();return {ok:true,messages:canonicalMessages(input).length,entities:canonicalEntities(input).length,background:backgroundStatus,historyIndex:historyIndex.status(),embeddingConfigured:checkEndpoint(endpointOf(rt.settings)).ok,llmConfigured:!!(rt.settings.llmBaseURL&&rt.settings.llmModel),dataRoot:legacy,sourceRoot:input};}
 async function workspaceOp(p) {

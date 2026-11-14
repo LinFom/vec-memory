@@ -184,6 +184,7 @@ export const DEFAULT_SETTINGS = {
   // `consolidateEnabled` 缺省 **false**：整理要调模型（花钱），必须显式开 ——
   // 与 `llmEndpointKind` 的 fail-closed 同理，"自动花你的钱"不能是默认行为。
   consolidateEnabled: false,
+  sceneCultureEnabled: false,
   consolidateIntervalMin: 0,          // 0 = 用 `consolidateIntervalMinDefault`（30 分钟）
   consolidateIntervalMinDefault: 30,
   consolidateWindowMsgs: 120,         // 一个窗口最多几条消息

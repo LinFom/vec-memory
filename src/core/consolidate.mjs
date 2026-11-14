@@ -506,8 +506,9 @@ function normalizeConsolidateJson(obj, genericIds = false) {
   }
   if (Object.hasOwn(obj,'observations') && !Array.isArray(obj.observations)) return {ok:false,error:'observations must be an array',events:[],people:[]};
   if (Object.hasOwn(obj,'discoveries') && !Array.isArray(obj.discoveries)) return {ok:false,error:'discoveries must be an array',events:[],people:[]};
+  if (Object.hasOwn(obj,'sceneCulture') && !Array.isArray(obj.sceneCulture)) return {ok:false,error:'sceneCulture must be an array',events:[],people:[]};
   if(Object.hasOwn(obj,'relations')&&!Array.isArray(obj.relations))return {ok:false,error:'relations must be an array',events:[],people:[]};
-  return { ok: true, events, people, ...(Array.isArray(obj.relations)?{relations:obj.relations}:{}), ...(Array.isArray(obj.observations) ? {observations:obj.observations} : {}), ...(Array.isArray(obj.discoveries) ? {discoveries:obj.discoveries} : {}) };
+  return { ok: true, events, people, ...(Array.isArray(obj.sceneCulture)?{sceneCulture:obj.sceneCulture}:{}), ...(Array.isArray(obj.relations)?{relations:obj.relations}:{}), ...(Array.isArray(obj.observations) ? {observations:obj.observations} : {}), ...(Array.isArray(obj.discoveries) ? {discoveries:obj.discoveries} : {}) };
 }
 
 // ── 落库：事件 ───────────────────────────────────────────────────────────
@@ -1505,6 +1506,13 @@ async function runConsolidateOnce(deps = {}, opts = {}) {
         msgCount: win.msgCount,
         transcript
       });
+      if (opts.sceneCulture && /^(group|channel):/.test(win.chatKey)) {
+        prompt.system += '\nFor channels, optionally add a sceneCulture array of at most four objects with kind (meme, term, topic or rule), text and evidenceIds. Record recurring local usage or explicit rules. Do not infer personal relationships, copy private details or treat a question or joke as a rule. Cite same-window user messages only.';
+        prompt.user += '\nChannel evidence:\n' + win.rows.filter(r => !r.self && (!r.role || r.role === 'user'))
+          .map(r => JSON.stringify({id:String(r.id), text:String(r.text || '').slice(0, 1000)})).join('\n');
+        const existing = opts.sceneCulture.context(win.chatKey);
+        if (existing.length) prompt.user += '\nExisting channel entries (for deduplication only): ' + JSON.stringify(existing);
+      }
       if (isCanonicalSource(sourceRoot)) {
         prompt.system = prompt.system.replaceAll('QQ 号','主体 ID').replaceAll('号码','主体 ID').replaceAll('qq 必须','actorId 必须').replaceAll('\"qq\"','\"actorId\"');
         prompt.system += '\n主体标识可以是任意字符串。people 使用 actorId，必须逐字复制下方允许的 actorId；不得猜测新身份。';
@@ -1606,6 +1614,9 @@ async function runConsolidateOnce(deps = {}, opts = {}) {
         const relationRows=resume?evidence.rows.filter(r=>frozenIds.has(String(r.id))):win.rows;
         if(resume&&relationRows.length!==frozenIds.size)throw new Error('Frozen relationship evidence is unavailable');
         openRelationshipGraph(sourceRoot).extract(parsed.relations,{rows:relationRows,entities:canonicalEntities(sourceRoot),windowId:eventIdOf(win)});
+      }
+      if (opts.sceneCulture && parsed.sceneCulture?.length && /^(group|channel):/.test(win.chatKey)) {
+        await opts.sceneCulture.apply(win, parsed.sceneCulture, eventIdOf(win));
       }
       advanceCursor({ libDir, state, chatKey: win.chatKey, toTs: win.toTs });
       delete pending[win.chatKey];

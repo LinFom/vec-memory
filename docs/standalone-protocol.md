@@ -98,3 +98,8 @@ For either endpoint, send `{operationId, scope, id, expectedRevision, status}` t
 Role notes accept `kind: "thought"` (念想), `"concern"` (心事), or `"day"` (她的一天). Writes and queries with no kind keep the legacy thought behavior. Day entries require `dayKind: "planned" | "occurred" | "fictional"` and `at` as UTC epoch milliseconds. Occurred entries require a same-chat user message as evidence. To record an open plan as occurred, write its ID and expected revision, `operationId`, `dayKind: "occurred"`, the actual `at`, and the evidence `messageId`. The query returns the current revision. For a day query, filter by optional `dayKind`, inclusive `from`, and exclusive `to`. Results are ordered by `at`. The service checks referenced messages again on reads. Include role notes in the backup to carry all three kinds.
 
 Backup creation accepts `includeRoleNotes:true` to carry role notes. Use full mode to carry the original message log required by evidence-backed records.
+
+
+### Automatic channel impressions
+
+Set the space setting `sceneCultureEnabled` to true to extract channel culture during existing consolidation jobs. Scheduled extraction also requires `consolidateEnabled`. This uses the configured consolidation model and job cadence. The extraction runs on group and channel windows and may add up to four short meme, term, topic or rule entries per window. Each stored entry requires accepted user message IDs in that exact window and channel. Entries use the existing scene APIs and evidence rules. They are scoped observations and cannot automatically become confirmed or shared entries. Disable the setting to stop new extraction. Existing entries remain available for inspection and correction.
