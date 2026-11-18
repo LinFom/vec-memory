@@ -60,24 +60,18 @@ let indexJob = null;
 // 那要求本文件物理上住在 <宿主>/plugins/<id>/ 里。拆仓后本文件不再知道自己在哪，
 // 改由适配层在启动时 bindHost() 注入**同一对模块**，因此在宿主场景下行为完全等价。
 // 注入缺席 ⇒ 返回 null ⇒ 各调用点走原有兜底分支，与"动态 import 失败"一致。
-async function coreConfig() {
-  return hostConfig();
-}
-
-async function coreSettings() {
-  return hostSettings();
-}
-
-/** 读取本插件的配置（与 manifest.settings 合并后的形状）。 */
-async function pluginSettings() {
-  const mod = await coreSettings();
-  if (mod?.getSkillConfig) {
-    try {
-      const explicit = mod.getSkillConfig(PLUGIN_ID, {});
-      return { ...mod.getSkillConfig(PLUGIN_ID, DEFAULT_SETTINGS), _profileCrossScopeExplicit: Object.hasOwn(explicit || {}, 'profileCrossScope') };
-    } catch { /* 落到下面的默认值 */ }
+function pluginSettings(fallback) {
+  const settings = hostSettings();
+  if (!settings?.getSkillConfig) return fallback;
+  try {
+    const explicit = settings.getSkillConfig(PLUGIN_ID, {});
+    return {
+      ...settings.getSkillConfig(PLUGIN_ID, DEFAULT_SETTINGS),
+      _profileCrossScopeExplicit: Object.hasOwn(explicit || {}, 'profileCrossScope'),
+    };
+  } catch {
+    return fallback;
   }
-  return { ...DEFAULT_SETTINGS, _profileCrossScopeExplicit: false };
 }
 
 /**
@@ -88,10 +82,7 @@ async function pluginSettings() {
  * 端点、别称都改了却"没生效"，而且**不报错**。
  */
 export async function refreshSettings(rt) {
-  const mod = await coreSettings();
-  if (mod?.getSkillConfig) {
-    try { rt.settings = { ...mod.getSkillConfig(PLUGIN_ID, DEFAULT_SETTINGS), _profileCrossScopeExplicit: Object.hasOwn(mod.getSkillConfig(PLUGIN_ID, {}) || {}, 'profileCrossScope') }; } catch { /* 用旧配置 */ }
-  }
+  rt.settings = pluginSettings(rt.settings);
   return rt.settings;
 }
 
@@ -267,7 +258,7 @@ export function endpointOf(settings) {
 }
 
 export async function dataDir() {
-  const cfg = await coreConfig();
+  const cfg = hostConfig();
   if (cfg?.DATA_DIR) return path.join(cfg.DATA_DIR, 'memory-vec');
   // 兜底：插件目录的兄弟位置（绝不写，只保证不崩）
   return path.join(hostFallbackRoot(), 'data', 'memory-vec');
@@ -280,17 +271,12 @@ export async function dataDir() {
  * 没配 SOURCE_DIR 时两者同根 —— 兼容旧部署（服务直接跑在宿主 data 上）。
  */
 export async function dataRoot() {
-  const cfg = await coreConfig();
-  if (cfg?.SOURCE_DIR) return cfg.SOURCE_DIR;
-  if (cfg?.DATA_DIR) return cfg.DATA_DIR;
-  return path.join(hostFallbackRoot(), 'data');
+  const cfg = hostConfig();
+  return cfg?.SOURCE_DIR || cfg?.DATA_DIR || path.join(hostFallbackRoot(), 'data');
 }
 
 export async function chunksDir() {
-  const cfg = await coreConfig();
-  const root = cfg?.SOURCE_DIR || cfg?.DATA_DIR;
-  if (root) return path.join(root, 'memory-v2', 'chunks');
-  return path.join(hostFallbackRoot(), 'data', 'memory-v2', 'chunks');
+  return path.join(await dataRoot(), 'memory-v2', 'chunks');
 }
 
 // ── 身份边界（归一化器 + 词表 + 观察窗）──────────────────────────────────
@@ -705,7 +691,7 @@ export async function getRuntime() {
   // 而不是"改动生效要等重启宿主"。入口只有这一处，别再散落到各个路由里。
   if (runtime) { await refreshSettings(runtime); return runtime; }
   const dir = await dataDir();
-  const settings = await pluginSettings();
+  const settings = pluginSettings({ ...DEFAULT_SETTINGS, _profileCrossScopeExplicit: false });
   const policyBaseline = loadPolicyBaseline(dir);
   const store = openActiveVectors(dir);
   // 归一化器是本机件，落在 <DATA_DIR>/memory-vec/normalizer/：
@@ -1602,7 +1588,7 @@ export async function runGraphScan(rt, { force = false, k = 6, scope = '', dataD
 
 /** 从核心配置里取一个可预填的端点（宿主 provider 的第一个）。 */
 export async function presetEndpoint() {
-  const cfg = await coreConfig();
+  const cfg = hostConfig();
   const providers = cfg?.getConfig?.()?.providers;
   if (!providers || typeof providers !== 'object') return null;
   for (const p of Object.values(providers)) {

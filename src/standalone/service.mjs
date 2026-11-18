@@ -23,6 +23,18 @@ export function saveJson(file, value) {
 }
 function read(file, fallback) { return fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : fallback; }
 
+async function trackBackup(action, label, run, extra) {
+  beginProgress(action, label);
+  try {
+    const result = await run();
+    finishProgress(null, extra);
+    return result;
+  } catch (error) {
+    finishProgress(error);
+    throw error;
+  }
+}
+
 export function initialize(root) {
   root = path.resolve(root);
   if (fs.existsSync(path.join(root, 'access.json'))) throw new Error('Already initialized');
@@ -112,6 +124,13 @@ export function createService({ root, engineFactory = createSpaceEngine, localAd
     if (who.admin || space.owner === who.projectId || !write && space.readers.includes(who.projectId)) return space;
     throw new MemoryError('FORBIDDEN', 'Space permission denied', 403);
   }
+  function updateReaders(access, space, projectIds) {
+    if (!Array.isArray(projectIds) || projectIds.some(project => !access.projects[project])) {
+      throw new MemoryError('INVALID_ARGUMENT', 'Known projectIds required');
+    }
+    space.readers = [...new Set(projectIds)];
+    saveJson(accessFile, access);
+  }
   async function runJob(sid, jobId) {
     if (closed || maintenance) return;
     await serial(sid, async () => {
@@ -137,12 +156,12 @@ export function createService({ root, engineFactory = createSpaceEngine, localAd
   }
   return {
     async handle({ method = 'GET', path: requestPath, token, body = {}, local = false }) {
-      const preUrl = new URL(requestPath, 'http://localhost');
-      const preParts = preUrl.pathname.split('/').filter(Boolean).map(decodeURIComponent);
+      const url = new URL(requestPath, 'http://localhost');
+      const parts = url.pathname.split('/').filter(Boolean).map(decodeURIComponent);
       // 进度查询故意放在维护闸之前、且不计入 active：
       //   ① 备份/恢复全程 maintenance=true，放到闸后前端永远读不到进度，只能看到 503；
       //   ② 计入 active 会让 exclusive() 的「排空在跑请求」一直等到轮询不再进来，进而互相等死。
-      if (method === 'GET' && preParts[0]==='api' && preParts[1]==='v1' && preParts[2]==='admin' && preParts[3]==='backups' && preParts[4]==='progress' && preParts.length===5) {
+      if (method === 'GET' && parts.length === 5 && parts.join('/') === 'api/v1/admin/backups/progress') {
         const access = read(accessFile);
         const who = principal(token, access, local);
         if (!who.admin) return {status:403,body:{ok:false,code:'FORBIDDEN',error:'Administrator credential required'}};
@@ -153,9 +172,12 @@ export function createService({ root, engineFactory = createSpaceEngine, localAd
       try {
         if (closed) throw new MemoryError('UNAVAILABLE', 'Service is closed', 503);
         const access = read(accessFile), who = principal(token, access, local);
-        const url = new URL(requestPath, 'http://localhost');
-        const parts = url.pathname.split('/').filter(Boolean).map(decodeURIComponent);
         if (parts[0] !== 'api' || parts[1] !== 'v1') throw new MemoryError('NOT_FOUND', 'Unknown route', 404);
+        function recheckAccess(spaceIds, write = false) {
+          const latest = read(accessFile);
+          const actor = principal(token, latest, local);
+          for (const spaceId of spaceIds) permit(latest, actor, spaceId, write);
+        }
         const finish = value => ({ status: 200, body: { ok: true, ...value } });
         if (parts[2] === 'version' && method === 'GET') return finish({ protocolVersion: 1, implementationVersion: IMPLEMENTATION_VERSION, capabilities: ['spaces', 'messages', 'entities', 'memories', 'recall', 'adoptions', 'jobs', 'sharing', 'subjects', 'discoveries', 'subject-revisions','backups','scenes','account-links','person-revisions','relationship-graph','relationship-revisions','relation-backfill','temporal-memory','role-notes','continuity-tasks'] });
         if (parts[2] === 'admin') {
@@ -173,73 +195,62 @@ export function createService({ root, engineFactory = createSpaceEngine, localAd
               if (body.uploadPath) {
                 // 上传走临时文件：先校验，通过才落到正式文件名。校验放 worker —— 几百 MB 的
                 // gzip 解开算哈希留在主线程会让整个页面变慢。
-                beginProgress('upload', '正在校验上传的备份', 0);
-                try {
-                  await runBackupTask('inspect', {file: body.uploadPath, password: body.password}, {onProgress: patch => reportProgress(patch)});
+                await trackBackup('upload', '正在校验上传的备份', async () => {
+                  await runBackupTask('inspect', {file: body.uploadPath, password: body.password}, {onProgress: reportProgress});
                   fs.renameSync(body.uploadPath, file(backupId));
-                  finishProgress(null, {backupId});
-                } catch (error) { finishProgress(error); throw error; }
+                }, {backupId});
               } else {
                 // 默认证据级：只带记忆与证据。要全量原始记录必须显式说 mode:'full'。
                 const mode = normalizeBackupMode(body.mode);
                 // 进度在 exclusive 之前开始：关引擎/排空在跑请求那几秒也要显示「在动」。
                 const what = body.spaceId ? '正在导出空间备份' : (mode === 'evidence' ? '正在导出证据级备份' : '正在生成完整备份');
-                beginProgress('create', what, 0);
-                let failure = null;
-                try {
-                  await exclusive(async () => {
-                    if (body.spaceId) permit(access,who,id(body.spaceId));
-                    await runBackupTask('create', {root, destination:file(backupId), spaceId:body.spaceId, password:body.password, mode, includeRoleNotes:body.includeRoleNotes === true}, {onProgress: patch => reportProgress(patch)});
-                  });
-                } catch (error) { failure = error; throw error; }
-                finally { finishProgress(failure, failure ? null : {backupId}); }
+                await trackBackup('create', what, () => exclusive(async () => {
+                  if (body.spaceId) permit(access, who, body.spaceId);
+                  await runBackupTask('create', {root, destination:file(backupId), spaceId:body.spaceId, password:body.password, mode, includeRoleNotes:body.includeRoleNotes === true}, {onProgress: reportProgress});
+                }), {backupId});
               }
               return finish({backupId,download:'/api/v1/admin/backups/'+backupId});
             }
             if (parts[4] && parts[5] === 'preview' && method === 'POST') {
-              beginProgress('inspect', '正在校验备份', 0);
-              try {
-                const archive = await runBackupTask('inspect', {file:file(parts[4]),password:body.password}, {onProgress: patch => reportProgress(patch)});
-                finishProgress(null);
-                return finish({kind:archive.kind,files:archive.files.length,totalBytes:archive.totalBytes,checksum:archive.checksum,sourceSpaceId:archive.spaceId,
+              const archive = await trackBackup('inspect', '正在校验备份', () =>
+                runBackupTask('inspect', {file:file(parts[4]),password:body.password}, {onProgress: reportProgress}));
+              return finish({kind:archive.kind,files:archive.files.length,totalBytes:archive.totalBytes,checksum:archive.checksum,sourceSpaceId:archive.spaceId,
                   mode:archive.mode||'full',evidenceOnly:(archive.mode||'full')==='evidence',excluded:archive.excluded||[],automaticTasksSuspendedOnRestore:true});
-              } catch (error) { finishProgress(error); throw error; }
             }
             if (parts[4] && parts[5] === 'restore' && method === 'POST') {
               // 进度在 exclusive 之前就开始：关引擎/排空在跑请求那几秒同样要显示「在动」。
-              beginProgress('restore', '正在准备恢复（暂停后台任务）', 0);
-              let failure = null;
-              try {
-                return finish(await exclusive(async () => {
-              const onProgress = patch => reportProgress(patch);
-              reportProgress({label:'正在校验备份'});
-              const source = file(parts[4]), archive = await inspectAnyFile(source,body.password,onProgress);
-              if (!body.expectedChecksum || body.expectedChecksum !== archive.checksum) throw new MemoryError('BACKUP_CHANGED','Preview and supply its checksum first',409);
-              // 上面这一遍已经验过整份文件（密码 + 校验和），restore 里不必再解压一遍。
-              const verifiedChecksum = archive.checksum;
-              reportProgress({label:'正在恢复文件'});
-              if (archive.kind === 'service') {const result=await restoreAnyFile(source,root+'.restore-'+randomUUID(),{...body,onProgress,verifiedChecksum});reportProgress({phase:'validate',label:'正在校验恢复结果'});await validateRestored(result.destination,'service');return {...result,validated:true};}
-              const sid = id(body.spaceId), owner = id(body.owner);
-              if (!access.projects[owner]) throw new MemoryError('INVALID_OWNER','Known owner required');
-              if (access.spaces[sid] && body.replace !== true) throw new MemoryError('ALREADY_EXISTS','Choose a new space or explicitly replace',409);
-              const destination = path.join(root,'spaces',sid), staging = destination+'.import-'+randomUUID();
-              const result = await restoreAnyFile(source,staging,{...body,onProgress,verifiedChecksum});
-              reportProgress({phase:'validate',label:'正在校验恢复结果'});
-              await validateRestored(staging,'space');
-              const rollback = fs.existsSync(destination) ? destination+'.rollback-'+randomUUID() : null;
-              // Durable intent makes an interrupted pair of renames recoverable on startup.
-              const intentFile=path.join(root,'import-intent.json');
-              saveJson(intentFile,{destination,staging,rollback,sid,owner});
-              if (rollback) fs.renameSync(destination,rollback);
-              fs.renameSync(staging,destination);
-              access.spaces[sid]={owner,readers:[]}; saveJson(accessFile,access);
-              // intent 文件删不掉不该让「已经成功的恢复」被报成失败：启动时的重放逻辑是幂等的
-              // （destination 已存在就什么都不做），残留只是一个下次启动会顺手清掉的小文件。
-              try { fs.unlinkSync(intentFile); } catch { /* 幂等重放兜底 */ }
-              return {...result,destination,spaceId:sid,rollback,validated:true};
-                }));
-              } catch (error) { failure = error; throw error; }
-              finally { finishProgress(failure); }
+              return finish(await trackBackup('restore', '正在准备恢复（暂停后台任务）', () => exclusive(async () => {
+                reportProgress({label:'正在校验备份'});
+                const source = file(parts[4]), archive = await inspectAnyFile(source, body.password, reportProgress);
+                if (!body.expectedChecksum || body.expectedChecksum !== archive.checksum) throw new MemoryError('BACKUP_CHANGED','Preview and supply its checksum first',409);
+                // 上面这一遍已经验过整份文件（密码 + 校验和），restore 里不必再解压一遍。
+                const options = {...body, onProgress: reportProgress, verifiedChecksum: archive.checksum};
+                reportProgress({label:'正在恢复文件'});
+                if (archive.kind === 'service') {
+                  const result = await restoreAnyFile(source, root + '.restore-' + randomUUID(), options);
+                  reportProgress({phase:'validate',label:'正在校验恢复结果'});
+                  await validateRestored(result.destination, 'service');
+                  return {...result, validated: true};
+                }
+                const sid = id(body.spaceId), owner = id(body.owner);
+                if (!access.projects[owner]) throw new MemoryError('INVALID_OWNER','Known owner required');
+                if (access.spaces[sid] && body.replace !== true) throw new MemoryError('ALREADY_EXISTS','Choose a new space or explicitly replace',409);
+                const destination = path.join(root,'spaces',sid), staging = destination+'.import-'+randomUUID();
+                const result = await restoreAnyFile(source,staging,options);
+                reportProgress({phase:'validate',label:'正在校验恢复结果'});
+                await validateRestored(staging,'space');
+                const rollback = fs.existsSync(destination) ? destination+'.rollback-'+randomUUID() : null;
+                // Durable intent makes an interrupted pair of renames recoverable on startup.
+                const intentFile=path.join(root,'import-intent.json');
+                saveJson(intentFile,{destination,staging,rollback,sid,owner});
+                if (rollback) fs.renameSync(destination,rollback);
+                fs.renameSync(staging,destination);
+                access.spaces[sid]={owner,readers:[]}; saveJson(accessFile,access);
+                // intent 文件删不掉不该让「已经成功的恢复」被报成失败：启动时的重放逻辑是幂等的
+                // （destination 已存在就什么都不做），残留只是一个下次启动会顺手清掉的小文件。
+                try { fs.unlinkSync(intentFile); } catch { /* 幂等重放兜底 */ }
+                return {...result,destination,spaceId:sid,rollback,validated:true};
+              })));
             }
           }
           if (parts[3] === 'projects' && parts.length === 4 && method === 'POST') {
@@ -257,10 +268,11 @@ export function createService({ root, engineFactory = createSpaceEngine, localAd
             access.spaces[sid] = { owner, readers: [] }; saveJson(accessFile, access);
             return finish({ spaceId: sid });
           }
-          const sid = id(parts[4]); permit(access, who, sid);
+          const sid = parts[4];
+          const space = permit(access, who, sid);
           if (parts[3] === 'spaces' && parts[5] === 'readers' && method === 'PUT') {
-            if (!Array.isArray(body.projectIds) || body.projectIds.some(p => !access.projects[p])) throw new MemoryError('INVALID_ARGUMENT', 'Known projectIds required');
-            access.spaces[sid].readers = [...new Set(body.projectIds)]; saveJson(accessFile, access); return finish({ spaceId: sid });
+            updateReaders(access, space, body.projectIds);
+            return finish({ spaceId: sid });
           }
           if (parts[3] === 'spaces' && parts[5] === 'settings') {
             const file = path.join(root, 'spaces', sid, 'settings.json');
@@ -284,9 +296,10 @@ export function createService({ root, engineFactory = createSpaceEngine, localAd
         const sid = id(parts[3]), operation = parts[4];
         if(operation==='graph'&&method==='POST') {
           if(!Array.isArray(body.sharedSpaceIds??[])||(body.sharedSpaceIds||[]).length>20)throw new MemoryError('INVALID_ARGUMENT','sharedSpaceIds must be an array (maximum 20)');
-          const sources=[...new Set([sid,...(body.sharedSpaceIds||[])])];sources.forEach(s=>permit(access,who,id(s)));
+          const sources=[...new Set([sid,...(body.sharedSpaceIds||[])])];
+          for (const source of sources) permit(access, who, source);
           const results=await Promise.all(sources.map(async source=>({source,result:await invoke(source,'graph',{...body,admin:who.admin})})));
-          const fresh=read(accessFile,null);sources.forEach(s=>permit(fresh,principal(token,fresh,local),s));
+          recheckAccess(sources);
           return finish({...unionGraphs(results),sources:results.map(r=>({spaceId:r.source,stats:r.result.stats})),range:results[0]?.result.range});
         }
         if(operation==='relationships'&&method==='POST'){
@@ -332,8 +345,8 @@ export function createService({ root, engineFactory = createSpaceEngine, localAd
         }
         if (operation === 'readers' && method === 'PUT') {
           const space = permit(access, who, sid, true);
-          if (!Array.isArray(body.projectIds) || body.projectIds.some(p => !access.projects[p])) throw new MemoryError('INVALID_ARGUMENT', 'Known projectIds required');
-          space.readers = [...new Set(body.projectIds)]; saveJson(accessFile, access); return finish({ spaceId: sid });
+          updateReaders(access, space, body.projectIds);
+          return finish({ spaceId: sid });
         }
         if (['temporal-memory', 'role-notes', 'continuity-tasks'].includes(operation) && method === 'POST') {
           const engineOperation = operation === 'temporal-memory' ? 'temporal' : operation === 'role-notes' ? 'roleNotes' : 'tasks';
@@ -341,13 +354,11 @@ export function createService({ root, engineFactory = createSpaceEngine, localAd
           if (write || parts.length === 6 && parts[5] === 'query') {
             permit(access, who, sid, write);
             if (write) return finish(await serial(sid, () => {
-              const latest = read(accessFile);
-              permit(latest, principal(token, latest, local), sid, true);
+              recheckAccess([sid], true);
               return invoke(sid, engineOperation + 'Write', body);
             }));
             const result = await invoke(sid, engineOperation + 'Query', body);
-            const latest = read(accessFile);
-            permit(latest, principal(token, latest, local), sid);
+            recheckAccess([sid]);
             return finish(result);
           }
         }
@@ -378,8 +389,7 @@ export function createService({ root, engineFactory = createSpaceEngine, localAd
           for (const source of sources) permit(access, who, source);
           const results = await Promise.all(sources.map(async source => ({ source, result: await invoke(source, 'recall', { ...body, sharedSpaceIds: [] }) })));
           // Permissions may have been revoked while an embedding call was in flight.
-          const latestAccess = read(accessFile); const latestWho = principal(token, latestAccess, local);
-          for (const source of sources) permit(latestAccess, latestWho, source);
+          recheckAccess(sources);
           let items = results.flatMap(({source, result}) => (result.items || []).map(item => ({ ...item, id: `${source}:${item.id}`, localId: item.id, spaceId: source })));
           if(body.purpose==='automatic') {
             const leads=new Set(items.filter(i=>['semantic','profile'].includes(i.layer))
@@ -393,8 +403,7 @@ export function createService({ root, engineFactory = createSpaceEngine, localAd
             current.receipts[receiptId] = { projectId: who.projectId, expiresAt: Date.now() + 60000, items, sources: results.map(({source,result}) => ({ spaceId: source, receiptId: result.receiptId })), adopted: [] };
             saveJson(stateFile(sid), current);
           });
-          const finalAccess = read(accessFile), finalWho = principal(token, finalAccess, local);
-          for (const source of sources) permit(finalAccess, finalWho, source);
+          recheckAccess(sources);
           const block=body.purpose==='automatic'?(items.length?'<!--mv-inject-->\n'+items.map(i=>`[${i.spaceId}]【${i.layer}】${i.text}`).join('\n'):''):results.map(({source,result}) => result.block ? `[${source}]\n${result.block}` : '').filter(Boolean).join('\n\n');
           return finish({ items, block, receiptId, actualMode: Object.fromEntries(results.map(({source,result}) => [source,result.actualMode])), degraded:Object.fromEntries(results.filter(({result})=>result.degraded).map(({source,result})=>[source,result.degraded])), sources });
         }
@@ -402,8 +411,7 @@ export function createService({ root, engineFactory = createSpaceEngine, localAd
           const current = state(sid), receipt = current.receipts[body.receiptId];
           if (!receipt || receipt.expiresAt <= Date.now()) throw new MemoryError('INVALID_RECEIPT', 'Receipt missing or expired', 409);
           if (receipt.projectId !== who.projectId) throw new MemoryError('FORBIDDEN', 'Receipt belongs to another project', 403);
-          const fresh = read(accessFile), actor = principal(token, fresh, local);
-          for (const source of receipt.sources) permit(fresh, actor, source.spaceId);
+          recheckAccess(receipt.sources.map(source => source.spaceId));
           const selected = body.itemIds ?? receipt.items.map(item => item.id);
           if (!Array.isArray(selected) || selected.some(itemId => !receipt.items.some(item => item.id === itemId))) throw new MemoryError('INVALID_ARGUMENT', 'Unknown item in receipt');
           const pending = [...new Set(selected)].filter(itemId => !receipt.adopted.includes(itemId));

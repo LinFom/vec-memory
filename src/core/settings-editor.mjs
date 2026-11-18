@@ -80,7 +80,9 @@ function validateValue(f,value) {
     const clean=value.trim();
     if(f.type==='select') {if(f.options.some(([v])=>v===clean))return clean;}
     else if(f.type==='url' && clean) {
-      try {const u=new URL(clean);if(['http:','https:'].includes(u.protocol)&&!u.username&&!u.password&&!u.search&&!u.hash)return clean;} catch {}
+      const url = URL.parse(clean);
+      if (url && ['http:', 'https:'].includes(url.protocol) &&
+          !url.username && !url.password && !url.search && !url.hash) return clean;
     } else return clean;
   }
   throw new MemoryError('INVALID_ARGUMENT',`配置项「${f.label}」的值或范围不正确`);
@@ -108,19 +110,23 @@ export function createFileSettingsEditor(sourceRoot, {io=fs}={}) {
     if(!object(request.patch)||!Object.keys(request.patch).length) throw new MemoryError('INVALID_ARGUMENT','请提供需要修改的配置项');
     const current=read();
     if(current.etag!==request.expectedEtag) throw new MemoryError('STALE_SETTINGS','配置已被其他页面修改，请重新读取并比较草稿',409);
-    const patch={};
-    for(const [key,value] of Object.entries(request.patch)) {
-      const f=fields.get(key);
+    const data = current.data;
+    data.skills ??= {};
+    const settings = data.skills['memory-vec'] ??= {};
+    const changed = [];
+    for (const [key, value] of Object.entries(request.patch)) {
+      const f = fields.get(key);
       if(!f) throw new MemoryError('INVALID_ARGUMENT','请求包含不支持的配置项');
-      patch[key]=validateValue(f,value);
       // An empty password box preserves the old key. Explicit null clears it.
-      if(f.type==='secret'&&value==='') delete patch[key];
-    }
-    const data=current.data;
-    data.skills??={};data.skills['memory-vec']??={};
-    for(const [key,value] of Object.entries(patch)) {
-      if(key==='botName') {data.persona??={};data.persona.botName=value;}
-      else data.skills['memory-vec'][key]=value;
+      if (f.type === 'secret' && value === '') continue;
+      const validated = validateValue(f, value);
+      if (key === 'botName') {
+        data.persona ??= {};
+        data.persona.botName = validated;
+      } else {
+        settings[key] = validated;
+      }
+      changed.push(key);
     }
     const temp=file+'.'+randomUUID()+'.tmp';let fd;
     try {
@@ -136,7 +142,7 @@ export function createFileSettingsEditor(sourceRoot, {io=fs}={}) {
       if(fd!==undefined)io.closeSync(fd);
       if(io.existsSync(temp))io.unlinkSync(temp);
     }
-    return {...view(defaults),changed:Object.keys(patch),restartRequired:Object.keys(patch).some(k=>fields.get(k).restart)};
+    return {...view(defaults),changed, restartRequired: changed.some(key => fields.get(key).restart)};
   }
   return {getMemorySettings:view,updateMemorySettings:update};
 }
