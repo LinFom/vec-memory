@@ -6,7 +6,7 @@ const exactMention=(text,name)=>{
   if(!/^[a-z0-9 _.-]+$/i.test(token))return haystack.includes(token);
   return new RegExp('(^|[^a-z0-9_])'+token.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')+'($|[^a-z0-9_])','i').test(haystack);
 };
-export const DISCOVERY_PROMPT='可额外输出 discoveries:[{kind,label,aliases:[],interpretation,aspect,statement,claimType,evidenceIds:[],quote}]。用于发现此前未登记的新梗、概念、作品、项目、物件。kind=meme/concept/work/project/object/case；interpretation=mention/definition/usage。只有出现名称但没有解释的词用 mention，statement 留空，不因频繁出现就声称它是事实或梗；definition 必须有发言者明确解释名称，usage 必须有具体用法说明。quote 必须逐字摘自证据消息，完整保留名称与解释/用法。statement 只改写证据，不补常识、不猜起源；aspect 可为含义/起源/用法/场景等。aliases 只有消息明确说两个名称指同一事物时填写，不根据近义或相似拼写猜测。每项必须给下方真实 user 消息 evidenceIds；没有发现给空数组。';
+export const DISCOVERY_PROMPT='可额外输出 discoveries:[{kind,label,aliases:[],interpretation,aspect,statement,claimType,evidenceIds:[],quote}]。用于发现此前未登记的新梗、概念、作品、项目、物件。kind=meme/concept/work/project/object/case；interpretation=mention/definition/usage；claimType 仅 fact/opinion/pattern，分别表示事实、观点、反复出现的模式。只有出现名称但没有解释的词用 mention，statement 留空，不因频繁出现就声称它是事实或梗；definition 必须有发言者明确解释名称，usage 必须有具体用法说明。quote 必须逐字摘自证据消息，完整保留名称与解释/用法。statement 只改写证据，不补常识、不猜起源；aspect 可为含义/起源/用法/场景等。aliases 只有消息明确说两个名称指同一事物时填写，不根据近义或相似拼写猜测。每项必须给下方真实 user 消息 evidenceIds；没有发现给空数组。';
 
 export function prepareDiscoveries({win,windowId,scope,discoveries=[],normalize=s=>s}) {
   if(!Array.isArray(discoveries)||discoveries.length>30)fail('discoveries must be an array, max 30');
@@ -38,4 +38,25 @@ export function prepareDiscoveries({win,windowId,scope,discoveries=[],normalize=
 export function applyDiscoveries(subjectStore,requests,win,scope){
   const known=new Map(win.rows.filter(r=>!r.self&&(!r.role||r.role==='user')).map(r=>[String(r.id),r]));
   return requests.map(request=>subjectStore.applyDiscovery(request,{verifyEntry:(entry,s)=>s===scope&&entry.provenance.every(ref=>ref.chatKey===win.chatKey&&known.has(ref.id))&&entry.evidenceIds.every(id=>known.has(id))}));
+}
+
+// Automatic model output can contain one malformed auxiliary candidate among
+// valid events. Keep that candidate for review without blocking the whole chat.
+// Explicit API writes continue to use the strict prepareDiscoveries contract.
+export function prepareModelDiscoveries(options,{reject}={}) {
+  try{return {requests:prepareDiscoveries(options),candidates:options.discoveries,rejected:0};}
+  catch(error){if(!['INVALID_DISCOVERY','INVALID_ARGUMENT'].includes(error.code))throw error;}
+  if(!Array.isArray(options.discoveries)||options.discoveries.length>30)fail('discoveries must be an array, max 30');
+  const requests=[],candidates=[];let rejected=0;
+  for(const [index,candidate]of options.discoveries.entries()){
+    let prepared;
+    try{prepared=prepareDiscoveries({...options,windowId:options.windowId+':candidate:'+index,discoveries:[candidate]});}
+    catch(error){
+      if(!['INVALID_DISCOVERY','INVALID_ARGUMENT'].includes(error.code))throw error;
+      if(typeof reject!=='function')throw error;
+      reject({index,candidate,code:error.code,error:error.message});rejected++;continue;
+    }
+    requests.push(...prepared);candidates.push(candidate);
+  }
+  return {requests,candidates,rejected};
 }

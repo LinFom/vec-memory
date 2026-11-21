@@ -1,0 +1,150 @@
+{
+  "contractVersion": 1,
+  "synthetic": true,
+  "note": "UI fixtures only. Opaque keys/etags/instance IDs must come from actual read responses for live writes. Evidence is a helper fixture, not an implemented HTTP endpoint.",
+  "cases": [
+    {
+      "id": "person-success",
+      "method": "GET",
+      "path": "/memory/person?who=P1",
+      "status": 200,
+      "body": {
+        "ok": true,
+        "instanceId": "library-demo",
+        "contractVersion": 1,
+        "person": {
+          "query": "P1",
+          "labels": [
+            "P1"
+          ]
+        },
+        "scopes": [
+          {
+            "scope": "group:C1",
+            "chatKey": null,
+            "displayName": "group:C1",
+            "mappingStatus": "unknown"
+          }
+        ],
+        "items": [
+          {
+            "key": "P1\u0000\u0000trait\u0000group:C1",
+            "rev": 1,
+            "etag": "opaque-etag-from-server",
+            "kind": "trait",
+            "scope": "group:C1",
+            "itemKey": "职业",
+            "value": "工程师",
+            "originalValue": "工程师",
+            "editable": true,
+            "origin": "machine",
+            "sourceState": "current",
+            "hidden": false,
+            "conflicts": [],
+            "manualRevision": 0,
+            "operationId": null
+          }
+        ]
+      }
+    },
+    {
+      "id": "person-empty",
+      "method": "GET",
+      "path": "/memory/person?who=Unknown",
+      "status": 200,
+      "body": {
+        "ok": true,
+        "instanceId": "library-demo",
+        "contractVersion": 1,
+        "person": {
+          "query": "Unknown",
+          "labels": []
+        },
+        "scopes": [],
+        "items": []
+      }
+    },
+    {
+      "id": "revision-conflict",
+      "method": "POST",
+      "path": "/memory/revisions",
+      "request": {
+        "operationId": "edit-demo-1",
+        "target": {
+          "key": "P1\u0000\u0000trait\u0000group:C1",
+          "itemKey": "职业"
+        },
+        "expectedEtag": "old-etag",
+        "op": "replace",
+        "value": "设计师",
+        "expectedInstanceId": "library-demo"
+      },
+      "status": 409,
+      "body": {
+        "ok": false,
+        "code": "STALE_REVISION",
+        "error": "Fact changed; reload before editing",
+        "currentEtag": "current-etag",
+        "retryable": false,
+        "instanceId": "library-demo",
+        "contractVersion": 1
+      }
+    },
+    {
+      "id": "storage-failure",
+      "method": "POST",
+      "path": "/memory/revisions",
+      "status": 503,
+      "body": {
+        "ok": false,
+        "code": "STORAGE_UNAVAILABLE",
+        "error": "disk full",
+        "retryable": true,
+        "instanceId": "library-demo",
+        "contractVersion": 1
+      }
+    },
+    {
+      "id": "instance-mismatch",
+      "method": "POST",
+      "path": "/memory/revisions",
+      "status": 409,
+      "body": {
+        "ok": false,
+        "code": "INSTANCE_MISMATCH",
+        "error": "Selected library instance does not match this service",
+        "retryable": false,
+        "instanceId": "library-other",
+        "contractVersion": 1
+      }
+    },
+    {
+      "id": "subject-operation-not-ready",
+      "method": "POST",
+      "path": "/subjects/demo/observations",
+      "status": 501,
+      "body": {
+        "ok": false,
+        "code": "FEATURE_UNAVAILABLE",
+        "error": "This subject operation has no verified-source adapter yet",
+        "retryable": false,
+        "instanceId": "library-demo",
+        "contractVersion": 1
+      }
+    },
+    {
+      "id": "evidence-unavailable",
+      "kind": "core-helper-result",
+      "httpImplemented": false,
+      "body": {
+        "ok": true,
+        "key": "P1\u0000\u0000trait\u0000group:C1",
+        "itemKey": "职业",
+        "level": "slot",
+        "state": "unavailable",
+        "references": [],
+        "reason": "No persisted source reference; legacy hashes are not reversible"
+      }
+    }
+  ]
+}

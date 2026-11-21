@@ -1,0 +1,158 @@
+/* 关系星图页 —— 明暗两套变量，靠 <html data-theme> 切。
+   ⚠️ 这里不用任何构建工具、不引外部字体/图标：服务自带页面必须是"双击就能跑"的。 */
+:root[data-theme="dark"] {
+  --bg: #05070f;
+  --bg-2: #0a0f1d;
+  --fg: #e8edf7;
+  --fg-dim: #97a3bb;
+  --fg-dim2: #6b7793;
+  --line: rgba(255,255,255,.10);
+  --line-2: rgba(255,255,255,.18);
+  --panel: rgba(12,18,32,.86);
+  --tooltip: rgba(8,12,24,.94);
+  --accent: #7dd3fc;
+  --ok: #4ade80; --warn: #fbbf24; --bad: #f87171;
+  --space: #05070f;
+}
+:root[data-theme="light"] {
+  --bg: #f4f6fb;
+  --bg-2: #e9edf6;
+  --fg: #131a28;
+  --fg-dim: #55617a;
+  --fg-dim2: #7b869b;
+  --line: rgba(0,0,0,.12);
+  --line-2: rgba(0,0,0,.22);
+  --panel: rgba(255,255,255,.9);
+  --tooltip: rgba(255,255,255,.97);
+  --accent: #0369a1;
+  --ok: #15803d; --warn: #b45309; --bad: #b91c1c;
+  --space: #eef1f8;
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  margin: 0; display: flex; flex-direction: column;
+  background: var(--bg); color: var(--fg);
+  font: 13px/1.55 system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+  overflow: hidden;
+}
+code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11.5px;
+  padding: 1px 4px; border-radius: 4px; background: var(--line); }
+
+/* ── 顶栏 ─────────────────────────────────────────────────────────── */
+.top { display: flex; align-items: center; gap: 18px; flex-wrap: wrap;
+  padding: 10px 16px; border-bottom: 1px solid var(--line); background: var(--bg-2); }
+.brand { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.brand h1 { margin: 0; font-size: 15px; font-weight: 650; letter-spacing: .3px; }
+.brand .sub { margin: 0; color: var(--fg-dim); font-size: 11.5px; }
+.dot { width: 9px; height: 9px; border-radius: 50%; background: var(--fg-dim2); flex: none; }
+.dot.ok { background: var(--ok); box-shadow: 0 0 8px var(--ok); }
+.dot.bad { background: var(--bad); }
+.tools { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-left: auto; }
+.tools input[type=search] { width: 190px; padding: 5px 9px; border-radius: 7px; font: inherit;
+  border: 1px solid var(--line-2); background: var(--panel); color: inherit; }
+.tools input[type=search]:focus { outline: none; border-color: var(--accent); }
+.chk { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: var(--fg-dim); cursor: pointer; white-space: nowrap; }
+button { font: inherit; font-size: 12px; padding: 5px 11px; border-radius: 7px; cursor: pointer;
+  border: 1px solid var(--line-2); background: var(--panel); color: inherit; }
+button:hover { border-color: var(--accent); color: var(--accent); }
+/* 顶栏里的跨页链接（星图 ⇄ 多实例总览）：做成与 button 同款，别引入第二种"可点东西"的外观。 */
+a.nav { font: inherit; font-size: 12px; padding: 5px 11px; border-radius: 7px; cursor: pointer;
+  border: 1px solid var(--line-2); background: var(--panel); color: inherit; text-decoration: none; }
+a.nav:hover { border-color: var(--accent); color: var(--accent); }
+
+/* ── 画布区 ───────────────────────────────────────────────────────── */
+/* ⚠️ 天（画布底色）**不随主题切换** —— 星是发光体，白底上不可能有星空
+   （用户："这看起来不像星空啊"；实测亮色主题下 92.6% 的像素是纯白，星与光晕全被吃掉）。
+   主题管的是**面板 chrome**（顶栏 / 图例 / 页脚），不管这片天。见 starmap.js 的 SKY。
+   画布用 `alpha:false` 且铺满整个 stage ⇒ 真正决定底色的是**画布里那层渐变**，
+   这里给的是它的两个端点（`starmap.js` 在主题切换时读一次）。 */
+:root { --sky-hi: #0e1730; --sky-lo: #03050b; --sky-fg: #e8edf7; }
+.stage { position: relative; flex: 1 1 auto; min-height: 0;
+  background: var(--sky-lo); }
+#cv { display: block; width: 100%; height: 100%; cursor: grab; touch-action: none; }
+#cv.dragging { cursor: grabbing; }
+.tooltip { position: absolute; z-index: 5; max-width: 300px; pointer-events: none;
+  background: var(--tooltip); border: 1px solid var(--line-2); border-radius: 9px;
+  padding: 8px 10px; box-shadow: 0 6px 22px rgba(0,0,0,.35); font-size: 12px; }
+.tooltip .tt-name { font-weight: 650; font-size: 13px; }
+.tooltip .tt-row { color: var(--fg-dim); font-size: 11.5px; margin-top: 3px; }
+.tooltip .tt-k { color: var(--fg-dim2); }
+.legend { position: absolute; left: 14px; bottom: 12px; z-index: 4; max-width: min(560px, 52%);
+  background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 9px 11px;
+  font-size: 11.5px; color: var(--fg-dim); backdrop-filter: blur(6px); }
+/* 图例默认**收起**（ADR-0020，用户 #2："太遮视野了"）—— 角落一个小按钮，点击才弹出。
+   旧版图例占画布左 ~40%（0.84× 时整幅宇宙被压在它后面）。 */
+.legend-toggle { position: absolute; left: 14px; bottom: 12px; z-index: 4;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+  color: var(--fg-dim); font-size: 11.5px; padding: 5px 11px; cursor: pointer; backdrop-filter: blur(6px); }
+.legend-toggle:hover { color: var(--fg); }
+.legend[hidden] { display: none; }
+.legend b { color: var(--fg); }
+.legend .row { display: flex; align-items: center; gap: 7px; margin-top: 4px; }
+.legend .sw { width: 22px; height: 3px; border-radius: 2px; flex: none; }
+.legend .sw.dash { height: 0; border-top: 3px dashed currentColor; }
+.legend .gl { display: inline-flex; align-items: center; gap: 5px; margin-right: 10px; white-space: nowrap; }
+.legend .gldot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+/* 线宽示例（ADR-0016）：一条 22px 的短横，高度就是该档的真实线宽（×0.9 的视觉折让） */
+.legend .glw { width: 22px; border-radius: 3px; flex: none; }
+.legend .cap { color: var(--fg-dim2); }
+/* 倍率指示（ADR-0014 §4）：用户能直接用"比例尺"这个词 ⇒ 看不到当前倍率就没法讨论它。 */
+.zoombadge { position: absolute; right: 14px; bottom: 12px; z-index: 4;
+  display: flex; align-items: center; gap: 8px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+  padding: 5px 10px; backdrop-filter: blur(6px); font-variant-numeric: tabular-nums; }
+.zoombadge b { font-size: 14px; font-weight: 650; min-width: 44px; text-align: right; }
+.zoombadge .track { position: relative; width: 64px; height: 4px; border-radius: 2px;
+  background: var(--line); flex: none; }
+.zoombadge .track > i { position: absolute; top: -2px; left: 0; width: 2px; height: 8px;
+  border-radius: 1px; background: var(--accent); transform: translateX(-1px); }
+.zoombadge span:last-child { font-size: 11px; color: var(--fg-dim2); min-width: 26px; }
+.zoombadge[data-mode="个体"] span:last-child { color: var(--accent); }
+.boot { position: absolute; left: 50%; top: 46%; transform: translate(-50%,-50%);
+  display: flex; align-items: center; gap: 8px; color: var(--fg-dim); font-size: 13px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 10px 16px; }
+.boot.bad { color: var(--bad); border-color: var(--bad); max-width: 560px; text-align: left; line-height: 1.7; }
+.boot[hidden] { display: none; }
+.spin { width: 12px; height: 12px; border: 2px solid var(--line-2); border-top-color: var(--accent);
+  border-radius: 50%; animation: sp .8s linear infinite; }
+@keyframes sp { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .spin { animation: none; } }
+
+/* ── 右侧详情 ─────────────────────────────────────────────────────── */
+.side { position: absolute; right: 14px; top: 14px; width: 316px; max-height: calc(100% - 28px);
+  overflow: auto; z-index: 6; background: var(--panel); border: 1px solid var(--line-2);
+  border-radius: 12px; padding: 12px 13px; backdrop-filter: blur(8px);
+  box-shadow: 0 10px 30px rgba(0,0,0,.30); }
+.side[hidden] { display: none; }
+.side .close { position: absolute; right: 6px; top: 6px; border: 0; background: transparent; font-size: 16px; line-height: 1; padding: 4px 8px; color: var(--fg-dim); }
+.side h2 { margin: 0 0 2px; font-size: 14px; }
+.side .lab { color: var(--fg-dim2); font-size: 11px; text-transform: none; }
+.side dl { display: grid; grid-template-columns: 84px 1fr; gap: 3px 9px; margin: 9px 0; font-size: 12px; }
+.side dt { color: var(--fg-dim2); }
+.side dd { margin: 0; word-break: break-all; }
+.side .note-edit { display: flex; gap: 6px; margin-top: 8px; }
+.side .note-edit input { flex: 1; min-width: 0; padding: 5px 8px; border-radius: 7px; font: inherit;
+  border: 1px solid var(--line-2); background: transparent; color: inherit; }
+.side .hint { color: var(--fg-dim2); font-size: 11px; line-height: 1.6; margin: 6px 0 0; }
+.side .tag { display: inline-block; padding: 1px 6px; border-radius: 5px; font-size: 10.5px;
+  border: 1px solid var(--line-2); color: var(--fg-dim); margin: 0 4px 4px 0; }
+.bar { height: 5px; border-radius: 3px; background: var(--line); overflow: hidden; margin-top: 4px; }
+.bar > i { display: block; height: 100%; background: var(--accent); }
+
+/* ── 底栏 ─────────────────────────────────────────────────────────── */
+.bottom { border-top: 1px solid var(--line); background: var(--bg-2); padding: 8px 16px 10px; }
+.stats { display: flex; gap: 16px; flex-wrap: wrap; font-size: 11.5px; color: var(--fg-dim); }
+.stats b { color: var(--fg); font-variant-numeric: tabular-nums; }
+.fine { margin-top: 5px; color: var(--fg-dim2); font-size: 11px; line-height: 1.65; }
+.fine b { color: var(--fg-dim); }
+
+.top .page-nav { flex:1 0 100%; min-width:0; display:flex; gap:5px; overflow-x:auto; }
+.page-nav .nav { flex:none; padding:5px 10px; border-radius:6px; color:var(--fg-dim); text-decoration:none; }
+.page-nav .nav[aria-current],.page-nav .nav:hover { color:var(--accent); background:var(--panel); }
+.page-nav .nav[aria-current] { box-shadow:inset 0 -2px var(--accent); }
+@media(max-width:700px) {
+  header.top { gap:6px; padding:8px 10px; }
+  .top .tools { margin-left:0; }
+  .top .brand .sub { display:none; }
+}

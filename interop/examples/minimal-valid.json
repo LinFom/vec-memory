@@ -1,0 +1,59 @@
+{
+  "contract": "vec-memory/import@1",
+  "spaceId": "demo",
+  "origin": {
+    "kind": "historical-import",
+    "verified": false,
+    "source": {
+      "locator": "facts.jsonl:1-3",
+      "file": "facts.jsonl",
+      "recordId": "batch-2026-11-07"
+    }
+  },
+  "messages": [
+    {
+      "messageId": "m-001",
+      "conversationId": "chat-a",
+      "actorId": "user-a",
+      "role": "user",
+      "timestamp": "2026-11-07T00:00:00Z",
+      "text": "我喜欢不加糖的茶。",
+      "scope": {"kind": "private", "id": "chat-a"}
+    }
+  ],
+  "entries": [
+    {
+      "id": "entry-001",
+      "kind": "preference",
+      "text": "喜欢不加糖的茶",
+      "scope": {"kind": "private", "id": "chat-a"},
+      "actorId": "user-a",
+      "subject": {"id": "user-a", "displayName": "示例用户", "kind": "person"},
+      "evidenceIds": ["m-001"],
+      "origin": {
+        "kind": "historical-import",
+        "verified": false,
+        "source": {
+          "locator": "facts.jsonl:1",
+          "file": "facts.jsonl",
+          "line": 1,
+          "recordId": "fact-001"
+        }
+      }
+    },
+    {
+      "id": "entry-002",
+      "kind": "event",
+      "text": "周末约好去露营",
+      "scope": {"kind": "group", "id": "team"},
+      "origin": {
+        "kind": "historical-import",
+        "verified": false,
+        "source": {
+          "locator": "stable-record://events/42",
+          "recordId": "event-42"
+        }
+      }
+    }
+  ]
+}

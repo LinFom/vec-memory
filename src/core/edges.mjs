@@ -185,7 +185,7 @@ export function extractScopeEdges(opts = {}) {
   if (!dataDir) throw new Error('extractScopeEdges 需要 dataDir（写清对着哪个数据源查，是本项目纪律）');
   if (!normalizer) throw new Error('extractScopeEdges 需要 normalizer（节点 ID 必须由占位符派生）');
   // ⚠️ `scope` 是一条**独立的身份通道**：节点 `a`/`b` 早就走占位符，`scope` 却一直沿用明文 `chatKey`。
-  //    而私聊的 `chatKey` 就是**对方的明文 QQ**（实测 `private:100000001`）。
+  //    而私聊的 `chatKey` 就是**对方的明文 QQ**（实测 `private:1353446252`）。
   //    本轮把 `scope` 提进产事实级键（ADR-0015）后，它更是**键的一部分** ⇒ 必须落占位符。
   //    ⇒ 缺 `scopeLabel` 就**抛**，而不是退回明文（退回 = 静默重开泄密通道）。
   if (typeof normalizer.scopeLabel !== 'function') {

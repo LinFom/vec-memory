@@ -40,7 +40,7 @@ import { scanCorpus, rankDistribution, appendShadowSnapshot, readShadowSnapshots
 import { extractEdges, EDGE_ALGO_VERSION, DEFAULT_COOC_WINDOW_MS, buildGraphView, buildGraphNodes, filterGraphByScope, extractAtTargets, entityLabel } from './edges.mjs';
 import { refreshGroupNames } from './groupnames.mjs';
 import { FactStoreError, openFactStore } from './factstore.mjs';
-import { runConsolidate, consolidateStatus } from './consolidate.mjs';
+import { runConsolidate, consolidateStatus, readEventRows, embedEventRow } from './consolidate.mjs';
 import { DEFAULT_KEYWORDS_SOURCE } from './keywords.mjs';
 import { iterateArchive } from './vocab.mjs';
 import { clusterCandidates, shouldTrigger } from './extract.mjs';
@@ -60,24 +60,18 @@ let indexJob = null;
 // 那要求本文件物理上住在 <宿主>/plugins/<id>/ 里。拆仓后本文件不再知道自己在哪，
 // 改由适配层在启动时 bindHost() 注入**同一对模块**，因此在宿主场景下行为完全等价。
 // 注入缺席 ⇒ 返回 null ⇒ 各调用点走原有兜底分支，与"动态 import 失败"一致。
-async function coreConfig() {
-  return hostConfig();
-}
-
-async function coreSettings() {
-  return hostSettings();
-}
-
-/** 读取本插件的配置（与 manifest.settings 合并后的形状）。 */
-async function pluginSettings() {
-  const mod = await coreSettings();
-  if (mod?.getSkillConfig) {
-    try {
-      const explicit = mod.getSkillConfig(PLUGIN_ID, {});
-      return { ...mod.getSkillConfig(PLUGIN_ID, DEFAULT_SETTINGS), _profileCrossScopeExplicit: Object.hasOwn(explicit || {}, 'profileCrossScope') };
-    } catch { /* 落到下面的默认值 */ }
+function pluginSettings(fallback) {
+  const settings = hostSettings();
+  if (!settings?.getSkillConfig) return fallback;
+  try {
+    const explicit = settings.getSkillConfig(PLUGIN_ID, {});
+    return {
+      ...settings.getSkillConfig(PLUGIN_ID, DEFAULT_SETTINGS),
+      _profileCrossScopeExplicit: Object.hasOwn(explicit || {}, 'profileCrossScope'),
+    };
+  } catch {
+    return fallback;
   }
-  return { ...DEFAULT_SETTINGS, _profileCrossScopeExplicit: false };
 }
 
 /**
@@ -88,10 +82,7 @@ async function pluginSettings() {
  * 端点、别称都改了却"没生效"，而且**不报错**。
  */
 export async function refreshSettings(rt) {
-  const mod = await coreSettings();
-  if (mod?.getSkillConfig) {
-    try { rt.settings = { ...mod.getSkillConfig(PLUGIN_ID, DEFAULT_SETTINGS), _profileCrossScopeExplicit: Object.hasOwn(mod.getSkillConfig(PLUGIN_ID, {}) || {}, 'profileCrossScope') }; } catch { /* 用旧配置 */ }
-  }
+  rt.settings = pluginSettings(rt.settings);
   return rt.settings;
 }
 
@@ -125,6 +116,24 @@ export const DEFAULT_SETTINGS = {
   // redacted 口径：snippets+summary（宽，实测空表 0/502）· summary（窄，空表 94/502）
   keywordsCaliber: 'snippets+summary',
   topK: 8,
+  // ── 读侧召回策略（票 03）[by:WorkBuddy] ──────────────────────────────
+  // 默认 off = fail-closed；这些键**不产生文档向量**，不进 encodingIdentity、
+  // 不改 sourceHash，因此改它们永远不会触发整库重嵌。
+  // 权重留空 ⇒ RRF 名次融合（无超参）；填 JSON 对象 ⇒ 加权和（先 min-max 归一化）。
+  recallPolicyMode: 'off',
+  recallPolicyWeights: '',
+  recallExposureWindow: 3,
+  recallExposureDecay: 0.6,
+  // ── 票 04 可选 cross-encoder 精排（独立外部 HTTP 服务）[by:WorkBuddy] ──────
+  // 默认关闭（fail-closed）；不内嵌模型、不写任何真值、不进 encodingIdentity/sourceHash，
+  // 因此改这些键永远不会触发整库重嵌。timeoutMs 默认 400ms、硬上限 800ms；
+  // topN=0 表示不设上限（送全部候选）。旧配置缺这些键时由本默认值兜底。
+  rerankEnabled: false,
+  rerankBaseURL: '',
+  rerankApiKey: '',
+  rerankModel: '',
+  rerankTimeoutMs: 400,
+  rerankTopN: 0,
   // 查询侧的指令前缀（非对称编码）。留空用 Qwen3 的官方默认。
   queryInstruction: '',
   // ── M2 注入（ADR-0009，2026-10-10 拍板：人格属性句 · 每人 2 条 · 全群开）──
@@ -166,6 +175,8 @@ export const DEFAULT_SETTINGS = {
   // `consolidateEnabled` 缺省 **false**：整理要调模型（花钱），必须显式开 ——
   // 与 `llmEndpointKind` 的 fail-closed 同理，"自动花你的钱"不能是默认行为。
   consolidateEnabled: false,
+  sceneCultureEnabled: false,
+  reminderTimeZone: 'UTC',
   consolidateIntervalMin: 0,          // 0 = 用 `consolidateIntervalMinDefault`（30 分钟）
   consolidateIntervalMinDefault: 30,
   consolidateWindowMsgs: 120,         // 一个窗口最多几条消息
@@ -179,6 +190,7 @@ export const DEFAULT_SETTINGS = {
   // 单次整理调用的输出上限。推理类模型的思考过程也吃这个预算，
   // 给小了会静默拿到 `content:""`（正文还没开始就被截断）。
   consolidateMaxTokens: 2000,
+  consolidateThinkingMode: 'auto',
   consolidateTimeoutMs: 180000,
   // ── 短期层 / 长期层（ADR-0047 / ADR-0048）──────────────────────────────
   // 事件**不再**一落盘就进向量（那等于零门槛升长期）。攒够 `promoteHits` 次排练才建向量。
@@ -248,7 +260,7 @@ export function endpointOf(settings) {
 }
 
 export async function dataDir() {
-  const cfg = await coreConfig();
+  const cfg = hostConfig();
   if (cfg?.DATA_DIR) return path.join(cfg.DATA_DIR, 'memory-vec');
   // 兜底：插件目录的兄弟位置（绝不写，只保证不崩）
   return path.join(hostFallbackRoot(), 'data', 'memory-vec');
@@ -261,17 +273,12 @@ export async function dataDir() {
  * 没配 SOURCE_DIR 时两者同根 —— 兼容旧部署（服务直接跑在宿主 data 上）。
  */
 export async function dataRoot() {
-  const cfg = await coreConfig();
-  if (cfg?.SOURCE_DIR) return cfg.SOURCE_DIR;
-  if (cfg?.DATA_DIR) return cfg.DATA_DIR;
-  return path.join(hostFallbackRoot(), 'data');
+  const cfg = hostConfig();
+  return cfg?.SOURCE_DIR || cfg?.DATA_DIR || path.join(hostFallbackRoot(), 'data');
 }
 
 export async function chunksDir() {
-  const cfg = await coreConfig();
-  const root = cfg?.SOURCE_DIR || cfg?.DATA_DIR;
-  if (root) return path.join(root, 'memory-v2', 'chunks');
-  return path.join(hostFallbackRoot(), 'data', 'memory-v2', 'chunks');
+  return path.join(await dataRoot(), 'memory-v2', 'chunks');
 }
 
 // ── 身份边界（归一化器 + 词表 + 观察窗）──────────────────────────────────
@@ -686,7 +693,7 @@ export async function getRuntime() {
   // 而不是"改动生效要等重启宿主"。入口只有这一处，别再散落到各个路由里。
   if (runtime) { await refreshSettings(runtime); return runtime; }
   const dir = await dataDir();
-  const settings = await pluginSettings();
+  const settings = pluginSettings({ ...DEFAULT_SETTINGS, _profileCrossScopeExplicit: false });
   const policyBaseline = loadPolicyBaseline(dir);
   const store = openActiveVectors(dir);
   // 归一化器是本机件，落在 <DATA_DIR>/memory-vec/normalizer/：
@@ -830,6 +837,7 @@ export async function runConsolidateNow(opts = {}) {
         user,
         temperature: 0.2,          // 整理要稳定复现，不要发散
         maxTokens: Number(settings.consolidateMaxTokens) || 2000,
+        thinkingMode: settings.consolidateThinkingMode || 'auto',
         timeoutMs: Math.max(10_000, Number(settings.consolidateTimeoutMs) || 180_000)
       }) : null,
       log: (level, msg) => console.warn('[memory-vec]', msg)
@@ -1217,17 +1225,34 @@ export async function runIndex(opts = {}) {
     //     `incompatible` 一律不搬并阻止发布。
     //   · 搬的时候标签写来源声称值、不传 `encoding` —— 不替来源背书，也不冒充重嵌已完成。
     let carried = 0;
+    let reembeddedEvents = 0;
     /** @type {null | {blocked:number, byVerdict:object, sample:object[], reason:string}} */
     let carryBlocked = null;
     let carryByVerdict = { compatible: 0, unknown: 0, incompatible: 0 };
     if (rebuilding && !paused) {
-      const plan = planEventCarry({
+      let plan = planEventCarry({
         sourceMetas: rt.store.metas,
         sourceEncoding: rt.store.index?.encoding ?? null,
         targetIdentity: { model: settings.embedModel, dim: targetStore.index?.dim ?? null, encoding },
         hasTarget: (id) => Boolean(targetStore.get(id)),
         allowUnknown: opts.allowUnknownCarry === true
       });
+      if (opts.reembedEvents === true && plan.blocked.length) {
+        const events = new Map(readEventRows({libDir:rt.dir,strict:true}).rows.map(row=>[row.id,row]));
+        const missing=plan.blocked.filter(row=>!events.has(row.id));
+        if(missing.length)throw new Error(`Cannot re-embed ${missing.length} events without their original event records`);
+        generation?.progress?.({phase:'reembed-events',eventTotal:plan.blocked.length,eventDone:0});
+        for(const row of plan.blocked){
+          await embedEventRow(events.get(row.id),{store:targetStore,settings,normalizer:rt.normalizer});
+          reembeddedEvents++;
+          generation?.progress?.({eventDone:reembeddedEvents});
+        }
+        // Only freshly embedded target rows satisfy the boundary. Old labels
+        // and vectors remain untouched, and failed runs can resume per event.
+        plan=planEventCarry({sourceMetas:rt.store.metas,sourceEncoding:rt.store.index?.encoding??null,
+          targetIdentity:{model:settings.embedModel,dim:targetStore.index?.dim??null,encoding},
+          hasTarget:id=>Boolean(targetStore.get(id)),allowUnknown:opts.allowUnknownCarry===true});
+      }
       carryByVerdict = plan.byVerdict;
 
       for (const { meta, sourceIdentity, verdict } of plan.accepted) {
@@ -1327,6 +1352,7 @@ export async function runIndex(opts = {}) {
       resumed: Boolean(generation?.resumed),
       skippedResume,                                  // 续跑时"盘上已有、本次没调"的条数
       carried,                                        // 事件向量原样搬运的条数（0 次调用）
+      reembeddedEvents,
       // 事件搬运的身份结论：compatible / unknown-accepted / blocked
       // ⚠️ `carried` 只说明"搬了几条"，不说明"搬得对不对"。判"搬得对不对"看这里。
       carryVerdict: rebuilding ? (carryBlocked ? 'blocked' : (carryByVerdict.unknown ? 'unknown-accepted' : 'compatible')) : null,
@@ -1583,7 +1609,7 @@ export async function runGraphScan(rt, { force = false, k = 6, scope = '', dataD
 
 /** 从核心配置里取一个可预填的端点（宿主 provider 的第一个）。 */
 export async function presetEndpoint() {
-  const cfg = await coreConfig();
+  const cfg = hostConfig();
   const providers = cfg?.getConfig?.()?.providers;
   if (!providers || typeof providers !== 'object') return null;
   for (const p of Object.values(providers)) {
@@ -1628,7 +1654,8 @@ function judgeLimiterOf(rt) {
  * OpenAI 兼容 `/chat/completions`（温度 0）。格式错的重试在 `runJudgeBatch` 里管，
  * 这里只管"一次调用"：网络错 / HTTP 非 2xx / 响应缺字段都抛错 ⇒ 上层记 `LLM_UNAVAILABLE`。
  */
-export async function callLlmOpenAI({ baseURL, apiKey, model, system, user, temperature = 0, maxTokens = 0, timeoutMs = 60_000 }) {
+export async function callLlmOpenAI({ baseURL, apiKey, model, system, user, temperature = 0, maxTokens = 0, timeoutMs = 60_000, thinkingMode = 'auto' }) {
+  if(!['auto','enabled','disabled'].includes(thinkingMode))throw new JudgeError('INVALID_THINKING_MODE','Invalid model thinking mode');
   const url = joinUrl(baseURL, '/chat/completions');
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), Math.max(1_000, Number(timeoutMs) || 60_000));
@@ -1646,6 +1673,7 @@ export async function callLlmOpenAI({ baseURL, apiKey, model, system, user, temp
         //    用端点默认值很容易在正文开头就被截断（`finish_reason:"length"` + `content:""`），
         //    而那种失败在调用方看来只是"模型回了个空字符串"。
         ...(Number(maxTokens) > 0 ? { max_tokens: Number(maxTokens) } : {}),
+        ...(thinkingMode==='auto'?{}:{thinking:{type:thinkingMode}}),
         messages: [
           { role: 'system', content: system },
           { role: 'user', content: user }

@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>记忆管理</title>
+    <link rel="stylesheet" href="/manage.css" />
+  </head>
+  <body>
+    <header>
+      <a class="brand" href="#/overview">记忆管理<span>本机工作台</span></a
+      ><span id="instance">连接中</span
+      ><label
+        >主题
+        <select id="theme">
+          <option value="auto">跟随环境</option>
+          <option value="light">浅色</option>
+          <option value="dark">深色</option>
+        </select></label
+      >
+    </header>
+    <div id="demo" hidden>
+      演示数据 · 所有内容均为合成数据，操作仅在本页面生效
+    </div>
+    <div class="layout">
+      <nav aria-label="主导航"></nav>
+      <main id="main" tabindex="-1"></main>
+    </div>
+    <dialog id="dialog"><div id="dialog-body"></div></dialog>
+    <script type="module" src="/manage.js"></script>
+  </body>
+</html>

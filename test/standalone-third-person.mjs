@@ -104,3 +104,34 @@ test('automatic consolidation may create B profile from A report with B absent',
   const profile=result.items.find(i=>i.layer==='profile');assert.match(profile.text,/他人转述/);
   assert(profile.sourceRefs.some(r=>r.reporterId==='qq:a'&&r.aboutActorId==='qq:b'));
 });
+test('optional consolidation writes only scoped, supported channel culture',async t=>{
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'vec-scene-culture-'));
+  const model=http.createServer(async(req,res)=>{
+    let raw='';for await(const chunk of req)raw+=chunk;
+    const prompt=JSON.parse(raw).messages.map(m=>m.content).join('\n');
+    const sceneCulture=prompt.includes('Channel evidence:')?[{kind:'term',text:'Moonwhale is the local ship nickname',evidenceIds:['local']},
+      {kind:'rule',text:'Foreign marker',evidenceIds:['foreign']},{kind:'topic',text:'Single message is not recurring',evidenceIds:['local']}]:[];
+    res.setHeader('content-type','application/json');
+    res.end(JSON.stringify({choices:[{message:{content:JSON.stringify({events:[],people:[],sceneCulture})}}]}));
+  });
+  await new Promise(resolve=>model.listen(0,'127.0.0.1',resolve));
+  fs.writeFileSync(path.join(root,'settings.json'),JSON.stringify({llmBaseURL:'http://127.0.0.1:'+model.address().port,
+    llmModel:'mock',consolidateSettleMin:0,sceneCultureEnabled:true}));
+  const engine=createSpaceEngine({root});
+  t.after(async()=>{await engine.close();await new Promise(resolve=>model.close(resolve));fs.rmSync(root,{recursive:true,force:true});});
+  const group={kind:'group',id:'lobby'},privateScope={kind:'private',id:'other'};
+  const timestamp=Date.now()-600000;
+  await engine.call('ingest',{messages:[
+    {messageId:'local',conversationId:'lobby',actorId:'qq:a',role:'user',timestamp,scope:group,text:'Moonwhale is our ship nickname'},
+    {messageId:'foreign',conversationId:'other',actorId:'qq:a',role:'user',timestamp,scope:privateScope,text:'Foreign private message'}
+  ]});
+  await engine.call('job',{type:'consolidate'});
+  await engine.call('job',{type:'consolidate'});
+  const query=scope=>engine.call('workspace',{action:'query',scope});
+  const {entries}=await query(group);
+  assert.equal(entries.length,1);
+  assert.equal(entries[0].kind,'term');
+  assert.equal(entries[0].status,'observed');
+  assert.deepEqual(entries[0].evidence.map(ref=>ref.id),['local']);
+  assert.deepEqual((await query(privateScope)).entries,[]);
+});

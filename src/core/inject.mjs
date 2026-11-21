@@ -752,19 +752,33 @@ export function resolveMinScore(...sources) {
  * @param {'boost'|'hard'} [opts.mode='boost']
  * @param {number} [opts.perPerson=2]
  * @param {number} [opts.total=8]
+ * @param {Function|null} [opts.exposureFactor=null] 可选的 `(lineId) => factor` 软降权纯函数
+ *   （票 03 收尾，由 router 从策略层注入；本文件**不** import 策略层）。
+ *   不传时排序与返回对象逐字不变；传入时只乘在「可信度」这一项上，
+ *   `hot` 的 1000 加成不打折 ⇒ 强相关仍然是强相关，只是同档内「上一轮见过的让位」。
  * @returns {{ lines: Array<{who,line,credibility,score,hot}>, droppedByThreshold: number }}
  */
-export function selectInjectLines({ candidates, sims = null, minScore = DEFAULT_MIN_SCORE, mode = 'boost', perPerson = 2, total = 8 }) {
+export function selectInjectLines({ candidates, sims = null, minScore = DEFAULT_MIN_SCORE, mode = 'boost', perPerson = 2, total = 8, exposureFactor = null }) {
   // ⚠️ hard 的降级契约：**没有相似度信息**（sims=null，嵌入缺席）时 hard 必须降级为 boost ——
   // "缺依赖"不能变成"什么都不注入"，那等于服务缺席比服务在跑更吵（静默性反转）。
   // 注意区分 sims=[0,0,…]（有信息，全都不过阈值）与 sims=null（没有信息）。
   const effMode = mode === 'hard' && sims === null ? 'boost' : mode;
+  // 注入级曝光（票 03 收尾）：id 用 `who|line` —— 跨轮稳定，且 `purpose=automatic`
+  // 把 lines 换成 keywordImpressions 的结果时也能用同一个公式算，不会出现
+  // 「lookup 用 A 口径、record 用 B 口径」这种永远命不中的静默失败。
+  const exFactor = typeof exposureFactor === 'function' ? exposureFactor : null;
+  const lineIdOf = (c) => `${String(c?.who ?? '')}|${String(c?.line ?? '')}`;
   const scored = candidates.map((c, i) => {
     const sim = Number(sims?.[i]) || 0;
     const hot = sim >= minScore;
     // `scopeRank` 缺省 0（同场合）—— 旧调用方/档案段不带这个字段，行为不变。
     const scopeRank = Number(c.scopeRank) || 0;
-    return { ...c, hot, scopeRank, score: (hot ? 1000 : 0) + c.credibility };
+    let factor = 1;
+    if (exFactor) {
+      const raw = exFactor(lineIdOf(c));
+      factor = Number.isFinite(Number(raw)) ? Math.min(1, Math.max(0.01, Number(raw))) : 1;
+    }
+    return { ...c, hot, scopeRank, score: (hot ? 1000 : 0) + c.credibility * factor };
   });
   let pool = scored;
   let droppedByThreshold = 0;

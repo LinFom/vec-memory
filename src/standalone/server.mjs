@@ -1,5 +1,7 @@
 import http from 'node:http';
 import fs from 'node:fs';
+import path from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { createService } from './service.mjs';
 
@@ -31,14 +33,27 @@ export function createStandaloneServer(options) {
         return send(200, { status: 'ok', service: 'vec-memory', protocolVersion: 1 });
       }
       // Static pages live on a fixed allowlist so no arbitrary file is reachable.
-      const ASSETS=['galaxy-page.mjs','galaxy-renderer.mjs','galaxy-layout.mjs','galaxy.css','vendor/three/three.module.js','vendor/three/three.core.js','vendor/three/OrbitControls.js'];
+      const ASSETS=['continuity-page.js','galaxy-page.mjs','galaxy-renderer.mjs','galaxy-layout.mjs','galaxy.css','vendor/three/three.module.js','vendor/three/three.core.js','vendor/three/OrbitControls.js'];
       const asset=ASSETS.find(a=>url.pathname==='/'+a);
-      if(asset&&req.method==='GET'){res.writeHead(200,{'content-type':asset.endsWith('.css')?'text/css; charset=utf-8':'text/javascript; charset=utf-8','cache-control':'no-cache'});res.end(fs.readFileSync(fileURLToPath(new URL('../../web/'+asset,import.meta.url))));return;}
-      const PAGES = {'/': 'standalone.html', '/standalone.html': 'standalone.html', '/standalone-raw.html': 'standalone-raw.html'};
-      if (PAGES[url.pathname] && req.method === 'GET') {
-        const ancestors=embedOrigins.length?"'self' "+embedOrigins.join(' '):"'none'";
-        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'content-security-policy': "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors "+ancestors });
-        res.end(fs.readFileSync(fileURLToPath(new URL('../../web/' + PAGES[url.pathname], import.meta.url)))); return;
+      const pages = new Map([['/', 'standalone.html'], ['/standalone.html', 'standalone.html'], ['/standalone-raw.html', 'standalone-raw.html']]);
+      const file = asset || pages.get(url.pathname);
+      if (file && req.method === 'GET') {
+        const diskPath = fileURLToPath(new URL('../../web/' + file, import.meta.url));
+        const stat = fs.statSync(diskPath, {bigint:true});
+        const etag = `W/"${stat.size}-${stat.mtimeNs}"`;
+        const type = file.endsWith('.html') ? 'text/html' : file.endsWith('.css') ? 'text/css' : 'text/javascript';
+        res.setHeader('Content-Type', type + '; charset=utf-8');
+        res.setHeader('Cache-Control', 'private, no-cache');
+        res.setHeader('ETag', etag);
+        if (type === 'text/html') {
+          const ancestors = embedOrigins.length ? "'self' " + embedOrigins.join(' ') : "'none'";
+          res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors " + ancestors);
+        }
+        if (req.headers['if-none-match'] === etag) {
+          res.writeHead(304);
+          return res.end();
+        }
+        return res.end(fs.readFileSync(diskPath));
       }
       if (req.headers.origin) {
         const expected = `${req.headers['x-forwarded-proto'] === 'https' ? 'https' : 'http'}://${req.headers.host}`;
@@ -49,10 +64,26 @@ export function createStandaloneServer(options) {
         const token = /^Bearer (\S+)$/i.exec(req.headers.authorization || '')?.[1];
         const auth = await service.handle({method:'GET',path:'/api/v1/admin/spaces',token,local});
         if (auth.status !== 200) return send(auth.status,auth.body);
-        const chunks=[];let size=0;
-        for await (const chunk of req) {size+=chunk.length;if(size>1024*1024*1024) return send(413,{ok:false,code:'BODY_TOO_LARGE',error:'Maximum backup size is 1 GiB'});chunks.push(chunk);}
+        // 上传也不再整体进内存：先流式落到临时文件，服务层校验通过才改成正式文件名。
+        const dir = path.join(options.root, 'backups'); fs.mkdirSync(dir, {recursive:true});
+        const uploadPath = path.join(dir, '.upload-' + randomUUID() + '.part');
+        const out = fs.createWriteStream(uploadPath, {flags:'wx', mode:0o600});
+        let size = 0, overflow = false;
+        try {
+          for await (const chunk of req) {
+            size += chunk.length;
+            if (size > 8 * 1024 * 1024 * 1024) { overflow = true; break; }
+            if (!out.write(chunk)) await new Promise(resolve => out.once('drain', resolve));
+          }
+          await new Promise((resolve, reject) => { out.once('error', reject); out.end(resolve); });
+        } catch (error) {
+          out.destroy(); fs.rmSync(uploadPath, {force:true});
+          return send(500, {ok:false, code:'UPLOAD_FAILED', error:'Upload failed: ' + error.message});
+        }
+        if (overflow) { fs.rmSync(uploadPath, {force:true}); return send(413,{ok:false,code:'BODY_TOO_LARGE',error:'Maximum backup size is 8 GiB'}); }
         // Passwords travel in a request header, never in a URL or access log.
-        const result=await service.handle({method:'POST',path:url.pathname,token,local,body:{upload:Buffer.concat(chunks),password:req.headers['x-backup-password']?Buffer.from(req.headers['x-backup-password'],'base64').toString('utf8'):undefined}});
+        const result=await service.handle({method:'POST',path:url.pathname,token,local,body:{uploadPath,password:req.headers['x-backup-password']?Buffer.from(req.headers['x-backup-password'],'base64').toString('utf8'):undefined}});
+        if (result.status !== 200) fs.rmSync(uploadPath, {force:true});
         return send(result.status,result.body);
       }
       if (['POST', 'PUT', 'PATCH'].includes(req.method)) {
@@ -64,6 +95,12 @@ export function createStandaloneServer(options) {
       }
       const token = /^Bearer (\S+)$/i.exec(req.headers.authorization || '')?.[1];
       const result = await service.handle({ method: req.method, path: req.url, body, token, local });
+      if (result.stream) {
+        res.writeHead(result.status,{'content-type':'application/octet-stream','content-disposition':`attachment; filename="${result.filename}"`,'content-length':result.size,'cache-control':'no-store'});
+        const stream = result.stream();
+        stream.on('error', () => res.destroy());
+        return stream.pipe(res);
+      }
       if (result.binary) {res.writeHead(result.status,{'content-type':'application/octet-stream','content-disposition':`attachment; filename="${result.filename}"`,'cache-control':'no-store'});return res.end(result.binary);}
       send(result.status, result.body);
     } catch { if (!res.headersSent) send(500, { ok: false, code: 'INTERNAL_ERROR', error: 'Internal service error' }); else res.end(); }

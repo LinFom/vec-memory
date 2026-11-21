@@ -1,0 +1,50 @@
+{
+  "version": 1,
+  "description": "票 02 [by:WorkBuddy]：离线字段映射表。源字段名一律通用，不含任何具体 Agent / 整合包专名；这张表是 importer 与导入计划共用的唯一形状来源。",
+  "scopeKind": {
+    "private": "private",
+    "group": "group",
+    "game": "group",
+    "channel": "group"
+  },
+  "scopeKindNote": "服务 v1 场合只认 private/group。契约里的 game/channel 收窄为 group，场合 id 原样保留；这是显式取舍，不静默改写而不留痕。",
+  "sourceFiles": {
+    "facts.jsonl": "preference",
+    "people.jsonl": "speaker_profile",
+    "events.jsonl": "event",
+    "anchors.jsonl": "topic"
+  },
+  "factKinds": {
+    "fact": "preference",
+    "preference": "preference",
+    "topic": "topic",
+    "event": "event",
+    "episode": "event",
+    "promise": "promise",
+    "joke": "joke",
+    "grudge": "grudge",
+    "person": "speaker_profile",
+    "people": "speaker_profile",
+    "profile": "speaker_profile",
+    "speaker_profile": "speaker_profile",
+    "anchor": "topic",
+    "pin": "topic",
+    "milestone": "event"
+  },
+  "defaultFactKind": "preference",
+  "factKindNote": "目标值必须落在服务的 FACT_KINDS 可写集合内。刻意不映射到 trait（需 attr/itemKey）与 pattern（服务明确拒绝）。未知 kind 落回 preference 并在导入结果里标 mappingFallback:true，绝不静默当成已知分类。",
+  "excludedRuntimeFields": [
+    "persona",
+    "emotion",
+    "mood",
+    "sleep",
+    "innerThought",
+    "association",
+    "embedding",
+    "vector",
+    "score",
+    "confidence",
+    "verified"
+  ],
+  "excludedRuntimeNote": "人格 / 情绪 / 念想 / 睡眠 / 联想等运行态归 Agent 侧；向量 / 评分 / 可信度 / 已核验标记不允许由导入方写入（origin.verified 恒为 false）。"
+}

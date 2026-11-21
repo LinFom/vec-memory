@@ -189,6 +189,22 @@ export class SceneMemory {
     for (let changed = true; changed;) { changed = false; for (const l of links) if (ids.has(l.a) || ids.has(l.b)) for (const id of [l.a,l.b]) if (!ids.has(id)) {ids.add(id);changed=true;} }
     return [...ids];
   }
+  // [by:WorkBuddy] 2026-11-10 — `state()` 是 `copy(log.rows.at(-1).data.state)`（整份
+  // structuredClone）。调用方若对每个 id 各调一次 `accounts()`，成本就是
+  // 「id 数 × 整份 state 克隆」——recall 实测因此吃掉 78 秒（它对**每条消息**的
+  // actorId 都调了一次）。批量版只取一次 state、一次 links。
+  accountsMany(list) {
+    const seeds = Array.isArray(list) ? list : [];
+    if (!seeds.length) return [];
+    const links = Object.values(this.state().links).filter(l => l.active), out = new Set();
+    for (const account of seeds) {
+      if (out.has(account)) continue;
+      const ids = new Set([account]);
+      for (let changed = true; changed;) { changed = false; for (const l of links) if (ids.has(l.a) || ids.has(l.b)) for (const id of [l.a,l.b]) if (!ids.has(id)) {ids.add(id);changed=true;} }
+      for (const id of ids) out.add(id);
+    }
+    return [...out];
+  }
   query({scope, sceneId, includeCandidates = false}) {
     const s = this.state(), source = canonicalChatKey(scope);
     return Object.values(s.entries).filter(e => (!sceneId || e.sceneId === sceneId) && e.status !== 'retracted' &&

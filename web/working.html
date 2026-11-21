@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>短期记忆 · 向量记忆库</title>
+<link rel="stylesheet" href="/styles.css">
+<style>
+  /* 本页是**滚动列表**，不是全屏画布 —— 与 instances.html 同一套覆盖
+     （星图页 `overflow:hidden` + flex 撑满；这里要能滚）。面板色沿用同一套 CSS 变量，
+     所以 chrome 与其它页同色、切主题一起变。 */
+  html { height: auto; }
+  body { display: block; height: auto; overflow: auto; }
+  header.top { position: sticky; top: 0; z-index: 6; }
+  main { padding: 16px; display: grid; gap: 12px; align-content: start; }
+
+  .card { border: 1px solid var(--line); border-radius: 12px; background: var(--panel); padding: 12px 13px; }
+  .card > h2 { margin: 0 0 3px; font-size: 14px; font-weight: 650; display: flex; align-items: baseline; gap: 8px; }
+  .card > h2 .n { color: var(--fg-dim2); font-weight: 400; font-size: 11.5px; font-variant-numeric: tabular-nums; }
+  .why { color: var(--fg-dim2); font-size: 11.5px; margin: 0 0 9px; line-height: 1.55; }
+
+  /* 概览：四个大数字 + 排练分布条 */
+  .counts { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+  .counts .k { flex: 1 1 108px; border: 1px solid var(--line-2); border-radius: 10px; padding: 8px 10px; background: var(--bg-2); }
+  .counts .k b { display: block; font-size: 20px; font-variant-numeric: tabular-nums; line-height: 1.2; }
+  .counts .k span { font-size: 11px; color: var(--fg-dim2); }
+  .counts .k.hot b { color: var(--warn); }
+  .counts .k.promoted b { color: var(--ok); }
+  .counts .k.dimmed b { color: var(--warn); opacity: .75; }
+  .counts .k.retired b { color: var(--fg-dim2); }
+
+  .dist { display: flex; align-items: flex-end; gap: 3px; height: 40px; margin: 2px 0 4px; }
+  .dist i { flex: 1 1 12px; min-width: 6px; background: var(--accent); border-radius: 2px 2px 0 0; opacity: .85; }
+  .dist-axis { display: flex; justify-content: space-between; font-size: 10.5px; color: var(--fg-dim2); }
+
+  /* 队列条目 */
+  ol.q { list-style: none; margin: 0; padding: 0; display: grid; gap: 7px; }
+  ol.q li { border: 1px solid var(--line); border-radius: 9px; padding: 8px 10px; background: var(--bg-2); }
+  ol.q li .hd { display: flex; align-items: baseline; gap: 7px; flex-wrap: wrap; }
+  ol.q li .t { font-size: 12.5px; font-weight: 600; }
+  ol.q li .meta { font-size: 10.5px; color: var(--fg-dim2); font-variant-numeric: tabular-nums; }
+  ol.q li .sum { font-size: 11.5px; color: var(--fg-dim); margin-top: 3px; line-height: 1.5; word-break: break-word; }
+  ol.q li.dim .t, ol.q li.dim .sum { color: var(--fg-dim2); }
+  .bar { height: 3px; border-radius: 2px; background: var(--line-2); margin-top: 6px; overflow: hidden; }
+  .bar i { display: block; height: 100%; background: var(--warn); }
+  .empty { font-size: 11.5px; color: var(--fg-dim2); padding: 4px 2px; }
+
+  .boot { position: fixed; }
+  footer.bottom { position: static; }
+</style>
+</head>
+<body>
+<header class="top">
+  <div class="brand">
+    <span class="dot" id="health-dot" title="本页所在服务"></span>
+    <h1>短期记忆</h1>
+    <p class="sub" id="sub">关键词层：最近发生的事，靠"被想起过几次"决定去留。</p>
+  </div>
+  <div class="tools">
+    <select id="chat" title="只看某个会话（默认全部）"></select>
+    <button type="button" id="btn-reload">刷新</button>
+  </div>
+<nav class="page-nav" aria-label="记忆库页面"><a class="nav" href="/manage.html" id="manage-entry">记忆管理</a><a class="nav" href="/">关系星图</a><a class="nav" href="/person.html">人物卡</a><a class="nav" href="/memory.html">会话记忆</a><a class="nav" href="/working.html" aria-current="page">短期体检</a><a class="nav" href="/instances.html">多实例</a></nav>
+</header>
+
+<main id="grid"></main>
+<div class="boot" id="boot"><span class="spin"></span> 正在读短期层…</div>
+
+<footer class="bottom">
+  <div class="stats" id="stats"></div>
+  <div class="fine" id="fine"></div>
+</footer>
+
+<script type="module" src="/working.js"></script>
+</body>
+</html>

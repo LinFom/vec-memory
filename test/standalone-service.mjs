@@ -6,6 +6,99 @@ import path from 'node:path';
 import { initialize, createService } from '../src/standalone/service.mjs';
 import { createStandaloneServer } from '../src/standalone/server.mjs';
 
+test('a closed worker is replaced on the next space request without replaying the failed call', async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'vec-worker-recovery-'));
+  const token = initialize(root);
+  let created = 0;
+  const service = createService({ root, engineFactory: () => {
+    const first = ++created === 1;
+    return {
+      closed: false,
+      async call() {
+        if (first) {
+          this.closed = true;
+          throw Object.assign(new Error('Space worker exited'), { code: 'ENGINE_UNAVAILABLE', status: 503 });
+        }
+        return { ok: true };
+      },
+      async close() { this.closed = true; }
+    };
+  } });
+  t.after(async () => {
+    await service.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+  const call = (route, method = 'GET', body) => service.handle({ token, path: '/api/v1/' + route, method, body });
+  await call('admin/projects', 'POST', { projectId: 'p' });
+  await call('admin/spaces', 'POST', { spaceId: 's', owner: 'p' });
+  assert.equal((await call('spaces/s/status')).status, 503);
+  assert.equal(created, 1);
+  assert.equal((await call('spaces/s/status')).status, 200);
+  assert.equal(created, 2);
+});
+
+test('backup and restore tolerate a worker that has exited or exits while quiescing', async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'vec-worker-maintenance-'));
+  const token = initialize(root);
+  let worker, exitOnQuiesce = false;
+  const service = createService({ root, engineFactory: ({ maintenance }) => {
+    const engine = {
+      closed: false,
+      async call(operation) {
+        if (this.closed || (operation === 'quiesce' && exitOnQuiesce)) {
+          this.closed = true;
+          throw Object.assign(new Error('Space worker exited'), {code:'ENGINE_UNAVAILABLE',status:503});
+        }
+        return { ok:true };
+      },
+      async close() { this.closed = true; }
+    };
+    if (!maintenance) worker = engine;
+    return engine;
+  } });
+  t.after(async () => { await service.close(); fs.rmSync(root, { recursive:true, force:true }); });
+  const call = (route, method = 'GET', body) => service.handle({token,path:'/api/v1/'+route,method,body});
+  await call('admin/projects', 'POST', { projectId:'p' });
+  await call('admin/spaces', 'POST', { spaceId:'s',owner:'p' });
+  fs.mkdirSync(path.join(root,'spaces','s'), { recursive:true });
+  assert.equal((await call('spaces/s/status')).status, 200);
+  worker.closed = true;
+  const backup = await call('admin/backups', 'POST', {spaceId:'s',mode:'full'});
+  assert.equal(backup.status, 200, JSON.stringify(backup.body));
+  const archive = 'admin/backups/' + backup.body.backupId;
+  const preview = await call(archive+'/preview', 'POST');
+  exitOnQuiesce = true;
+  const restored = await call(archive+'/restore','POST',{spaceId:'restored',owner:'p',expectedChecksum:preview.body.checksum});
+  assert.equal(restored.status, 200, JSON.stringify(restored.body));
+  assert.equal((await call('spaces/s/status')).status, 200);
+});
+
+test('role reads and readiness can start without loading the message journal', async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'vec-role-cold-'));
+  const token = initialize(root);
+  const service = createService({root});
+  t.after(async () => { await service.close(); fs.rmSync(root,{recursive:true,force:true}); });
+  const call = (route, method = 'GET', body, credential = token) =>
+    service.handle({token:credential,path:'/api/v1/'+route,method,body});
+  await call('admin/projects','POST',{projectId:'p'});
+  const other = await call('admin/projects','POST',{projectId:'other'});
+  await call('admin/spaces','POST',{spaceId:'s',owner:'p'});
+  const input = path.join(root,'spaces','s','input');
+  fs.mkdirSync(input,{recursive:true});
+  fs.writeFileSync(path.join(input,'messages.jsonl'),'invalid journal\n');
+  const role = {roleId:'moon',scope:{kind:'private',id:'one'}};
+  assert.equal((await call('spaces/s/readiness','GET',undefined,other.body.token)).status,403);
+  assert.equal((await call('spaces/s/readiness')).body.messageJournal,'cold');
+  assert.equal((await call('spaces/s/role-notes','POST',{...role,operationId:'note',text:'念想'})).status,200);
+  const result = await call('spaces/s/role-notes/query','POST',role);
+  assert.equal(result.body.items[0].text,'念想');
+  assert.equal((await call('spaces/s/readiness')).body.messageJournal,'cold');
+  const evidence = await call('spaces/s/role-notes','POST',{...role,operationId:'sourced',text:'有来源的念想',messageId:'msg'});
+  assert.equal(evidence.status,503);
+  assert.equal(evidence.body.code,'STORAGE_UNAVAILABLE');
+  assert.equal((await call('spaces/s/readiness')).body.code,'STORAGE_UNAVAILABLE');
+});
+
 test('management reads do not queue behind a running model job in the service',async t=>{
  const root=fs.mkdtempSync(path.join(os.tmpdir(),'vec-service-read-')),token=initialize(root);let release,entered;
  const started=new Promise(r=>entered=r);

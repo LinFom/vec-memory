@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>多实例总览 · 向量记忆库</title>
+<link rel="stylesheet" href="/styles.css">
+<style>
+  /* 本页是**滚动列表**，不是全屏画布 —— 覆盖 styles.css 里为星图页定的 body 布局
+     （星图页 `overflow:hidden` + flex 撑满；这里要能滚）。面板色沿用同一套 CSS 变量，
+     所以 chrome 与星图页同色、切主题一起变；列表不满一屏时余白靠 body 背景传播到
+     canvas 铺满（实测取像素：视口底部是 `--bg`，不是浏览器默认白）。 */
+  html { height: auto; }
+  body { display: block; height: auto; overflow: auto; }
+  header.top { position: sticky; top: 0; z-index: 6; }
+  main { padding: 16px; display: grid; gap: 12px; align-content: start;
+    grid-template-columns: repeat(auto-fill, minmax(330px, 1fr)); }
+  .card { border: 1px solid var(--line); border-radius: 12px; background: var(--panel); padding: 12px 13px; }
+  .card.up { border-color: rgba(74,222,128,.42); }
+  .card.self { box-shadow: inset 0 0 0 1px var(--accent); }
+  .card h2 { margin: 0; font-size: 14px; font-weight: 650; display: flex; align-items: baseline; gap: 8px; }
+  .card h2 .port { color: var(--fg-dim2); font-weight: 400; font-size: 11.5px; font-variant-numeric: tabular-nums; }
+  .badges { display: flex; gap: 6px; flex-wrap: wrap; margin: 7px 0 9px; }
+  .badge { font-size: 10.5px; padding: 1px 7px; border-radius: 999px; border: 1px solid var(--line-2); color: var(--fg-dim); white-space: nowrap; }
+  .badge.self { color: var(--accent); border-color: var(--accent); }
+  .badge.up { color: var(--ok); border-color: rgba(74,222,128,.5); }
+  .badge.down { color: var(--bad); border-color: rgba(248,113,113,.5); }
+  dl { display: grid; grid-template-columns: 76px 1fr; gap: 3px 9px; margin: 8px 0; font-size: 12px; }
+  dt { color: var(--fg-dim2); }
+  dd { margin: 0; word-break: break-all; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11.5px; }
+  .stat { margin-top: 4px; font-size: 11.5px; color: var(--fg-dim); display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+  .stat b { color: var(--fg); font-variant-numeric: tabular-nums; }
+  .warn { color: var(--warn); font-size: 11.5px; margin: 6px 0 0; }
+  .reason { color: var(--fg-dim2); font-size: 11.5px; margin: 4px 0 0; }
+  .acts { display: flex; gap: 8px; margin-top: 11px; flex-wrap: wrap; }
+  .acts a { font-size: 12px; padding: 5px 11px; border-radius: 7px; border: 1px solid var(--line-2);
+    background: var(--panel); color: inherit; text-decoration: none; display: inline-block; }
+  .acts a:hover { border-color: var(--accent); color: var(--accent); }
+  .acts a[aria-disabled="true"] { opacity: .45; pointer-events: none; }
+  .note { grid-column: 1 / -1; border: 1px solid var(--line-2); border-radius: 12px;
+    background: var(--bg-2); padding: 11px 13px; font-size: 12px; color: var(--fg-dim); }
+  .note.bad { border-color: rgba(248,113,113,.5); color: var(--bad); }
+  .note b { color: var(--fg); }
+  .note code { word-break: break-all; }
+  .boot { position: fixed; }
+  footer.bottom { position: static; }
+</style>
+</head>
+<body>
+<header class="top">
+  <div class="brand">
+    <span class="dot" id="health-dot" title="本页所在服务"></span>
+    <h1>多实例总览</h1>
+    <p class="sub">一个 QQ 号 = 一个实例 = 一份独立记忆。清单是唯一事实源。</p>
+  </div>
+  <div class="tools">
+    <button type="button" id="btn-reload">刷新</button>
+  </div>
+<nav class="page-nav" aria-label="记忆库页面"><a class="nav" href="/manage.html" id="manage-entry">记忆管理</a><a class="nav" href="/">关系星图</a><a class="nav" href="/person.html">人物卡</a><a class="nav" href="/memory.html">会话记忆</a><a class="nav" href="/working.html">短期体检</a><a class="nav" href="/instances.html" aria-current="page">多实例</a></nav>
+</header>
+
+<main id="grid"></main>
+<div class="boot" id="boot"><span class="spin"></span> 正在读清单并探活…</div>
+
+<footer class="bottom">
+  <div class="stats" id="stats"></div>
+  <div class="fine" id="fine"></div>
+</footer>
+
+<script type="module" src="/instances.js"></script>
+</body>
+</html>

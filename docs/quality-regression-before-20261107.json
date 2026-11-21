@@ -1,0 +1,98 @@
+{
+  "fixtureVersion": 1,
+  "queries": 6,
+  "precisionAt8": 1,
+  "recallAt8": 1,
+  "falseInjectionRate": 0,
+  "latencyMs": 35,
+  "externalModelRequests": 0,
+  "ndcgAt8": 0.666667,
+  "mrr": 0.666667,
+  "scope": "Synthetic keyword semantic retrieval only; not a claim about production LLM accuracy or comparative superiority",
+  "limitations": [
+    "This suite calls engine.call(recall), NOT /search; it cannot measure rerank ordering.",
+    "Six synthetic labelled queries; no production data, no statistical significance claim."
+  ],
+  "mode": "off",
+  "rows": [
+    {
+      "id": "long-name",
+      "expected": [
+        "喜欢绿茶，不加糖"
+      ],
+      "actual": [
+        "蜂蜜柚子茶：喜欢绿茶，不加糖"
+      ],
+      "correct": 1,
+      "actualMode": "keyword",
+      "latencyMs": 16,
+      "ndcgAt8": 1,
+      "mrr": 1
+    },
+    {
+      "id": "short-name",
+      "expected": [
+        "喜欢红茶，加蜂蜜"
+      ],
+      "actual": [
+        "柚子：喜欢红茶，加蜂蜜"
+      ],
+      "correct": 1,
+      "actualMode": "keyword",
+      "latencyMs": 4,
+      "ndcgAt8": 1,
+      "mrr": 1
+    },
+    {
+      "id": "game-context",
+      "expected": [
+        "喜欢建造城堡"
+      ],
+      "actual": [
+        "建造玩家：喜欢建造城堡"
+      ],
+      "correct": 1,
+      "actualMode": "keyword",
+      "latencyMs": 5,
+      "ndcgAt8": 1,
+      "mrr": 1
+    },
+    {
+      "id": "no-private-in-group",
+      "expected": [],
+      "actual": [],
+      "correct": 0,
+      "actualMode": "keyword",
+      "latencyMs": 3,
+      "ndcgAt8": 0,
+      "mrr": 0
+    },
+    {
+      "id": "unrelated",
+      "expected": [],
+      "actual": [],
+      "correct": 0,
+      "actualMode": "keyword",
+      "latencyMs": 3,
+      "ndcgAt8": 0,
+      "mrr": 0
+    },
+    {
+      "id": "long-forgotten",
+      "expected": [
+        "喜欢建造城堡"
+      ],
+      "actual": [
+        "建造玩家：喜欢建造城堡"
+      ],
+      "correct": 1,
+      "actualMode": "keyword",
+      "latencyMs": 4,
+      "ndcgAt8": 1,
+      "mrr": 1
+    }
+  ],
+  "label": "before / 新特性全关（recallPolicyMode=off, rerankEnabled=false）",
+  "baselineFile": "docs/recall-evaluation-20261101.json",
+  "baselineComparableExcludingLatency": true
+}

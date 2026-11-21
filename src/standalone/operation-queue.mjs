@@ -3,13 +3,14 @@
 export function createOperationQueue(prepare=async()=>{}) {
   let tail=Promise.resolve(),readWindow=false;
   const readers=new Set();
-  function run(fn,{longRunning=false,readOnly=false}={}) {
+  function run(fn,{longRunning=false,readOnly=false,skipPrepare=false}={}) {
     if(readWindow&&readOnly){
       const result=Promise.resolve().then(fn);readers.add(result);
       void result.finally(()=>readers.delete(result)).catch(()=>{});return result;
     }
     const result=tail.catch(()=>{}).then(async()=>{
-      await prepare();readWindow=longRunning;
+      if (!skipPrepare) await prepare();
+      readWindow=longRunning;
       try{return await fn();}
       finally{readWindow=false;await Promise.allSettled([...readers]);}
     });

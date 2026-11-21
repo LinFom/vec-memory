@@ -14,7 +14,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 ROOT = Path(__file__).resolve().parent.parent
-DIRECTORIES = {'src', 'web', 'tools', 'docs', 'openapi', 'examples', 'test', 'adapters'}
+DIRECTORIES = {'src', 'web', 'tools', 'docs', 'openapi', 'examples', 'test', 'adapters', 'interop'}
 ROOT_FILES = {'package.json', 'package-lock.json', 'README.md', 'CONTEXT.md',
               'PROTOCOL.md', 'LICENSE', 'LICENSE.md', 'install.cmd', 'init.cmd', 'start.cmd'}
 GUIDE = 'docs/安装与接入手册.md'

@@ -144,7 +144,7 @@ export class FactStoreError extends Error {
 }
 
 /**
- * 明文 id 形态：`qq:123` / 纯数字 / `group:100000001`。命中即红线。
+ * 明文 id 形态：`qq:123` / 纯数字 / `group:1098345913`。命中即红线。
  *
  * ⚠️ **单一来源**（`ADR-0019` 决定 1）：`lib/judge.mjs` 的出境断言**引用这里导出的同一正则**，
  * 不另抄一份 —— "明文 id 长什么样"只有一个定义，改一处全场生效。
@@ -181,7 +181,7 @@ function assertPlaceholder(label, v, allowEmpty = true) {
     throw new FactStoreError('RAW_ID_IN_KEY', `${label} 不能为空`);
   }
   // `SELF` / `P7722` / `group:C1234` / `private:C5678` 都过；
-  // `qq:123` / `100000001` / `group:100000001` 命中。
+  // `qq:123` / `1353446252` / `group:1098345913` 命中。
   if (RAW_ID.test(s)) {
     throw new FactStoreError(
       'RAW_ID_IN_KEY',

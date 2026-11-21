@@ -56,7 +56,7 @@ export const DIM_SOURCE = {
 
 // ══════════════════════════════════════════════════════════════════════════
 // ① 照抄 shipped kernel 的纯函数
-//    来源：E:/Tools/QQ-Agent-整合版-100000001/memory_plugin/src/memory6d-kernel.js
+//    来源：E:/Tools/QQ-Agent-整合版-20260922/memory_plugin/src/memory6d-kernel.js
 //    对拍：test/rank.mjs 直接 import 那个文件，逐函数比数值。
 // ══════════════════════════════════════════════════════════════════════════
 

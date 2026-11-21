@@ -146,7 +146,7 @@ function cmpJson(a, b) {
  *   1. `scope` **不许省略**。省略 ⇒ 群 / 私聊事实并进**同一个槽** ——
  *      正是本决定要防的"塌槽"，且**事后无法从键里看出来**。
  *   2. `scope` **必须是占位符 token**（`group:C1234` / `private:C5678`），
- *      **不许是明文 id**（`private:100000001` = 对方的明文 QQ）。
+ *      **不许是明文 id**（`private:1353446252` = 对方的明文 QQ）。
  *      键要出境 / 进 read-model ⇒ 明文 id 入键 = 从键里泄通讯录（`ADR-0002`）。
  *
  * @param {string} speaker   说话人占位符（如 `P7722` / `SELF`）

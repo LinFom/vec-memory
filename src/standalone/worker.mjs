@@ -1,4 +1,14 @@
+import {agentRecallItems} from './agent-recall.mjs';
+import { naturalRecallLimit, topicScore, topicTerms } from './natural-recall.mjs';
+import { zonedParts } from './reminder-date.mjs';
+import {openContinuity} from './continuity.mjs';
 import {createOperationQueue} from './operation-queue.mjs';
+import {buildIndex,historyFacts,searchHistory} from './history-index.mjs';
+import {tokenize} from '../core/tokens.mjs';
+import {captureExplicitReminder} from './capture-reminders.mjs';
+import {openObservations} from './observations.mjs';
+import {recallEvidence} from './recall-evidence.mjs';
+import {openTemporalMemory} from './temporal-memory.mjs';
 import {graphSimilarity} from '../core/graph-similarity.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -10,10 +20,12 @@ import {createRouter} from '../transport/inproc.mjs';
 import {bindHost} from '../core/host.mjs';
 import {getRuntime,ensureIdentity,DEFAULT_SETTINGS,factStoreOf,endpointOf,runConsolidateNow,runIndex} from '../core/backend.mjs';
 import {buildInjectCandidates,buildProfileCandidates,selectInjectLines,tokenOverlapSims,DEFAULT_TOKEN_MIN_SCORE,cosine,itemKeyOf,upsertSlotItem,isMultiValueTrait} from '../core/inject.mjs';
-import {embedQueries,embedDocuments,checkEndpoint} from '../core/embed.mjs';
+import {embedQueries,embedDocuments,checkEndpoint,assertNormalized} from '../core/embed.mjs';
 import {memoryCoreOf,subjectSection} from '../core/memory-core.mjs';
 import {readLineage} from '../core/lineage.mjs';
 import {readRecentEvents,readEventsById,readEventRows,readHitLog,bumpEventHits} from '../core/consolidate.mjs';
+// [by:WorkBuddy] 票 07：事件引用形状 + 注入侧回查闸门（纯函数，零 I/O）。
+import {eventRefsOf,auditEventQuotation} from '../core/event-gist.mjs';
 import {getEventIndex,searchEvents} from '../core/event-index.mjs';
 import {FACT_KINDS} from '../core/facts.mjs';
 import {prepareDiscoveries,applyDiscoveries} from '../core/thing-discovery.mjs';
@@ -28,11 +40,115 @@ import {callLlmOpenAI} from '../core/backend.mjs';
 const root=path.resolve(workerData.root),input=path.join(root,'input'),legacy=path.join(root,'legacy','data');
 fs.mkdirSync(input,{recursive:true});fs.mkdirSync(legacy,{recursive:true});
 if(!fs.existsSync(path.join(input,'source.json'))) fs.writeFileSync(path.join(input,'source.json'),JSON.stringify({version:1,kind:'canonical'}));
-const log=new DurableLog(path.join(input,'messages.jsonl'),()=>{});
-bindCanonicalMessages(input,()=>{log.assertReadable();return log.rows.map(r=>r.data.message);});
+let loadedMessageLog;
+const messageLog = () => loadedMessageLog ??= new DurableLog(path.join(input, 'messages.jsonl'), () => {});
+// [by:WorkBuddy] 2026-11-10 — 82 万条消息时 recall 要 111 s，而插件侧 recall 超时只有
+// 2.5 s ⇒ 等于完全不可用。两处根源都是「每来一次请求就把全量消息重建一遍」：
+//   ① `bindCanonicalMessages` 的 reader 每次 `log.rows.map(...)`（82 万次）；
+//   ② recall 用 `canonicalMessages(input).filter(canonicalChatKey(m.scope)===chatKey)`
+//      —— 82 万次 map + 82 万次 scope 解析。
+// 这里按 `log.rows.length` 缓存/增量维护，**不改变元素内容与顺序**（仍是同一批
+// `r.data.message` 引用，调用方只读）。日志长度变短（重建/回滚）时整体失效重建。
+let msgView=null,msgViewLen=-1;
+const messageView=()=>{
+  const rows=messageLog().rows;
+  if(!msgView||msgViewLen>rows.length){msgView=null;msgViewLen=-1;}
+  if(!msgView){msgView=new Array(rows.length);for(let i=0;i<rows.length;i++)msgView[i]=rows[i]?.data?.message;msgViewLen=rows.length;return msgView;}
+  if(msgViewLen<rows.length){
+    if(msgView.length<rows.length)msgView.length=rows.length;
+    for(let i=msgViewLen;i<rows.length;i++)msgView[i]=rows[i]?.data?.message;
+    msgViewLen=rows.length;
+  }
+  return msgView;
+};
+// 按会话分桶，只增量消费新 append 的行；返回桶内数组（与新插入顺序一致）。
+let chatBuckets=null,chatBucketsSeen=-1;
+function messagesOfChat(chatKey){
+  const rows=messageLog().rows;
+  if(!chatBuckets||chatBucketsSeen>rows.length){chatBuckets=new Map();chatBucketsSeen=0;}
+  for(let i=chatBucketsSeen;i<rows.length;i++){
+    const m=rows[i]?.data?.message; if(!m)continue;
+    let key; try{key=canonicalChatKey(m.scope);}catch{continue;}
+    const bucket=chatBuckets.get(key);
+    if(bucket)bucket.push(m); else chatBuckets.set(key,[m]);
+  }
+  chatBucketsSeen=rows.length;
+  return chatBuckets.get(chatKey)??[];
+}
+bindCanonicalMessages(input,()=>{messageLog().assertReadable();return messageView();});
+const observations=openObservations(path.join(input,'observations.jsonl'),id=>messageLog().operations.get(digest(String(id)))?.data?.message);
+const reminderDeliveries=new DurableLog(path.join(input,'reminder-deliveries.jsonl'),()=>{});
+const reminderKey=(chatKey, row)=>digest([chatKey,row.key,row.revision]);
+function requestNow(p) {
+ if(workerData.evaluation!==true || p.evaluationNow===undefined)return Date.now();
+ const now=typeof p.evaluationNow==='number'?p.evaluationNow:Date.parse(p.evaluationNow);
+ if(!Number.isSafeInteger(now)||now<0||now>8640000000000000)throw new MemoryError('INVALID_TIME','Invalid evaluation clock');
+ return now;
+}
+const lookupSourceMessage = id => {
+ const log = messageLog();
+ log.assertReadable();
+ return log.operations.get(digest(id))?.data.message;
+};
+function evidenceMessages(ids) {
+ const messages = new Map();
+ let aliases;
+ for (const id of ids) {
+  const direct = lookupSourceMessage(id);
+  if (direct) {
+   messages.set(id, direct);
+   continue;
+  }
+  if (!aliases) {
+   const file = path.join(input, 'evidence-aliases.json');
+   aliases = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : {};
+  }
+  if (Object.hasOwn(aliases, id)) messages.set(id, lookupSourceMessage(aliases[id]));
+ }
+ return messages;
+}
+const temporalMemory = openTemporalMemory(path.join(input,'temporal-memory.jsonl'), lookupSourceMessage);
+const roleNotes = openContinuity(path.join(root,'role-notes.jsonl'), lookupSourceMessage, true);
+const tasks = openContinuity(path.join(input,'continuity-tasks.jsonl'), lookupSourceMessage);
 const memoryOperations=new DurableLog(path.join(input,'memory-operations.jsonl'),()=>{});
 const corrections=new DurableLog(path.join(input,'correction-intents.jsonl'),()=>{});
 const workspace=new SceneMemory(input);let paused=false;
+function channelScope(chatKey) {
+  const split = chatKey.indexOf(':');
+  return {kind:chatKey.slice(0,split),id:chatKey.slice(split+1)};
+}
+const sceneCulture = {
+  context(chatKey) {
+    return workspace.query({scope:channelScope(chatKey),sceneId:chatKey})
+      .filter(entry => entry.sourceScope === chatKey)
+      .slice(0,12).map(({kind,text}) => ({kind,text:text.slice(0,220)}));
+  },
+  async apply(win, candidates, windowId) {
+    const scope = channelScope(win.chatKey), sceneId = win.chatKey;
+    const frozen = new Set(win.rows.map(row => String(row.id)));
+    const messages = new Map(canonicalMessages(input).filter(message =>
+      message.role === 'user' && frozen.has(message.messageId) && canonicalChatKey(message.scope) === sceneId
+    ).map(message => [message.messageId, message]));
+    const accepted = candidates.slice(0,4).flatMap(candidate => {
+      if (!['meme','term','topic','rule'].includes(candidate?.kind) ||
+          typeof candidate.text !== 'string' || !candidate.text.trim() || candidate.text.length > 220 ||
+          !Array.isArray(candidate.evidenceIds) || !candidate.evidenceIds.length || candidate.evidenceIds.length > 6 ||
+          !candidate.evidenceIds.every(id => messages.has(id))) return [];
+      const ids = [...new Set(candidate.evidenceIds)].sort();
+      if (candidate.kind === 'topic' && ids.length < 2) return [];
+      return [{kind:candidate.kind,text:candidate.text.trim(),ids}];
+    });
+    if (!accepted.length) return;
+    workspace.ensureScene({operationId:'culture-scene:'+digest(sceneId),sceneId,scope});
+    const manual = new Set(workspace.query({scope,sceneId}).filter(entry => entry.authority === 'manual')
+      .map(entry => digest([sceneId,entry.kind,entry.text.normalize('NFKC').trim()])));
+    for (const {kind,text,ids} of accepted) {
+      if (manual.has(digest([sceneId,kind,text.normalize('NFKC').trim()]))) continue;
+      workspace.entry({operationId:'culture:'+digest([sceneId,windowId,kind,text,ids]),sceneId,scope,kind,text},
+        {evidence:ids.map(id => ({type:'message',id,chatKey:sceneId}))});
+    }
+  }
+};
 const relationshipGraph=openRelationshipGraph(input);
 const graphIdentities=new DurableLog(path.join(input,'graph-identities.jsonl'),()=>{});
 function graphIdentity(p){
@@ -57,11 +173,11 @@ function graphLabelInputs(entities){
  };
  return {groupEntityName,counterpartName};
 }
-async function graph(p){log.assertReadable();const rt=await getRuntime();await ensureIdentity(rt);const entities=canonicalEntities(input);const result=relationshipGraph.project(log.rows,entities,workspace.state(),{...p,...graphLabelInputs(entities),resolveAccount:id=>rt.normalizer.resolveKnown(id)?.id||id,lookupMessage:id=>log.operations.get(digest(id))?.data.message});graphIdentities.assertReadable();const proofs=new Map(graphIdentities.rows.map(r=>[r.data.nodeId,r.data.identity]));for(const n of result.nodes)n.verifiedIdentities=[...new Set((n.accounts?.map(id=>proofs.get('actor:'+id))||[proofs.get(n.id)]).filter(Boolean))];if(p.includeSimilarity&&p.admin){const all=await graphMemories({admin:true});result.edges.push(...graphSimilarity(result.nodes,all.memories,id=>rt.normalizer.resolveKnown(id)?.id||id));}
+async function graph(p){const log=messageLog();log.assertReadable();const rt=await getRuntime();await ensureIdentity(rt);const entities=canonicalEntities(input);const result=relationshipGraph.project(log.rows,entities,workspace.state(),{...p,...graphLabelInputs(entities),resolveAccount:id=>rt.normalizer.resolveKnown(id)?.id||id,lookupMessage:id=>log.operations.get(digest(id))?.data.message});graphIdentities.assertReadable();const proofs=new Map(graphIdentities.rows.map(r=>[r.data.nodeId,r.data.identity]));for(const n of result.nodes)n.verifiedIdentities=[...new Set((n.accounts?.map(id=>proofs.get('actor:'+id))||[proofs.get(n.id)]).filter(Boolean))];if(p.includeSimilarity&&p.admin){const all=await graphMemories({admin:true});result.edges.push(...graphSimilarity(result.nodes,all.memories,id=>rt.normalizer.resolveKnown(id)?.id||id));}
  if(p.includeMemories&&p.admin){const all=await graphMemories({admin:true});for(const m of all.memories){const owner=result.nodes.find(n=>n.accounts?.includes(m.actorId)||n.scope&&canonicalChatKey(n.scope)===m.chatKey);if(!owner)continue;const id='memory:'+m.id;result.nodes.push({id,type:'memory',label:m.text?.slice(0,50)||m.kind,degree:1,activity:0,memory:m});result.edges.push({id:'edge:'+id,source:owner.id,target:id,type:'memory',count:1});}}return result;}
-async function relationship(p){log.assertReadable();return relationshipGraph.revise(p,{messages:log.rows.map(r=>r.data.message),entities:canonicalEntities(input)});}
+async function relationship(p){const log=messageLog();log.assertReadable();return relationshipGraph.revise(p,{messages:log.rows.map(r=>r.data.message),entities:canonicalEntities(input)});}
 function graphEvidence(p){
- log.assertReadable();if(!Array.isArray(p.ids)||p.ids.length>30)throw new MemoryError('INVALID_ARGUMENT','Up to 30 message IDs required');
+ const log=messageLog();log.assertReadable();if(!Array.isArray(p.ids)||p.ids.length>30)throw new MemoryError('INVALID_ARGUMENT','Up to 30 message IDs required');
  const scope=p.admin?null:canonicalChatKey(p.scope),messages=[];
  for(const id of p.ids){const m=log.operations.get(digest(id))?.data.message;if(m&&(!scope||canonicalChatKey(m.scope)===scope))messages.push(m);}
  return {ok:true,messages};
@@ -78,7 +194,7 @@ async function graphMemories(p){
 }
 function backfillMessages(p){
  const from=Number(p.from),to=Number(p.to);if(!Number.isFinite(from)||!Number.isFinite(to)||from>to||!p.scope)throw new MemoryError('INVALID_ARGUMENT','Explicit scope/from/to required');
- const chat=canonicalChatKey(p.scope);log.assertReadable();return log.rows.map(r=>r.data.message).filter(m=>m.role==='user'&&canonicalChatKey(m.scope)===chat&&m.timestamp>=from&&m.timestamp<=to);
+ const chat=canonicalChatKey(p.scope),log=messageLog();log.assertReadable();return log.rows.map(r=>r.data.message).filter(m=>m.role==='user'&&canonicalChatKey(m.scope)===chat&&m.timestamp>=from&&m.timestamp<=to);
 }
 async function relationBackfill(p){
  const all=backfillMessages(p).slice(0,p.snapshotCount??Infinity),offset=Number(p.offset||0),messages=all.slice(offset,offset+50),total=all.length;
@@ -125,13 +241,38 @@ async function entity(p){
  const index=all.findIndex(x=>x.id===canonicalId);if(index<0)all.push(e);else all[index]=e;
  atomic(path.join(input,'entities.json'),all);await ensureIdentity(rt,{force:true});return {ok:true,entityId:id,label:rt.normalizer.resolveKnown(id)?.label};
 }
-async function ingest(p){
+async function ingest(p) {
  if(!Array.isArray(p.messages)||p.messages.length>500)throw new MemoryError('INVALID_ARGUMENT','messages must be an array with at most 500 items');
- const results=[];let accepted=0,duplicates=0,rejected=0;
- for(const raw of p.messages){try{const m=message(raw),operationId=digest(m.messageId),old=log.replay(operationId,m);if(old){duplicates++;results.push({messageId:m.messageId,status:'duplicate'});continue;}
- log.append(operationId,m,{message:m},{ok:true,messageId:m.messageId});accepted++;results.push({messageId:m.messageId,status:'accepted'});
- }catch(e){rejected++;results.push({messageId:raw?.messageId??null,status:e.status===409?'conflict':'invalid',code:e.status===409?'MESSAGE_CONFLICT':e.code||'INVALID_MESSAGE',error:e.message});}}
- const rt=await getRuntime();await ensureIdentity(rt,{force:true});return {ok:true,accepted,duplicates,rejected,results};
+ const results=[], reminderCapture={written:0,replayed:0,rejected:0};
+ let accepted=0,duplicates=0,rejected=0;
+ const now=requestNow(p);
+ const originFile=path.join(input,'portable-origin.json');
+ const origin=fs.existsSync(originFile)?JSON.parse(fs.readFileSync(originFile,'utf8')).namespace:null;
+ const reminderTimeZone=configuredSettings().reminderTimeZone || 'UTC';
+ try { zonedParts(now,reminderTimeZone); } catch { throw new MemoryError('INVALID_ARGUMENT','reminderTimeZone must be an IANA time zone'); }
+ for(const raw of p.messages){
+   let m,old;
+   try{
+     m=message(raw);
+     if(workerData.evaluation===true && m.timestamp>now)throw new MemoryError('INVALID_TIME','Future message in evaluation prefix');
+     const operationId=digest(m.messageId);
+     const log=messageLog();
+     old=log.replay(operationId,m);
+     if(!old)log.append(operationId,m,{message:m},{ok:true,messageId:m.messageId});
+   }catch(e){
+     rejected++;
+     results.push({messageId:raw?.messageId??null,status:e.status===409?'conflict':'invalid',code:e.status===409?'MESSAGE_CONFLICT':e.code||'INVALID_MESSAGE',error:e.message});
+     continue;
+   }
+   if(old)duplicates++;
+   else accepted++;
+   results.push({messageId:m.messageId,status:old?'duplicate':'accepted'});
+   try{
+     const captured=captureExplicitReminder(m,observations,now,origin,{timeZone:reminderTimeZone});
+     if(captured)reminderCapture[captured.ok?(captured.replayed?'replayed':'written'):'rejected']++;
+   }catch{reminderCapture.rejected++;}
+ }
+ return {ok:true,accepted,duplicates,rejected,results,reminderCapture};
 }
 async function remember(p){
  const operationId=requireText(p.operationId||p.deliveryId||digest(p),'operationId',200),replayed=memoryOperations.replay(operationId,p);if(replayed)return replayed;
@@ -141,8 +282,7 @@ async function remember(p){
  if(!hit)throw new MemoryError('UNKNOWN_ENTITY','Register actor before writing memory');
  const source=p.source||'assistant';if(!Array.isArray(p.evidenceIds||[]))throw new MemoryError('INVALID_EVIDENCE','evidenceIds must be an array');
  const ids=[...new Set(p.evidenceIds||[])];if(ids.some(x=>typeof x!=='string'))throw new MemoryError('INVALID_EVIDENCE','evidenceIds must be strings');
- const messages=new Map(canonicalMessages(input).map(m=>[m.messageId,m]));
- const aliasesFile=path.join(input,'evidence-aliases.json');if(fs.existsSync(aliasesFile)){for(const [alias,target]of Object.entries(JSON.parse(fs.readFileSync(aliasesFile,'utf8')))){if(messages.has(target)&&!messages.has(alias))messages.set(alias,messages.get(target));}}
+ const messages=evidenceMessages(ids);
  if(!['manual','assistant','evidence'].includes(source))throw new MemoryError('INVALID_SOURCE','source must be manual, assistant or evidence');
  if(source!=='manual'&&!ids.length)throw new MemoryError('EVIDENCE_REQUIRED','Non-manual memories require accepted source messages');
  const refs=ids.map(id=>{const m=messages.get(id);if(!m||canonicalChatKey(m.scope)!==chatKey||source!=='manual'&&m.role!=='user')throw new MemoryError('INVALID_EVIDENCE','Evidence must be an accepted user message in the requested scope');return {type:'message',id,chatKey,fromTs:m.timestamp,toTs:m.timestamp,reporterId:m.actorId,aboutActorId:actorId,attribution:rt.normalizer.resolveKnown(m.actorId)?.label===hit.label?'self-report':'third-party'};});
@@ -157,7 +297,8 @@ async function remember(p){
  else {const r=store.put({speaker:hit.label,target:'',fact_kind:kind,scope,content,evidenceIds:itemKey?[`item:${scope}:${hit.label}:${itemKey}`]:(ids.length?ids:[`manual:${operationId}`]),provenance:refs,itemProvenance:itemKey?{[itemKey]:refs}:{},delivery,at:new Date().toISOString()});result={ok:true,saved:r.action==='update',action:r.action,rev:r.rev,kind,itemKey,speaker:hit.label};}
  return memoryOperations.append(operationId,p,{kind,actorId,scope,source},result);
 }
-function eventRefs(e){return [{type:'window',id:e.windowId||e.id,chatKey:e.chatKey,fromTs:e.fromTs,toTs:e.toTs,matchMethod:'persisted-window'}];}
+// [by:WorkBuddy] 票 07：窗口级 eventRefs 已由 core/event-gist.mjs 的 eventRefsOf 取代
+// （有 evidenceIds 产 message 级引用，否则原样退回 window 级形状）。
 function subjectScope(p) { return canonicalChatKey(p.scope); }
 async function subjects(p) {
  const rt=await getRuntime(),scope=rt.normalizer.scopeLabel(subjectScope(p)),store=openSubjectStore(rt.dir);
@@ -173,9 +314,8 @@ async function discover(p) {
  const chatKey=subjectScope(p),name=requireText(p.name||p.label,'name',200);
  if(!Array.isArray(p.evidenceIds)||!p.evidenceIds.length)throw new MemoryError('EVIDENCE_REQUIRED','Provide the user messages that introduced this thing');
  if(p.evidenceIds.some(id=>typeof id!=='string')||p.aliases!==undefined&&(!Array.isArray(p.aliases)||p.aliases.some(a=>typeof a!=='string')))throw new MemoryError('INVALID_DISCOVERY','evidenceIds and aliases must be string arrays');
- const all=new Map(canonicalMessages(input).map(m=>[m.messageId,m]));
- const aliasesFile=path.join(input,'evidence-aliases.json');if(fs.existsSync(aliasesFile))for(const [alias,target]of Object.entries(JSON.parse(fs.readFileSync(aliasesFile,'utf8'))))if(all.has(target)&&!all.has(alias))all.set(alias,all.get(target));
- const ids=[...new Set(p.evidenceIds.map(String))],messages=ids.map(id=>{const m=all.get(id);if(!m||m.role!=='user'||canonicalChatKey(m.scope)!==chatKey)throw new MemoryError('INVALID_EVIDENCE','Use accepted user messages from this scope');return {...m,id};});
+ const ids=[...new Set(p.evidenceIds.map(String))],all=evidenceMessages(ids);
+ const messages=ids.map(id=>{const m=all.get(id);if(!m||m.role!=='user'||canonicalChatKey(m.scope)!==chatKey)throw new MemoryError('INVALID_EVIDENCE','Use accepted user messages from this scope');return {...m,id};});
  const rt=await getRuntime();await ensureIdentity(rt);
  const statement=p.statement||'',quote=p.quote||messages.find(m=>m.text.includes(name)&&(p.aliases||[]).every(a=>m.text.includes(a)))?.text||'';
  const win={chatKey,rows:messages.map(m=>({id:m.id,text:m.text,role:m.role,self:false})),fromTs:messages.reduce((n,m)=>Math.min(n,m.timestamp),Infinity),toTs:messages.reduce((n,m)=>Math.max(n,m.timestamp),0)};
@@ -192,24 +332,56 @@ async function subjectRevision(p) {
  const updated=openSubjectStore(rt.dir).reviseObservation(request);
  return memoryOperations.append(operationId,p,{subjectId:p.subjectId},updated);
 }
+function recalledSubjects(rt, scope, query, { namedOnly = false } = {}) {
+ const { subjectDetails } = subjectSection(memoryCoreOf(rt, factStoreOf(rt)).subjects, scope, query, 4);
+ return subjectDetails.filter(d => !namedOnly ||
+  (d.subject.kind !== 'group' && d.sourceScope === scope && d.knowledgeStatus !== 'candidate'))
+  .map(d => ({
+   id: `subject:${d.id || digest(d)}`,
+   text: `${d.knowledgeStatus === 'candidate' ? '【待确认】' : d.authority === 'manual' ? '【人工修订】' : '【来源观察】'}${d.possibleConflict ? '【存在不同说法】' : ''}${d.subject.label} · ${d.aspect}：${d.statement}`,
+   layer: 'subject', knowledgeStatus: d.knowledgeStatus || 'observed',
+   authority: d.authority || 'automatic', possibleConflict: !!d.possibleConflict, sourceRefs: d.provenance || []
+  }));
+}
 async function recall(p){
+ const now=requestNow(p);
+ if(p.observations!==undefined)return observations.query(p.scope,p.observations,now);
  const chatKey=canonicalChatKey(p.scope),rt=await getRuntime();await ensureIdentity(rt);
  const query=typeof p.query==='string'?p.query.trim():'',scope=rt.normalizer.scopeLabel(chatKey),facts=memoryCoreOf(rt,factStoreOf(rt)).manual.readStore();if(facts.readOnlyReason)throw new MemoryError('STORAGE_UNAVAILABLE',facts.readOnlyReason,503);
  const lineage=readLineage(rt.dir);if(!lineage.ok)throw new MemoryError('STORAGE_UNAVAILABLE',lineage.error,503);
- const messages=canonicalMessages(input).filter(m=>canonicalChatKey(m.scope)===chatKey),entities=canonicalEntities(input);
+ const messages=messagesOfChat(chatKey),entities=canonicalEntities(input);
+ const displayItems = items => p.agentView === true ? agentRecallItems(items,p,rt.normalizer,entities) : items;
  const named=mentionedPeople(query,[...rt.normalizer.entities.values(),...entities]);
  const latest=messages.filter(m=>m.role==='user'&&(!p.conversationId||m.conversationId===p.conversationId)).sort((a,b)=>b.timestamp-a.timestamp)[0];
- const actorIds=[...new Set((Array.isArray(p.actorIds)?p.actorIds:[...named.ids,...(latest?.mentions||[]),...messages.map(m=>m.actorId).reverse()]).flatMap(id=>workspace.accounts(id)))];
- const people=actorIds.map(id=>({id,name:canonicalEntities(input).find(e=>e.id===id||e.aliases?.includes(id))?.displayName||id}));
+ const actorIds=workspace.accountsMany(Array.isArray(p.actorIds)?p.actorIds:[...new Set([...named.ids,...(latest?.mentions||[]),...messages.map(m=>m.actorId).reverse()])]);
+ const people=actorIds.map(id=>({id,name:entities.find(e=>e.id===id||e.aliases?.includes(id))?.displayName||id}));
  // Raw evidence and impressions stay scoped; profiles can use explicit administrator sharing below.
  const winners=[...facts.slots.values()].filter(r=>r.scope===scope);
  const candidates=buildInjectCandidates({winners,people,normalizer:rt.normalizer,lineage:lineage.entries,nowScope:scope}),items=[];
  let sims=null,metric='none',degraded=null;
- if(p.purpose!=='automatic'&&query&&candidates.length){const q=rt.normalizer.normalize(query,{context:'query',register:false}).text;const ep={...endpointOf(rt.settings),signal:AbortSignal.timeout(1800),retries:0};
-  if(checkEndpoint(ep).ok)try{const qv=(await embedQueries([q],{...ep,normalizer:rt.normalizer})).vectors[0],dv=(await embedDocuments(candidates.map(c=>c.line),{...ep,normalizer:rt.normalizer})).vectors;sims=dv.map(v=>cosine(qv,v));metric='vector';}catch(e){degraded={code:'EMBED_FAILED',reason:e.message};}
-  else degraded={code:'EMBED_UNCONFIGURED',reason:'Embedding endpoint or model is missing'};
-  if(!sims){sims=tokenOverlapSims(candidates.map(c=>c.line),q);metric='keyword';}
- }
+// [by:WorkBuddy] 2026-11-10：候选行是**原文**——`consolidate` 落盘事实时没有归一化，
+// 而文档侧编码之前直接把这些原文送进 `embedDocuments()`，出境闸门 `assertNormalized()`
+// 必然命中「群里某人的群名片」（实测「自己改」/「一个」这类词条），于是**整批 EMBED_FAILED**
+// ⇒ 召回永久退化为 keyword。这里逐行归一化再编码；归一化失败的行不给向量分（记 0），
+// 既不放松闸门，也不让一行脏文本拖死整批。
+const normalizeLines=lines=>{const texts=[],index=[];lines.forEach((t,i)=>{try{texts.push(rt.normalizer.normalize(t,{context:'document',register:false}).text);index.push(i);}catch{}});return{texts,index};};
+// ⚠️ 候选池是按 scope 的**全量事实行**（实测单个群 3126 条）。整池现场编码 = 313 次 HTTP 调用，
+// 1.8s 预算永远不够，且每次召回都要付一遍钱。改成**两段式**：先用廉价词面分取前 RERANK_TOP_K 条，
+// 只对这些做向量精排；其余候选留 0 分（它们本来就没进词面前列，语义重排也救不回来）。
+const RERANK_TOP_K=20;
+if(p.purpose!=='automatic'&&query&&candidates.length){const q=rt.normalizer.normalize(query,{context:'query',register:false}).text;const ep={...endpointOf(rt.settings),signal:AbortSignal.timeout(8000),retries:0};
+ const lines=candidates.map(c=>c.line),kw=tokenOverlapSims(lines,q);
+ if(checkEndpoint(ep).ok)try{
+  const order=kw.map((s,i)=>({s,i})).sort((a,b)=>b.s-a.s).slice(0,Math.min(RERANK_TOP_K,lines.length)).map(x=>x.i);
+  const prepared=normalizeLines(order.map(i=>lines[i]));
+  if(prepared.texts.length){const qv=(await embedQueries([q],{...ep,normalizer:rt.normalizer})).vectors[0],dv=(await embedDocuments(prepared.texts,{...ep,normalizer:rt.normalizer})).vectors,arr=new Array(lines.length).fill(0);
+   dv.forEach((v,k)=>{const target=order[prepared.index[k]];if(target!=null)arr[target]=cosine(qv,v);});
+   sims=arr;metric='vector';}
+  else degraded={code:'EMBED_EMPTY',reason:'候选行全部无法归一化'};
+ }catch(e){degraded={code:'EMBED_FAILED',reason:e.message};}
+ else degraded={code:'EMBED_UNCONFIGURED',reason:'Embedding endpoint or model is missing'};
+ if(!sims){sims=kw;metric='keyword';}
+}
  const selected=selectInjectLines({candidates,sims,minScore:metric==='keyword'?DEFAULT_TOKEN_MIN_SCORE:rt.settings.injectThreshold,mode:query?'hard':'boost',perPerson:2,total:8});
  for(const l of selected.lines){const c=candidates.find(c=>c.line===l.line&&c.who===l.who),refs=c.rec.provenance||[];items.push({id:`fact:${digest(c.rec.key)}`,text:`${refs.some(r=>r.attribution==='third-party')?'【含他人转述】':''}${l.who}：${l.line}`,layer:'semantic',sourceRefs:refs,score:l.score});}
  const persistedSettings=fs.existsSync(path.join(root,'settings.json'))?JSON.parse(fs.readFileSync(path.join(root,'settings.json'))):{};
@@ -227,38 +399,178 @@ async function recall(p){
    metric='keyword';
  }
  for(const item of items)if(item.layer==='profile')item.sourceRefs=item.sourceRefs.filter(r=>r.chatKey===chatKey);
+ if(p.purpose==='automatic' && p.natural===true) {
+   reminderDeliveries.assertReadable();
+   const pending=new Set();
+   for(const receipt of receipts.values()){
+     if(receipt.expires>Date.now())for(const key of receipt.delivered.values())pending.add(key);
+   }
+   const due=p.suppressReminder===true ? null : observations.due(p.scope,now,row=>{
+     const key=reminderKey(chatKey,row);
+     return pending.has(key)||reminderDeliveries.operations.has(key);
+   });
+   const delivered = new Map();
+   const related=items.filter(item=>['semantic','profile'].includes(item.layer) && item.matchMethod==='keyword');
+   items.length=0;
+   if(due) {
+     try {
+       const label=rt.normalizer.normalize(due.payload.reminder.label,{context:'document',register:false}).text;
+       const d=due.payload.duePrecision==='day'?zonedParts(due.payload.dueAt,due.payload.timeZone):null;
+       const when=d?`${d.year}-${String(d.month).padStart(2,'0')}-${String(d.day).padStart(2,'0')}（${due.payload.timeZone}，仅日期）`:new Date(due.payload.dueAt).toISOString();
+       const speaker=rt.normalizer.resolveKnown(due.payload.subject)?.label;
+       const text=`${speaker?'〔'+speaker+'〕的':''}到期事项（${when}）：${label}`;
+       assertNormalized([text],rt.normalizer);
+       const id=`observation:${digest([due.key,due.revision])}`;
+       delivered.set(id,reminderKey(chatKey,due));
+       items.push({id,text,layer:'observation',
+         sourceRefs:due.references.map(ref=>({type:'message',id:ref.key.id,chatKey}))});
+     } catch { /* Fall back to the current topic when the label cannot be rendered. */ }
+   }
+   // Natural recall can consult supported memories and historical user quotes.
+   // It never fills an empty topic with arbitrary recent conversation.
+   if(topicTerms(query).length) {
+     items.push(...recalledSubjects(rt, scope, query, { namedOnly: true }));
+     const pool=[...related];
+     const observed=observations.query(p.scope,{asOf:now,status:'planned',limit:50},now);
+     for(const row of observed.records) {
+       const label=row.payload.reminder?.label, score=label?topicScore(query,label):0;
+       if(!score || row.references.some(ref=>lookupSourceMessage(ref.key.id)?.timestamp>now-5*60*1000))continue;
+       try {
+         const speaker=rt.normalizer.resolveKnown(row.payload.subject)?.label;
+         const text=(speaker?'〔'+speaker+'〕':'来源用户')+'曾约定：'+rt.normalizer.normalize(label,{context:'document',register:false}).text;
+         assertNormalized([text],rt.normalizer);
+         pool.push({id:`observation:${digest([row.key,row.revision])}`,text,layer:'observation',score,
+           sourceRefs:row.references.map(ref=>({type:'message',id:ref.key.id,chatKey}))});
+       }catch{}
+     }
+     const past=messages.filter(m=>m.role==='user' && m.timestamp<=now-5*60*1000 && observations.currentSource(p.scope,m.messageId) &&
+       (!latest || m.timestamp<latest.timestamp-5*60*1000) && m.text.trim()!==query &&
+       (!p.conversationId||m.conversationId===p.conversationId));
+     let indexed=[];
+     const terms=topicTerms(query).sort((a,b)=>b.length-a.length).slice(0,8);
+     try {
+       indexed=(await searchHistory({spaceDir:root,terms,limit:12,matchAny:true,accept:m=>
+         m.role==='user' && canonicalChatKey(m.scope)===chatKey && m.timestamp<=now-5*60*1000 && observations.currentSource(p.scope,m.messageId) &&
+         (!latest || m.timestamp<latest.timestamp-5*60*1000) && m.text.trim()!==query &&
+         (!p.conversationId||m.conversationId===p.conversationId)})).map(hit=>lookupSourceMessage(hit.messageId));
+     }catch(error){if(error.code!=='HISTORY_INDEX_MISSING')degraded??={code:'HISTORY_INDEX_UNAVAILABLE'};}
+     for(const quote of recallEvidence({query,chatKey,conversationId:p.conversationId,messages:past,items:related,
+       indexed,lookupMessage:lookupSourceMessage,normalizer:rt.normalizer})) {
+       const source=lookupSourceMessage(quote.sourceRefs[0]?.id);
+       if(source?.role==='user' && source.timestamp<=now-5*60*1000 && observations.currentSource(p.scope,source.messageId) &&
+         (!latest || source.timestamp<latest.timestamp-5*60*1000)) {
+         const score=topicScore(query,source.text);
+         if(score)pool.push({...quote,score,matchMethod:'source-quote'});
+       }
+     }
+     pool.sort((a,b)=>(Number(b.score)||0)-(Number(a.score)||0));
+     const ids=new Set(items.map(item=>item.id));
+     for(const item of pool)if(!ids.has(item.id)){items.push(item);ids.add(item.id);}
+   }
+   items.splice(naturalRecallLimit(p));
+   return finishRecall(displayItems(items), chatKey, metric, degraded, [], undefined, delivered);
+ }
  const hitCounts=readHitLog({libDir:rt.dir}).counts,recent=readRecentEvents({libDir:rt.dir,chatKey,limit:rt.settings.consolidateInjectCount||6,hitCounts}),eventIds=new Set(recent.map(e=>e.id));
  let eventRows=recent;
  if(query){const q=rt.normalizer.normalize(query,{register:false}).text,hits=searchEvents(getEventIndex({libDir:rt.dir}),q,{chatKey,limit:3,minScore:rt.settings.consolidateEventMinScore||0.18,exclude:eventIds});eventRows=[...recent,...readEventsById({libDir:rt.dir,chatKey,ids:hits.map(h=>h.id),hitCounts})];}
- for(const e of eventRows){eventIds.add(e.id);items.push({id:`event:${e.id}`,text:e.summary,layer:e.promotedAt?'long-term':'episodic',sourceRefs:eventRefs(e)});}
- if(query){const r=await router.handle({method:'POST',path:'/search',body:{q:query,chatKey,k:p.limit||8,mode:p.purpose==='automatic'?'keyword':p.mode||'auto',includeEvents:false}});if(!r.body?.ok)throw new MemoryError(r.body?.code||'SEARCH_FAILED',r.body?.error||'Search failed',r.status);
-  metric=r.body.mode==='vector'?'vector':metric==='vector'?'hybrid':'keyword';degraded=degraded||r.body.degraded;
-  const events=new Map(readEventRows({libDir:rt.dir}).rows.map(e=>[e.id,e]));
-  for(const h of r.body.hits||[]){if(h.chatKey!==chatKey)continue;const e=events.get(h.id);if(e&&eventIds.has(e.id))continue;items.push({id:`document:${h.id}`,text:h.text||h.title||'',layer:'long-term',sourceRefs:e?eventRefs(e):[{type:'window',id:h.id,chatKey,matchMethod:'corpus-document'}],score:h.score});if(e)eventIds.add(e.id);}
+// [by:WorkBuddy] 票 07：注入侧回查闸门（fail-closed）。
+// 三重校验全部落在 worker 的注入装配点：router.mjs 只服务 /search 命中，不参与注入，
+// 所以「校验失败不注入」在这里真正生效，且完全不碰 router.mjs。
+// 完整事件行（含 evidenceIds）读一次；老事件行没有该字段 ⇒ audit 直接放行、引用退回 window 级。
+const eventFullRows=new Map(readEventRows({libDir:rt.dir}).rows.map(e=>[e.id,e]));
+// [by:WorkBuddy] 2026-11-10 — 原实现为了给 auditEventQuotation 查那么几条消息，把
+// 82 万条消息逐条 `{...m}` 展开成新对象塞进 Map（约 1 GB + 82 万次 Map 插入），
+// 是 recall 从「几秒」变「一百多秒」的主因之一。改成按需反查：消息入库时的
+// operationId 就是 `digest(messageId)`（见 ingest 的 `log.append(digest(m.messageId),…)`），
+// 日志操作表本身 O(1)，命中才展开那一条。
+const lookupMessage=id=>{
+ const row=messageLog().operations.get(digest(String(id)));
+ if(!row?.data?.message)return undefined;
+ const m=row.data.message;let ck='';try{ck=canonicalChatKey(m.scope);}catch{}
+ return {...m,chatKey:ck};
+};
+const quoteAudit={checked:0,blocked:0,failures:[]};
+// 把 evidenceIds 从完整账本行补到注入用的裁剪行，再跑三重校验；
+// 失败返回 null 让调用方拦下该项（不 push），并把稳定失败码留在诊断里，绝不静默放行。
+const gate=e=>{
+ const full=eventFullRows.get(e.id);
+ const target=full&&Array.isArray(full.evidenceIds)?{...e,evidenceIds:full.evidenceIds}:e;
+ // [by:WorkBuddy] 只把「事件行显式声明的 quote」交给第三重引文校验。
+ // summary 是派生摘要、不是逐字引文；拿它当 quote 会把所有 episodic 项误拦掉。
+ // 未声明 quote 时 auditEventQuotation 仍做来源 id + 时间窗两重，并不等于跳过校验。
+ const a=auditEventQuotation(target,{lookupMessage,quote:full?.quote??e.quote});
+ if(a.checked)quoteAudit.checked++;
+ if(!a.ok){quoteAudit.blocked++;quoteAudit.failures.push({id:e.id,code:a.code,failures:a.failures});return null;}
+ return target;
+};
+for(const e of eventRows){eventIds.add(e.id);const g=gate(e);if(!g)continue;items.push({id:`event:${e.id}`,text:e.summary,layer:e.promotedAt?'long-term':'episodic',sourceRefs:eventRefsOf(g)});}
+if(query){const r=await router.handle({method:'POST',path:'/search',body:{q:query,chatKey,k:p.limit||8,mode:p.purpose==='automatic'?'keyword':p.mode||'auto',includeEvents:false}});if(!r.body?.ok)throw new MemoryError(r.body?.code||'SEARCH_FAILED',r.body?.error||'Search failed',r.status);
+ metric=r.body.mode==='vector'?'vector':metric==='vector'?'hybrid':'keyword';degraded=degraded||r.body.degraded;
+ for(const h of r.body.hits||[]){if(h.chatKey!==chatKey)continue;const e=eventFullRows.get(h.id);if(e&&eventIds.has(e.id))continue;
+  let g=null;
+  if(e){g=gate(e);if(!g){eventIds.add(e.id);continue;}}
+  items.push({id:`document:${h.id}`,text:h.text||h.title||'',layer:'long-term',sourceRefs:g?eventRefsOf(g):[{type:'window',id:h.id,chatKey,matchMethod:'corpus-document'}],score:h.score});if(e)eventIds.add(e.id);}
+}
+ if(query && p.purpose==='query') {
+   const terms = tokenize(query.slice(0, 600)).filter(term => term.length > 1)
+     .sort((a,b)=>Number(/\d/.test(b))-Number(/\d/.test(a)) || b.length-a.length).slice(0,8);
+   let indexed = [];
+   if(terms.length) {
+     try {
+       indexed = await searchHistory({spaceDir:root,terms,limit:12,matchAny:true,
+         accept:m=>canonicalChatKey(m.scope)===chatKey&&(!p.conversationId||m.conversationId===p.conversationId)});
+     } catch(error) {
+       if(error.code!=='HISTORY_INDEX_MISSING') degraded ??= {code:'HISTORY_INDEX_UNAVAILABLE'};
+     }
+   }
+   items.unshift(...recallEvidence({query,chatKey,conversationId:p.conversationId,messages,items,lookupMessage,
+     indexed:indexed.map(hit=>lookupMessage(hit.messageId)),normalizer:rt.normalizer}));
  }
- const subjects=subjectSection(memoryCoreOf(rt,factStoreOf(rt)).subjects,scope,query,4);
- for(const d of subjects.subjectDetails)items.push({id:`subject:${d.id||digest(d)}`,text:`${d.knowledgeStatus==='candidate'?'【待确认】':d.authority==='manual'?'【人工修订】':'【来源观察】'}${d.possibleConflict?'【存在不同说法】':''}${d.subject.label} · ${d.aspect}：${d.statement}`,layer:'subject',knowledgeStatus:d.knowledgeStatus||'observed',authority:d.authority||'automatic',possibleConflict:!!d.possibleConflict,sourceRefs:d.provenance||[]});
- const working=canonicalMessages(input).filter(m=>canonicalChatKey(m.scope)===chatKey&&(!p.conversationId||m.conversationId===p.conversationId)).sort((a,b)=>b.timestamp-a.timestamp).slice(0,6).reverse();
+ items.push(...recalledSubjects(rt, scope, query));
+ const working=messagesOfChat(chatKey).filter(m=>!p.conversationId||m.conversationId===p.conversationId).sort((a,b)=>b.timestamp-a.timestamp).slice(0,6).reverse();
  for(const m of working)items.push({id:`message:${m.messageId}`,text:`${m.actorId}：${m.text}`,layer:'working',sourceRefs:[{type:'message',id:m.messageId,chatKey,fromTs:m.timestamp,toTs:m.timestamp}]});
  const sceneState=workspace.state();
  for(const e of workspace.query({scope:p.scope,sceneId:p.sceneId}).filter(e=>p.sceneId||sceneState.scenes[e.sceneId].bindings.some(b=>canonicalChatKey(b)===chatKey)).slice(0,Math.min(8,Math.max(1,Number(p.limit)||4)))){const same=e.sourceScope===chatKey;items.push({id:e.id,text:`${sceneState.scenes[e.sceneId].name} · ${e.kind}：${e.text}`,layer:'scene',sceneId:e.sceneId,status:e.status,sourceRefs:e.evidence.filter(ref=>ref.chatKey===chatKey),sourceScope:same?e.sourceScope:undefined,sourceVisibility:same?'visible':'restricted'});}
+ return finishRecall(displayItems(items), chatKey, metric, degraded, eventIds, quoteAudit);
+}
+function finishRecall(items, chatKey, metric, degraded, eventIds, quoteAudit, delivered = new Map()) {
  const unique=[...new Map(items.map(i=>[i.id,i])).values()],receiptId=randomUUID();
  for(const [id,r]of receipts)if(r.expires<Date.now())receipts.delete(id);
- receipts.set(receiptId,{expires:Date.now()+60000,chatKey,itemIds:new Set(unique.map(i=>i.id)),eventIds:new Set(eventIds),adopted:new Set()});
- return {ok:true,items:unique,block:unique.length?'<!--mv-inject-->\n'+unique.map(i=>`【${i.layer}】${i.text}`).join('\n'):'',receiptId,actualMode:metric,degraded};
+ receipts.set(receiptId,{expires:Date.now()+60000,chatKey,itemIds:new Set(unique.map(i=>i.id)),eventIds:new Set(eventIds),adopted:new Set(),delivered});
+ // [by:WorkBuddy] 票 07：可观测诊断。只有真的回查过（checked>0）或拦下过（blocked>0）才附加，
+ // 老事件行 / 空注入时响应形状逐字不变，避免给既有调用方塞新字段。
+ return {ok:true,items:unique,block:unique.length?'<!--mv-inject-->\n'+unique.map(i=>`【${i.layer}】${i.text}`).join('\n'):'',receiptId,actualMode:metric,degraded,
+  ...(quoteAudit?.checked||quoteAudit?.blocked?{quoteAudit}:{})};
 }
 async function adoption(p){const r=receipts.get(p.receiptId);if(!r||r.expires<=Date.now()){receipts.delete(p.receiptId);return {ok:true,accepted:false,reason:'unknown-or-expired'};}
  if(!Array.isArray(p.itemIds)||p.itemIds.some(id=>!r.itemIds.has(id)))throw new MemoryError('INVALID_ADOPTION','itemIds must be a subset of the receipt');
  const fresh=p.itemIds.filter(id=>!r.adopted.has(id));
+ for(const id of fresh){
+   const key=r.delivered.get(id);
+   if(key && !reminderDeliveries.replay(key,{chatKey:r.chatKey})) {
+     reminderDeliveries.append(key,{chatKey:r.chatKey},{chatKey:r.chatKey},{ok:true});
+   }
+ }
  const ids=fresh.filter(id=>id.startsWith('event:')).map(id=>id.slice(6));
  const docIds=fresh.filter(id=>id.startsWith('document:')).map(id=>id.slice(9)).filter(id=>r.eventIds.has(id));
  const rt=await getRuntime(),rehearsal=bumpEventHits({libDir:rt.dir,ids:[...new Set([...ids,...docIds])],now:Date.now()});fresh.forEach(id=>r.adopted.add(id));return {ok:true,accepted:true,replayed:!fresh.length,rehearsal};}
-async function job(p){const cfg=configuredSettings();if(p.type==='consolidate'){if(!cfg.llmBaseURL||!cfg.llmModel)throw new MemoryError('LLM_UNCONFIGURED','Consolidation requires llmBaseURL and llmModel');const result=await runConsolidateNow({force:true,limit:p.limit,chatKey:p.scope?canonicalChatKey(p.scope):undefined,reason:'v1-job'});if(result.failedWindows>0)throw new MemoryError('CONSOLIDATE_FAILED',result.details?.filter(d=>d.error).map(d=>d.error).join('; ')||'Consolidation failed',502,{result});return result;}
- if(p.type==='index'){const rt=await getRuntime();if(!checkEndpoint(endpointOf(rt.settings)).ok)throw new MemoryError('EMBED_UNCONFIGURED','Indexing requires embedding endpoint and model');return await runIndex({reason:'v1-job'});}throw new MemoryError('INVALID_JOB','type must be consolidate or index');}
-async function status(){const rt=await getRuntime();return {ok:true,messages:canonicalMessages(input).length,entities:canonicalEntities(input).length,background:backgroundStatus,embeddingConfigured:checkEndpoint(endpointOf(rt.settings)).ok,llmConfigured:!!(rt.settings.llmBaseURL&&rt.settings.llmModel),dataRoot:legacy,sourceRoot:input};}
+async function job(p,ctx){const cfg=configuredSettings();if(p.type==='consolidate'){if(!cfg.llmBaseURL||!cfg.llmModel)throw new MemoryError('LLM_UNCONFIGURED','Consolidation requires llmBaseURL and llmModel');const result=await runConsolidateNow({force:true,limit:p.limit,chatKey:p.scope?canonicalChatKey(p.scope):undefined,reason:'v1-job',sceneCulture:cfg.sceneCultureEnabled===true?sceneCulture:null,...(Number(cfg.consolidateClockMs)>0?{now:Number(cfg.consolidateClockMs)}:{})});if(result.failedWindows>0)throw new MemoryError('CONSOLIDATE_FAILED',result.details?.filter(d=>d.error).map(d=>d.error).join('; ')||'Consolidation failed',502,{result});return result;}
+ if(p.type==='index'){const rt=await getRuntime();if(!checkEndpoint(endpointOf(rt.settings)).ok)throw new MemoryError('EMBED_UNCONFIGURED','Indexing requires embedding endpoint and model');return await runIndex({reason:'v1-job',reembedEvents:p.reembedEvents===true});}if(p.type==='history-lexical'){const meta=await buildIndex({spaceDir:root,onProgress:ctx?.emit});return {ok:true,...meta};}throw new MemoryError('INVALID_JOB','type must be consolidate, index or history-lexical');}
+async function status(){const rt=await getRuntime();const historyIndex=await historyFacts(root);return {ok:true,messages:canonicalMessages(input).length,entities:canonicalEntities(input).length,background:backgroundStatus,embeddingConfigured:checkEndpoint(endpointOf(rt.settings)).ok,llmConfigured:!!(rt.settings.llmBaseURL&&rt.settings.llmModel),dataRoot:legacy,sourceRoot:input,historyIndex};}
 async function workspaceOp(p) {
  const {action,admin,...request}=p;
- if(action==='state')return {ok:true,...workspace.state(),accounts:canonicalEntities(input)};
+ if(action==='state'){
+   const rt=await getRuntime();await ensureIdentity(rt);
+   const accounts=canonicalEntities(input);
+   const displayNames=new Map(accounts.map(e=>[e.id,e.displayName]));
+   const people=[];
+   for(const [label,id] of rt.normalizer.byLabel){
+     if(!/^P\d+$/.test(label))continue;
+     const entity=rt.normalizer.entities.get(id);
+     people.push({label,id,name:displayNames.get(id)||[...(entity?.surface||[])][0]||id});
+   }
+   return {ok:true,...workspace.state(),accounts,people};
+ }
  if(action==='scenes') {const state=workspace.state(),chat=canonicalChatKey(request.scope),visible=new Set(workspace.query(request).map(e=>e.sceneId));return {ok:true,scenes:Object.values(state.scenes).filter(s=>s.bindings.some(b=>canonicalChatKey(b)===chat)||visible.has(s.sceneId)).map(s=>({sceneId:s.sceneId,name:s.name,type:s.type,nameSource:sceneNameSource(s)}))};}
   if(action==='ensureScene') {
    const sceneId=canonicalChatKey(request.scope);
@@ -321,19 +633,43 @@ async function recoverCorrections(){
    appliedCorrections.add(d.request.operationId);
  }
 }
-const operations={graphEvidence,graphIdentity,graph,relationship,graphMemories,relationBackfill,ingest,entity,remember,discover,subjects,subject,subjectRevision,recall,adoption,job,status,workspace:workspaceOp,person,quiesce:async()=>{paused=true;return {ok:true};},audit:async()=>{relationshipGraph.revisions.assertReadable();graphIdentities.assertReadable();log.assertReadable();memoryOperations.assertReadable();workspace.state();const rt=await getRuntime();if(factStoreOf(rt).readOnlyReason)throw new MemoryError('STORAGE_UNAVAILABLE','Fact store damaged',503);memoryCoreOf(rt,factStoreOf(rt)).manual.items();openSubjectStore(rt.dir).snapshot();const lineage=readLineage(rt.dir);if(!lineage.ok)throw new MemoryError('STORAGE_UNAVAILABLE',lineage.error,503);return {ok:true};}};
+const operations={portableObservation:request=>observations.importRecord(request),observe:request=>{
+ const {evaluationNow,...body}=request;
+ return observations.write(body,{now:requestNow(request)});
+ },graphEvidence,graphIdentity,graph,relationship,graphMemories,relationBackfill,ingest,entity,remember,discover,subjects,subject,subjectRevision,recall,adoption,job,status,workspace:workspaceOp,person,quiesce:async()=>{paused=true;return {ok:true};},audit:async()=>{observations.audit();reminderDeliveries.assertReadable();relationshipGraph.revisions.assertReadable();graphIdentities.assertReadable();messageLog().assertReadable();memoryOperations.assertReadable();workspace.state();const rt=await getRuntime();if(factStoreOf(rt).readOnlyReason)throw new MemoryError('STORAGE_UNAVAILABLE','Fact store damaged',503);memoryCoreOf(rt,factStoreOf(rt)).manual.items();openSubjectStore(rt.dir).snapshot();const lineage=readLineage(rt.dir);if(!lineage.ok)throw new MemoryError('STORAGE_UNAVAILABLE',lineage.error,503);return {ok:true};}};
 const operationQueue=createOperationQueue(async()=>{await recoverCorrections();await getRuntime();});
+Object.assign(operations, {roleNotesWrite: roleNotes.write, roleNotesQuery: roleNotes.query, tasksWrite: tasks.write, tasksQuery: tasks.query});
+operations.readiness = () => {
+ roleNotes.audit();
+ tasks.audit();
+ loadedMessageLog?.assertReadable();
+ return {ok:true, ready:true, messageJournal:loadedMessageLog ? 'ready' : 'cold'};
+};
+// These operations only touch continuity journals and query message evidence on demand.
+const independentOperations = new Set(['readiness', 'roleNotesQuery', 'roleNotesWrite', 'tasksQuery', 'tasksWrite']);
+operations.temporalWrite = temporalMemory.write;
+operations.temporalQuery = temporalMemory.query;
+const auditSpace = operations.audit;
+operations.audit = async () => {
+ temporalMemory.audit();
+ roleNotes.audit();
+ tasks.audit();
+ return auditSpace();
+};
 function isReadOnly(operation,p){
+ if(['readiness','temporalQuery','roleNotesQuery','tasksQuery'].includes(operation))return true;
  if(['status','graph','graphMemories','graphEvidence','subjects','subject','recall'].includes(operation))return true;
  if(operation==='workspace')return ['state','scenes','query','preview'].includes(p?.action);
  return operation==='person'&&p?.action!=='revision';
 }
 parentPort.on('message',m=>{
  const payload=m.payload||{};
+ // 长任务（历史索引重建）每跑完一段就回一条进度帧；engine.mjs 会把它交给 onProgress，不当成结果。
+ const emit=progress=>{try{parentPort.postMessage({type:'progress',id:m.id,progress});}catch{}};
  operationQueue.run(async()=>{
   if(!operations[m.operation])throw new MemoryError('INVALID_OPERATION','Unknown engine operation');
-  return operations[m.operation](payload);
- },{readOnly:isReadOnly(m.operation,payload),longRunning:['job','relationBackfill'].includes(m.operation)})
+  return operations[m.operation](payload,{emit});
+ },{readOnly:isReadOnly(m.operation,payload),skipPrepare:independentOperations.has(m.operation),longRunning:['job','relationBackfill'].includes(m.operation)})
  .then(result=>parentPort.postMessage({id:m.id,result}),e=>parentPort.postMessage({id:m.id,error:{message:e.message,code:e.code||'ENGINE_FAILED',status:e.status||500,result:e.result}}));
 });
 

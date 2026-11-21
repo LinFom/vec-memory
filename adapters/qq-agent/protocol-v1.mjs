@@ -56,6 +56,22 @@ export function createProtocolBridge({config,dataDir,fetcher=(...args)=>fetch(..
       const r=await fetcher(`${target.base}/api/v1/spaces/${encodeURIComponent(target.space)}/${route}`,{method,headers:{'Content-Type':'application/json',Authorization:`Bearer ${token}`},body:JSON.stringify(body),signal:ac.signal});const p=await r.json();if(!r.ok||p.ok===false)throw Error(p.error?.message||p.error||`HTTP ${r.status}`);return p;
     }finally{clearTimeout(timer);controllers.delete(ac);}
   }
+  let featureCache=null;
+  async function supports(feature) {
+    if(stopped)return false;
+    if(!featureCache||featureCache.until<Date.now()){
+      const entry={until:Date.now()+60000};
+      entry.result=Promise.resolve().then(async()=>{
+        const token=String(config().serviceToken||'');
+        const r=await fetcher(`${target.base}/api/v1/version`,{headers:{Authorization:`Bearer ${token}`},signal:AbortSignal.timeout(1500)});
+        if(!r.ok)return [];
+        const value=await r.json();
+        return Array.isArray(value.capabilities)?value.capabilities:[];
+      }).catch(()=>[]);
+      featureCache=entry;
+    }
+    return (await featureCache.result).includes(feature);
+  }
   function enqueue(messages, cursor = null) {
     for(const m of messages) if(!queuedIds.has(m.messageId)) { state.queue.push(m); queuedIds.add(m.messageId); }
     if(cursor)state.cursors[cursor.chat]=cursor.id;
@@ -68,14 +84,41 @@ export function createProtocolBridge({config,dataDir,fetcher=(...args)=>fetch(..
       if(!pending.length&&state.lastError){state.lastError=null;save();}
       try {
         for(let n=0;n<pending.length&&!stopped;n+=100) {
-          const batch=pending.slice(n,n+100), result=await request('messages',{messages:batch});
+          // 投递超时单独放宽到 15s：批量 100 条 + 服务在回填/建索引时，2500ms 会频繁
+          // abort（表现是 `lastError:This operation was aborted`、队列反复重试）。
+          const batch=pending.slice(n,n+100), result=await request('messages',{messages:batch},'POST',15000);
           if(stopped)return;
           if(!Array.isArray(result.results))throw Error('消息接口缺少逐条接收结果');
+          if(result.reminderCapture && typeof result.reminderCapture==='object'){
+            const prior=state.reminderCapture||{};
+            const counts={};
+            for(const key of ['written','replayed','rejected']){
+              const n=result.reminderCapture[key];
+              counts[key]=(prior[key]||0)+(Number.isSafeInteger(n)&&n>=0?n:0);
+            }
+            state.reminderCapture=counts;
+          }
           const batchIds=new Set(batch.map(m=>m.messageId));
-          const accepted=new Set(result.results.filter(r=>batchIds.has(r.messageId)&&['accepted','duplicate'].includes(r.status)).map(r=>r.messageId));
-          state.queue=state.queue.filter(m=>!accepted.has(m.messageId));
-          for(const id of accepted)queuedIds.delete(id);
-          if(accepted.size<batch.length)state.lastError=`投递失败：${result.results.filter(r=>!['accepted','duplicate'].includes(r.status)).map(r=>r.code||r.status).join(', ')||'未收到完整回执'}`;
+          const accepted=new Set(), terminal=new Set(), retry=new Set();
+          for(const r of result.results) {
+            if(!r||!batchIds.has(r.messageId))continue;
+            if(r.status==='accepted'||r.status==='duplicate')accepted.add(r.messageId);
+            // `conflict`/`invalid` 是**终态**：同一条消息重投一万次还是同一个结果
+            // （messageId 撞了但内容/身份对不上，或字段不合法）。留在队列里只会
+            // 让 `state.queue.length>0` 永久挡住 syncChats ⇒ 新消息再也不入库。
+            else if(r.status==='conflict'||r.status==='invalid')terminal.add(r.messageId);
+            else retry.add(r.messageId);                 // 服务端瞬时错误才值得重投
+          }
+          const settle=new Set([...accepted,...terminal]);
+          state.queue=state.queue.filter(m=>!settle.has(m.messageId));
+          for(const id of settle)queuedIds.delete(id);
+          if(terminal.size){
+            state.droppedTerminal=(state.droppedTerminal||0)+terminal.size;
+            const first=result.results.find(r=>terminal.has(r.messageId));
+            state.lastTerminal={at:Date.now(),count:terminal.size,code:first?.code||first?.status||null,error:String(first?.error||'').slice(0,200)};
+          }
+          if(retry.size||accepted.size+terminal.size<batch.length)
+            state.lastError=`投递失败：${[...retry].map(id=>result.results.find(r=>r.messageId===id)?.code||'no-receipt').join(', ')||'未收到完整回执'}`;
           if(!state.queue.length)state.lastError=null;
           save();
         }
@@ -83,17 +126,40 @@ export function createProtocolBridge({config,dataDir,fetcher=(...args)=>fetch(..
     }).finally(()=>{running=null;});
     return running;
   }
+  /**
+   * 宿主的 `listChats()` 形状**各树不同**：旧京玉给 chatKey 字符串，洛版给
+   * `{chatKey,lastActive,lastText,unread,count}` 对象。直接 `String(chat)` 会得到
+   * `'[object Object]'` ⇒ 所有会话共用一个游标键、`recent('[object Object]')` 恒空 ⇒
+   * **静默零入库**（不报错、不回执失败，只是永远没消息）。这里统一归一化成 chatKey。
+   */
+  function chatKeysOf() {
+    const out=[];
+    for(const raw of store.listChats()||[]) {
+      const key=typeof raw==='string'?raw:String(raw?.chatKey??raw?.key??'').trim();
+      if(key&&!out.includes(key))out.push(key);
+    }
+    return out;
+  }
+
   /** 把各会话存档里游标之后的条目搬进队列（消息主通道；节律沿用 0.32.x，别改）。 */
   async function syncChats() {
     if(!store?.listChats||!store?.recent)return;
-    for(const chat of store.listChats()) {
+    for(const chat of chatKeysOf()) {
       if(stopped)return;
       const cursor=Number(state.cursors[chat]||0);
-      let offset=0;const entries=[];
+      let offset=0;const entries=[],seen=new Set();
       for(;;) {
-        const page=store.recent(chat,{limit:500,offset,includeSelf:true});
-        for(const e of page)if(Number(e.id)>cursor)entries.push(e);
-        if(page.length<500||page.some(e=>Number(e.id)<=cursor))break;
+        const page=store.recent(chat,{limit:500,offset,includeSelf:true})||[];
+        let fresh=0;
+        for(const e of page) {
+          const k=String(e?.id);
+          if(seen.has(k))continue;
+          seen.add(k);fresh++;
+          if(Number(e.id)>cursor)entries.push(e);
+        }
+        // 宿主的 recent 可能**不认 offset**（洛版 store 就是这样）：同一页会被反复返回。
+        // `fresh===0` 是唯一可靠的「到底了」判据；少了它，cursor=0 的会话会永远循环。
+        if(page.length<500||fresh===0||page.some(e=>Number(e.id)<=cursor))break;
         offset+=page.length;
       }
       entries.sort((a,b)=>Number(a.id)-Number(b.id));
@@ -213,5 +279,5 @@ export function createProtocolBridge({config,dataDir,fetcher=(...args)=>fetch(..
     }).finally(()=>{syncing=null;});
     return syncing;
   }
-  return {request,enqueue,flush,sync,status:()=>({pending:state.queue.length,lastError:state.lastError,cursors:{...state.cursors},channelNames:{...(state.channelNames||{})},channelSyncAt:state.channelSyncAt??null,channelSyncError:state.channelSyncError??null}),stop(){stopped=true;for(const ac of controllers)ac.abort();}};
+  return {request,supports,enqueue,flush,sync,status:()=>({pending:state.queue.length,lastError:state.lastError,droppedTerminal:state.droppedTerminal||0,reminderCapture:{...(state.reminderCapture||{})},lastTerminal:state.lastTerminal??null,cursors:{...state.cursors},channelNames:{...(state.channelNames||{})},channelSyncAt:state.channelSyncAt??null,channelSyncError:state.channelSyncError??null}),stop(){stopped=true;for(const ac of controllers)ac.abort();}};
 }

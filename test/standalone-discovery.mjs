@@ -33,7 +33,7 @@ test('automatic consolidation grows a new thing, updates aliases, respects human
   fs.writeFileSync(path.join(root,'settings.json'),JSON.stringify({llmBaseURL:'http://127.0.0.1:'+model.address().port,llmModel:'mock',consolidateSettleMin:0,layerMaintenance:false}));
   let engine=createSpaceEngine({root});t.after(async()=>{await engine.close();await new Promise(resolve=>model.close(resolve));fs.rmSync(root,{recursive:true,force:true})});
   const scope={kind:'group',id:'team'},start=Date.now()-3600000;
-  const run=async(id,text,discoveries)=>{output=discoveries;await engine.call('ingest',{messages:[{messageId:id,conversationId:'team',actorId:'alice',role:'user',timestamp:start+Number(id.slice(1))*1000,text,scope}]});const result=await engine.call('job',{type:'consolidate'});assert.equal(result.failedWindows,0)};
+  const run=async(id,text,discoveries)=>{output=discoveries;await engine.call('ingest',{messages:[{messageId:id,conversationId:'team',actorId:'alice',role:'user',timestamp:start+Number(id.slice(1))*1000,text,scope}]});const result=await engine.call('job',{type:'consolidate'});assert.equal(result.failedWindows,0);return result};
   const read=()=>new SubjectStore(path.join(root,'legacy','data','memory-vec'));
   await run('m1','大家又在说冰箱战术。',[{label:'冰箱战术',kind:'meme',evidenceIds:['m1']}]);
   let store=read(),subject=store.list()[0];assert(subject);assert.equal(store.get(subject.id).observations[0].knowledgeStatus,'candidate');
@@ -52,6 +52,11 @@ test('automatic consolidation grows a new thing, updates aliases, respects human
   await run('m4',quote,[{label:'冰箱战术',kind:'meme',interpretation:'definition',aspect:'含义',statement:'先把暂时解决不了的问题放一边',quote,evidenceIds:['m4']}]);
   store=read();const selection=store.select({scope:store.get(subject.id).subject.scopeBinding,text:'冰箱战术',limit:10});assert.equal(selection[0].authority,'manual');assert(selection.some(o=>o.reviewReason==='manual-override'&&o.knowledgeStatus==='candidate'));assert(selection[0].possibleConflict);
   await engine.call('job',{type:'consolidate'});assert.equal(calls,4);
+  const rejected=await run('m5','隔离战术也是一种测试说法。',[{label:'隔离战术',kind:'event',evidenceIds:['m5']},{label:'隔离战术',kind:'meme',evidenceIds:['m5']}]);
+  assert.equal(rejected.rejectedDiscoveries,1);assert(read().list().some(s=>s.label==='隔离战术'));
+  const quarantine=fs.readFileSync(path.join(root,'legacy/data/memory-vec/consolidate/rejected-model-candidates.jsonl'),'utf8').trim().split('\n').map(JSON.parse);
+  assert.equal(quarantine.length,1);assert.equal(quarantine[0].data.candidate.kind,'event');
+  await engine.call('job',{type:'consolidate'});assert.equal(calls,5);
   await engine.close();store=read();const manual=store.get(subject.id).observations.find(o=>o.authority==='manual');
   store.reviseObservation({operationId:'human-retract',subjectId:subject.id,observationId:manual.id,expectedRev:manual.rev,expectedSubjectRev:store.get(subject.id).subject.rev,action:'retract',reason:'暂不采用这个解释'});
   assert.equal(read().get(subject.id).observations.find(o=>o.id===manual.id).status,'retracted');

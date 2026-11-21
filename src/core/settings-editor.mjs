@@ -22,6 +22,17 @@ export const SETTINGS_FIELDS = [
   field('rememberEnabled','允许模型直接记忆','采用与召回','boolean',{fallback:true}),
   field('shadowMode','检索影子模式','采用与召回','boolean'),
   field('topK','检索结果上限','采用与召回','integer',{min:1,max:100}),
+  field('recallPolicyMode','检索重排模式','采用与召回','select',{options:[['off','关闭（默认）'],['shadow','影子（只算不排）'],['enabled','启用']]}),
+  field('recallPolicyWeights','重排权重 JSON（空=免调权 RRF）','采用与召回'),
+  field('recallExposureWindow','曝光降权窗口（轮）','采用与召回','integer',{min:1,max:16}),
+  field('recallExposureDecay','曝光降权系数','采用与召回','number',{min:0.01,max:1}),
+  // 票 04 可选 cross-encoder 精排后端（外部 HTTP 服务）[by:WorkBuddy]
+  field('rerankEnabled','启用外部精排','采用与召回','boolean'),
+  field('rerankBaseURL','精排服务地址','采用与召回','url'),
+  field('rerankApiKey','精排 API Key','采用与召回','secret'),
+  field('rerankModel','精排模型名称','采用与召回'),
+  field('rerankTimeoutMs','精排超时（毫秒，≤800）','采用与召回','integer',{min:1,max:800}),
+  field('rerankTopN','精排候选上限（0=全部）','采用与召回','integer',{min:0,max:200}),
   field('injectPerPerson','每人印象条数','采用与召回','integer',{min:1,max:30}),
   field('injectTotal','印象总条数','采用与召回','integer',{min:1,max:100}),
   field('injectThreshold','向量相关性阈值','采用与召回','number',{min:0,max:1}),
@@ -36,10 +47,13 @@ export const SETTINGS_FIELDS = [
   field('autoIndexEnabled','启用自动索引','自动处理','boolean',{restart:true}),
   field('autoIndexIntervalMin','索引间隔（分钟，0 停止定时索引）','自动处理','integer',{min:0,max:10080,restart:true}),
   field('consolidateEnabled','启用事件自动整理','自动处理','boolean',{restart:true}),
+  field('sceneCultureEnabled','自动整理渠道印象','自动整理','boolean',{restart:true}),
+  field('reminderTimeZone','自然约定日期时区（IANA，如 Asia/Hong_Kong）','自动整理','string',{fallback:'UTC'}),
   field('consolidateIntervalMin','整理间隔（分钟，0 使用服务默认）','自动处理','integer',{min:0,max:10080,restart:true}),
   field('consolidateWindowMsgs','每个整理窗口消息上限','自动处理','integer',{min:1,max:2000}),
   field('consolidateMaxWindowsPerRun','每轮整理窗口上限','自动处理','integer',{min:1,max:100}),
   field('consolidateMaxTokens','整理输出 token 上限','自动处理','integer',{min:100,max:64000}),
+  field('consolidateThinkingMode','整理思考模式（需端点支持 thinking.type）','自动处理','select',{options:[['auto','端点默认'],['disabled','关闭思考'],['enabled','开启思考']]}),
   field('consolidateTimeoutMs','整理超时（毫秒）','自动处理','integer',{min:1000,max:1200000}),
   field('subjectMemoryEnabled','启用主体自动观察提取','自动处理','boolean',{fallback:false}),
   field('layerMaintenance','整理时维护事件层','事件生命周期','boolean'),
@@ -59,7 +73,7 @@ export function settingsView(explicit={}, defaults={}, botName='') {
   }
   return {fields:SETTINGS_FIELDS,values,secrets};
 }
-function validateValue(f,value) {
+export function validateValue(f,value) {
   if(f.type==='secret' && value===null) return '';
   if(f.type==='boolean') {if(typeof value==='boolean')return value;}
   else if(f.type==='integer'||f.type==='number') {
@@ -67,9 +81,15 @@ function validateValue(f,value) {
     if(typeof value==='number'&&Number.isFinite(value)&&value>=f.min&&value<=f.max&&(f.type!=='integer'||Number.isInteger(value)))return value;
   } else if(typeof value==='string' && value.length<=(f.type==='secret'?4096:2000) && !/[\r\n\x00]/.test(value)) {
     const clean=value.trim();
+    if(f.key==='reminderTimeZone') {
+      try { if(clean)new Intl.DateTimeFormat('en',{timeZone:clean}).format(0); else throw Error(); return clean; }
+      catch { throw new MemoryError('INVALID_ARGUMENT','自然约定日期时区必须是有效的 IANA 时区'); }
+    }
     if(f.type==='select') {if(f.options.some(([v])=>v===clean))return clean;}
     else if(f.type==='url' && clean) {
-      try {const u=new URL(clean);if(['http:','https:'].includes(u.protocol)&&!u.username&&!u.password&&!u.search&&!u.hash)return clean;} catch {}
+      const url = URL.parse(clean);
+      if (url && ['http:', 'https:'].includes(url.protocol) &&
+          !url.username && !url.password && !url.search && !url.hash) return clean;
     } else return clean;
   }
   throw new MemoryError('INVALID_ARGUMENT',`配置项「${f.label}」的值或范围不正确`);
@@ -97,19 +117,23 @@ export function createFileSettingsEditor(sourceRoot, {io=fs}={}) {
     if(!object(request.patch)||!Object.keys(request.patch).length) throw new MemoryError('INVALID_ARGUMENT','请提供需要修改的配置项');
     const current=read();
     if(current.etag!==request.expectedEtag) throw new MemoryError('STALE_SETTINGS','配置已被其他页面修改，请重新读取并比较草稿',409);
-    const patch={};
-    for(const [key,value] of Object.entries(request.patch)) {
-      const f=fields.get(key);
+    const data = current.data;
+    data.skills ??= {};
+    const settings = data.skills['memory-vec'] ??= {};
+    const changed = [];
+    for (const [key, value] of Object.entries(request.patch)) {
+      const f = fields.get(key);
       if(!f) throw new MemoryError('INVALID_ARGUMENT','请求包含不支持的配置项');
-      patch[key]=validateValue(f,value);
       // An empty password box preserves the old key. Explicit null clears it.
-      if(f.type==='secret'&&value==='') delete patch[key];
-    }
-    const data=current.data;
-    data.skills??={};data.skills['memory-vec']??={};
-    for(const [key,value] of Object.entries(patch)) {
-      if(key==='botName') {data.persona??={};data.persona.botName=value;}
-      else data.skills['memory-vec'][key]=value;
+      if (f.type === 'secret' && value === '') continue;
+      const validated = validateValue(f, value);
+      if (key === 'botName') {
+        data.persona ??= {};
+        data.persona.botName = validated;
+      } else {
+        settings[key] = validated;
+      }
+      changed.push(key);
     }
     const temp=file+'.'+randomUUID()+'.tmp';let fd;
     try {
@@ -125,7 +149,7 @@ export function createFileSettingsEditor(sourceRoot, {io=fs}={}) {
       if(fd!==undefined)io.closeSync(fd);
       if(io.existsSync(temp))io.unlinkSync(temp);
     }
-    return {...view(defaults),changed:Object.keys(patch),restartRequired:Object.keys(patch).some(k=>fields.get(k).restart)};
+    return {...view(defaults),changed, restartRequired: changed.some(key => fields.get(key).restart)};
   }
   return {getMemorySettings:view,updateMemorySettings:update};
 }

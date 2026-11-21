@@ -16,6 +16,45 @@ export function requireText(value, name, max = 2000) {
   if (typeof value !== 'string' || !value.trim() || value.length > max) throw new MemoryError('INVALID_ARGUMENT', `${name} must be a nonempty string (max ${max})`);
   return value.trim();
 }
+// Journal 读取的分块大小。**不是性能旋钮，是正确性下限**：V8 单个字符串上限
+// 0x1fffffe8（512 MiB），单行日志文件超过它时 `readFileSync(file,'utf8')` 直接抛
+// RangeError ⇒ 构造期就把 readOnlyReason 写死 ⇒ 之后每次 assertReadable() 都 503，
+// 读侧（recall/inject）与写侧（ingest append）**一起永久停摆**，而且日志里只有一句
+// "Cannot create a string longer than 0x1fffffe8 characters"。
+// 实测（qq-secondary 545 MB / 827598 行）：分块读 22 s、堆 861 MB，服务堆上限 8 GB 够用。
+// 小文件仍走原路径，行为与错误文案逐字不变（测试与其余 5 个日志文件都在这条路上）。
+const READ_CHUNK = 8 * 1024 * 1024;
+
+/** 逐行喂给 onLine，返回文件的**原始字节数**（与 statSync().size 同口径，供 assertReadable 比对）。 */
+function eachJournalLine(io, file, onLine) {
+  if (!io.existsSync(file)) return 0;
+  const size = io.statSync(file).size;
+  if (size <= READ_CHUNK) {
+    const raw = io.readFileSync(file, 'utf8');
+    if (raw && !raw.endsWith('\n')) throw new Error('Incomplete journal tail');
+    for (const line of raw.split('\n')) if (line) onLine(line);
+    return Buffer.byteLength(raw);
+  }
+  const fd = io.openSync(file, 'r');
+  try {
+    const buf = Buffer.allocUnsafe(READ_CHUNK);
+    let pending = Buffer.alloc(0), total = 0;
+    for (;;) {
+      const n = io.readSync(fd, buf, 0, READ_CHUNK, total);
+      if (!n) break;
+      total += n;
+      // 按 0x0A 切 Buffer、只在完整行边界解码：多字节 UTF-8 字符永远不会被切开。
+      pending = pending.length ? Buffer.concat([pending, buf.subarray(0, n)]) : Buffer.from(buf.subarray(0, n));
+      const cut = pending.lastIndexOf(0x0a);
+      if (cut === -1) continue;
+      for (const line of pending.subarray(0, cut).toString('utf8').split('\n')) if (line) onLine(line);
+      pending = pending.subarray(cut + 1);
+    }
+    if (pending.length) throw new Error('Incomplete journal tail');
+    return total;
+  } finally { io.closeSync(fd); }
+}
+
 // One process owns a library. No writes on open. Every acknowledged append is fsynced.
 // A damaged/unrecognized journal blocks reads AND writes: an unknown hide must not disappear.
 export class DurableLog {
@@ -23,10 +62,7 @@ export class DurableLog {
     this.file = path.resolve(file); this.io = io; this.rows = []; this.operations = new Map();
     this.readOnlyReason = null; this.bytes = 0;
     try {
-      const raw = io.existsSync(this.file) ? io.readFileSync(this.file, 'utf8') : '';
-      this.bytes = Buffer.byteLength(raw);
-      if (raw && !raw.endsWith('\n')) throw new Error('Incomplete journal tail');
-      for (const line of raw.split('\n').filter(Boolean)) {
+      this.bytes = eachJournalLine(io, this.file, (line) => {
         const row = JSON.parse(line);
         if (row.version !== 1 || row.seq !== this.rows.length + 1 || row.previous !== (this.rows.at(-1)?.hash || '') ||
             typeof row.operationId !== 'string' || !row.operationId || typeof row.fingerprint !== 'string' ||
@@ -35,7 +71,7 @@ export class DurableLog {
         if (hash !== digest(payload)) throw new Error('Journal hash mismatch');
         validate(row, this.rows);
         this.rows.push(row); this.operations.set(row.operationId, row);
-      }
+      });
     } catch (e) { this.readOnlyReason = String(e.message); }
     this.validate = validate;
   }

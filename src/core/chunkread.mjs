@@ -11,7 +11,7 @@
 // 所以它能被向量化（"这段时光值不值得被想起"），却不能当事实层的输入。
 //
 // ── 这个文件在 ADR-0002 之后改了职责 ─────────────────────────────────────
-// 实测小时块的 `title` 里**直接写着 QQ 号**（`private:100000001 @ 2026-10-07 16:00`），
+// 实测小时块的 `title` 里**直接写着 QQ 号**（`private:1353446252 @ 2026-10-07 16:00`），
 // `summary` 里写着群名片。所以老版本的"把 title + keywords + summary 拼起来送出去"
 // 等于**把通讯录发给云端**。
 //
@@ -36,7 +36,7 @@ import { filterCoreKeywords, extractKeywords, DEFAULT_KEYWORDS_SOURCE } from './
 /** 块文件名 → 结构化描述。不匹配则返回 null（不是抛错：目录里可能混着别的东西）。 */
 export function parseChunkFileName(name) {
   const base = String(name).replace(/\.json$/i, '');
-  // hour_group_100000001_2026-09-2500   /  day_group_100000001_2026-09-10
+  // hour_group_1098345913_2026-09-2500   /  day_group_100000000_2026-09-10
   const m = /^(hour|day|ep)_(.+?)_(\d{4})-(\d{2})-(\d{2})(\d{2})?$/.exec(base);
   if (!m) return null;
   const [, kind, chatRaw, y, mo, d, hh] = m;

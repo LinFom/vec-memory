@@ -1,0 +1,32 @@
+export async function settingsPageChecks({evaluate,until,navigate,check,cdp,shot,call}) {
+  await cdp('Emulation.setDeviceMetricsOverride',{width:1280,height:950,deviceScaleFactor:1,mobile:false});
+  await navigate('/manage.html?theme=dark#/settings');
+  await until('!!document.querySelector("#save-settings")');
+  check('independent settings page identifies config file and is writable',await evaluate('document.body.innerText.includes("config.json")&&!document.querySelector("#save-settings").disabled'));
+  await shot('settings-dark',{fullPage:false});
+  await evaluate('document.querySelector("#setting-topK").value="14";document.querySelector("#setting-embedApiKey").value="synthetic-browser-key";document.querySelector("#service-settings").requestSubmit()');
+  await until('document.querySelector("#settings-status")?.textContent.includes("已保存")');
+  const saved=await call('memory/settings');
+  check('settings UI writes real persisted service config',saved.values.topK===14&&saved.secrets.embedApiKey===true);
+  check('settings key not returned to browser form or GET',!JSON.stringify(saved).includes('synthetic-browser-key')&&await evaluate('document.querySelector("#setting-embedApiKey").value===""'));
+  await evaluate('document.querySelector("#setting-topK").value="15"');
+  await call('memory/settings',{expectedInstanceId:saved.instanceId,expectedEtag:saved.etag,patch:{topK:16}});
+  await evaluate('document.querySelector("#service-settings").requestSubmit()');
+  await until('document.querySelector("#settings-status")?.textContent.includes("HTTP 409")');
+  check('settings conflict preserves draft',await evaluate('document.querySelector("#setting-topK").value==="15"'));
+  await evaluate('document.querySelector("#reload-settings").click()');
+  await until('document.querySelector("#settings-status")?.textContent.includes("草稿保留")');
+  check('settings reload preserves explicit draft for review',await evaluate('document.querySelector("#setting-topK").value==="15"'));
+  await evaluate('document.querySelector("#service-settings").requestSubmit()');
+  await until('document.querySelector("#settings-status")?.textContent.includes("已保存")');
+  check('settings conflict only saves after explicit reread and resubmit',(await call('memory/settings')).values.topK===15);
+  await evaluate('document.querySelector("#clear-embedApiKey").checked=true;document.querySelector("#service-settings").requestSubmit()');
+  await until('document.querySelector("#settings-status")?.textContent.includes("已保存")');
+  check('settings key cleared only by explicit checkbox',(await call('memory/settings')).secrets.embedApiKey===false);
+  await navigate('/manage.html?theme=light#/settings');
+  await until('!!document.querySelector("#save-settings")');
+  check('settings saved value survives page reload',await evaluate('document.querySelector("#setting-topK").value==="15"'));
+  await shot('settings-light',{fullPage:false});
+  await cdp('Emulation.setDeviceMetricsOverride',{width:390,height:850,deviceScaleFactor:1,mobile:false});
+  check('settings no horizontal overflow on small viewport',await evaluate('document.documentElement.scrollWidth<=innerWidth'));
+}

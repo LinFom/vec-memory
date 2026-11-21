@@ -1,0 +1,2 @@
+{"noteId":"nb-001","author":"researcher","title":"检索重排评测","body":"离线评测里先用关键词打底再叠一个小重排器，比只用向量召回稳。下一轮把 query 长度分桶再看。","createdAt":"2026-11-05T09:20:00Z","tag":"retrieval","_by":"[by:WorkBuddy]"}
+{"noteId":"nb-002","author":"researcher","title":"导入幂等","body":"把笔记导出成通用 JSON 文档时，每条都要带稳定 ID 和原始行号，重跑才不会写重复。","createdAt":"2026-11-06T14:05:00Z","tag":"interop","_by":"[by:WorkBuddy]"}

@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>人物卡 · 向量记忆库</title>
+<link rel="stylesheet" href="/styles.css">
+<style>
+  /* 本页是**双栏查阅**页，不是全屏画布 —— 覆盖 styles.css 里为星图页定的 body 布局，
+     面板色沿用同一套 CSS 变量，所以与星图页同色。 */
+  html { height: auto; }
+  body { display: block; height: auto; overflow: auto; }
+  header.top { position: sticky; top: 0; z-index: 6; }
+  main { padding: 14px 16px 18px; display: grid; gap: 14px;
+    grid-template-columns: minmax(220px, 280px) 1fr; align-content: start; }
+  @media (max-width: 820px) { main { grid-template-columns: 1fr; } }
+
+  .pane { border: 1px solid var(--line); border-radius: 12px; background: var(--panel); }
+  .pane > h2 { margin: 0; padding: 10px 13px 8px; font-size: 13px; font-weight: 650;
+    border-bottom: 1px solid var(--line); display: flex; align-items: baseline; gap: 8px; }
+  .pane > h2 .cnt { color: var(--fg-dim2); font-weight: 400; font-size: 11.5px; }
+
+  .list { max-height: calc(100vh - 190px); overflow: auto; }
+  .list .row { display: flex; align-items: baseline; gap: 8px; padding: 7px 13px;
+    cursor: pointer; border-left: 2px solid transparent; }
+  .list .row:hover { background: var(--bg-2); }
+  .list .row.on { border-left-color: var(--accent); background: var(--bg-2); }
+  .list .row .nm { font-weight: 600; font-size: 12.5px; }
+  .list .row .lb { color: var(--fg-dim2); font-size: 11px; font-family: ui-monospace, Menlo, Consolas, monospace; }
+  .list .row .n { margin-left: auto; font-size: 11px; color: var(--fg-dim); font-variant-numeric: tabular-nums; }
+  .list .row .n.zero { color: var(--warn); }
+  .list .empty { padding: 14px 13px; color: var(--fg-dim2); font-size: 12px; line-height: 1.7; }
+
+  .cardbody { padding: 13px; }
+  .cardhead { display: flex; align-items: baseline; gap: 9px; flex-wrap: wrap; margin-bottom: 3px; }
+  .cardhead .nm { font-size: 15px; font-weight: 650; }
+  .cardhead .mono { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11.5px; color: var(--fg-dim2); }
+  .idline { color: var(--fg-dim2); font-size: 11.5px; margin: 0 0 10px; }
+  .say { border: 1px solid var(--line-2); border-radius: 10px; background: var(--bg-2);
+    padding: 10px 12px; font-size: 12px; line-height: 1.7; color: var(--fg-dim); }
+  .say.bad { border-color: rgba(248,113,113,.5); color: var(--bad); }
+  .say b { color: var(--fg); }
+
+  .col { border: 1px solid var(--line); border-radius: 11px; padding: 11px 12px; margin-top: 12px; }
+  .colhead { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 9px; }
+  .colhead .scope { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11.5px; color: var(--fg-dim); }
+  .tag { font-size: 10.5px; padding: 1px 7px; border-radius: 999px; border: 1px solid var(--line-2); color: var(--fg-dim); }
+  .tag.group { color: var(--accent); border-color: var(--accent); }
+  .tag.private { color: var(--warn); border-color: var(--warn); }
+  .tag.count { color: var(--fg-dim2); }
+
+  .sec { margin-top: 9px; }
+  .sec:first-of-type { margin-top: 0; }
+  .sec > h4 { margin: 0 0 5px; font-size: 11.5px; font-weight: 650; color: var(--fg-dim); letter-spacing: .2px; }
+  .kv { display: flex; flex-wrap: wrap; gap: 5px; }
+  .kv .chip { border: 1px solid var(--line-2); border-radius: 7px; padding: 2px 8px; font-size: 12px; }
+  .kv .chip b { color: var(--fg-dim2); font-weight: 400; }
+  /* 标签筛选条的选中态 —— 颜色走同一套变量，深浅色主题都自动跟随 */
+  .kv .chip.on { border-color: var(--accent); color: var(--accent); font-weight: 600; }
+  .lines { display: grid; gap: 4px; }
+  .ln { font-size: 12.5px; line-height: 1.6; }
+  .ln .meta { color: var(--fg-dim2); font-size: 11px; margin-left: 6px; font-variant-numeric: tabular-nums; }
+  .ln .to { color: var(--fg-dim); }
+  .colfoot { margin-top: 8px; font-size: 11px; color: var(--fg-dim2); }
+  .boot { position: fixed; }
+  footer.bottom { position: static; }
+</style>
+</head>
+<body>
+<header class="top">
+  <div class="brand">
+    <span class="dot" id="health-dot" title="本页所在服务"></span>
+    <h1>人物卡</h1>
+    <p class="sub">按人翻记忆：档案是结构化的一句，画像是风格，事实是发生过的事。同一场合才归在一栏。</p>
+  </div>
+  <div class="tools">
+    <input type="search" id="q" placeholder="找人：昵称 / QQ 号 / 占位符…" autocomplete="off">
+    <button type="button" id="btn-reload">刷新</button>
+  </div>
+<nav class="page-nav" aria-label="记忆库页面"><a class="nav" href="/manage.html" id="manage-entry">记忆管理</a><a class="nav" href="/">关系星图</a><a class="nav" href="/person.html" aria-current="page">人物卡</a><a class="nav" href="/memory.html">会话记忆</a><a class="nav" href="/working.html">短期体检</a><a class="nav" href="/instances.html">多实例</a></nav>
+</header>
+
+<main>
+  <section class="pane list" id="listpane">
+    <h2>有哪些人 <span class="cnt" id="listcnt"></span></h2>
+    <div id="list"></div>
+  </section>
+  <section class="pane" id="cardpane">
+    <h2>这个人 <span class="cnt" id="cardcnt"></span></h2>
+    <div class="cardbody" id="card">
+      <div class="say">左边点一个人，或者直接搜。</div>
+    </div>
+  </section>
+</main>
+
+<div class="boot" id="boot"><span class="spin"></span> 正在读词表与事实…</div>
+
+<footer class="bottom">
+  <div class="stats" id="stats"></div>
+  <div class="fine">
+    本页是<b>只读视图</b>：卡的每一行都来自现有事实槽，<b>没有第二套存储</b>
+    （旧「人物印象」那套独立档案池已在 <code>ADR-0024/0025</code> 退役 —— 两个数据源必然漂移）。
+    同一个人才会出现的场合不同：<b>私聊那栏的内容不会出现在群里</b>（<code>ADR-0031 §3.8</code>），
+    所以这里<b>按场合分栏、不合并</b> —— 合并展示会诱导下一步真的去合并注入。
+    档案（<code>trait</code>）是结构化的一句 <code>键=值</code>；画像是「这人怎么说话」；
+    事实是偏好 / 承诺 / 事件这类。节点都是<b>占位符</b>，真名只在本机渲染期贴上。
+  </div>
+</footer>
+
+<script type="module" src="/person.js"></script>
+<script>const mvQuery=new URLSearchParams(location.search);document.getElementById("manage-entry").href="/manage.html"+(mvQuery.get("theme")?"?theme="+encodeURIComponent(mvQuery.get("theme")):"")+"#/people"+(mvQuery.get("who")?"/"+encodeURIComponent(mvQuery.get("who")):"");</script>
+</body>
+</html>

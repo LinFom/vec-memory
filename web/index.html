@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>关系星图 · 向量记忆库</title>
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand">
+    <span class="dot" id="health-dot" title="服务状态"></span>
+    <h1>关系星图</h1>
+    <p class="sub" id="sub">一个群 = 一个星系；每个人 = 一颗星；中心是她。</p>
+  </div>
+  <div class="tools">
+    <input type="search" id="find" placeholder="按名字找一颗星…" autocomplete="off">
+    <label class="chk"><input type="checkbox" id="opt-names" checked> 显示名字</label>
+    <label class="chk"><input type="checkbox" id="opt-spin" checked title="星系自转 + 跨群公转；停下时就是建图那一帧"> 运动</label>
+    <label class="chk"><input type="checkbox" id="opt-linked"> 只留跟中心同框过的人</label>
+    <button type="button" id="btn-reload">重载数据</button>
+    <button type="button" id="btn-reset">重置视角</button>
+  </div>
+<nav class="page-nav" aria-label="记忆库页面"><a class="nav" href="/manage.html" id="manage-entry">记忆管理</a><a class="nav" href="/" aria-current="page">关系星图</a><a class="nav" href="/person.html">人物卡</a><a class="nav" href="/memory.html">会话记忆</a><a class="nav" href="/working.html">短期体检</a><a class="nav" href="/instances.html">多实例</a></nav>
+</header>
+
+<main class="stage">
+  <canvas id="cv" aria-label="关系星图"></canvas>
+  <div class="tooltip" id="tip" hidden></div>
+  <button class="legend-toggle" id="legend-toggle" type="button" title="图例与说明（默认收起，不挡视野）">图例</button>
+  <div class="legend" id="legend" hidden></div>
+  <div class="zoombadge" id="zoom-badge" title="滚轮缩放；键盘 +/− 也能缩放，0 / 双击复位"><b>3.4×</b><span class="track"><i id="zoom-tick"></i></span><span id="zoom-mode">星云</span></div>
+  <div class="boot" id="boot"><span class="spin"></span> 正在读取关系边…</div>
+</main>
+
+<aside class="side" id="side" hidden>
+  <button class="close" id="side-close" type="button" aria-label="关闭">×</button>
+  <div id="side-body"></div>
+</aside>
+
+<footer class="bottom">
+  <div id="stats" class="stats"></div>
+  <details class="fine"><summary>星图读法与计算说明</summary>
+    两路信号分开存、不合并：<code>共现</code> 管方位与距离，<code>互动</code> 管粗细与虚实。
+    线上的 <b>深厚分</b>是<b>本项目唯一有意为之的合成分数</b>，只作用于视觉、<b>不落盘</b>、不下"关系好坏"的结论。
+    <b>深由绝对互动量挣来</b>（0.26.0 起，<code>ADR-0040</code>）：深厚分的输入是<b>互动/共现次数的对数饱和</b>
+    （互动 ≥300 次 = 满分），<b>不是人群里的排位</b> —— 旧口径用百分位，会强制"总有人最深"，
+    哪怕所有人加起来没说过几句话。饱和点没有分布学证据，标为可重校。
+    <b>线宽是"拉开"的</b>：深厚分多数关系落在低位，线宽用<b>大于 1 次幂</b>拉开
+    —— 读起来是<b>绝大多数关系只是一根细丝、只有最深厚的那几条明显更粗</b>；
+    若你觉得"每条线都很粗 / 人人都很深厚"，那是这条通道坏了，不是数据如此（图例里有三档线宽示例）。
+    星点大小<b>只由深度决定、不跟着缩放变大</b>；能看到多少个体由<b>可分辨度</b>（间距 ÷ 星点半径）自动决定
+    —— 人越多，星云越早出现，不用手调。每个群是一片<b>压扁的盘（不是球）+ 子团</b>：盘心远近 = 该群与她有多热，
+    盘越大 = 人越多；盘内<b>越熟越靠盘心</b>（个人亲疏只在盘内表达）。
+    星还在<b>动</b>：只属于一个群的人绕该群盘心<b>自转</b>（离盘心越近越快），
+    跨群的人以<b>宇宙中心</b>为圆心<b>公转</b>、一圈里依次经过它参与的每一个群；「运动」开关可停住。
+    <b>天恒定是暗的</b>（主题只管面板 chrome）；星点是<b>白芯 + 彩晕</b>，群色看晕不看芯。
+    越放大线越细（墨量守恒）：放大只让结构散开、不会越看越糊。
+    节点与群都是<b>占位符</b>；真名只在本机渲染期贴上，不出境。
+  </details>
+</footer>
+
+<script type="module" src="/starmap.js"></script>
+</body>
+</html>

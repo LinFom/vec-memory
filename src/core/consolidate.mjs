@@ -2,7 +2,8 @@ import {openRelationshipGraph,RELATION_PROMPT} from './relationship-graph.mjs';
 import {canonicalEntities} from './input-source.mjs';
 import { isCanonicalSource, canonicalEvidence } from './input-source.mjs';
 import { openSubjectStore } from './subjects.mjs';
-import { DISCOVERY_PROMPT, prepareDiscoveries, applyDiscoveries } from './thing-discovery.mjs';
+import { DISCOVERY_PROMPT, prepareModelDiscoveries, applyDiscoveries } from './thing-discovery.mjs';
+import {DurableLog,digest} from './durable-log.mjs';
 import { windowReferences } from './provenance.mjs';
 import {mentionedPeople} from './person-targets.mjs';
 import { encodingIdentity } from './vector-generation.mjs';
@@ -42,6 +43,8 @@ import { buildEmbedText, chunkMeta, sourceHash } from './chunkread.mjs';
 import { chatRawOf } from './derive.mjs';
 import { FACT_KIND_GROUPS } from './facts.mjs';
 import { upsertSlotItem, itemKeyOf } from './inject.mjs';
+// [by:WorkBuddy] 票 07：事件 gist 的 evidenceIds 回指（纯函数，零 I/O）。
+import { deriveEvidenceIds } from './event-gist.mjs';
 
 export const CONSOLIDATE_VERSION = 1;
 
@@ -504,8 +507,9 @@ function normalizeConsolidateJson(obj, genericIds = false) {
   }
   if (Object.hasOwn(obj,'observations') && !Array.isArray(obj.observations)) return {ok:false,error:'observations must be an array',events:[],people:[]};
   if (Object.hasOwn(obj,'discoveries') && !Array.isArray(obj.discoveries)) return {ok:false,error:'discoveries must be an array',events:[],people:[]};
+  if (Object.hasOwn(obj,'sceneCulture') && !Array.isArray(obj.sceneCulture)) return {ok:false,error:'sceneCulture must be an array',events:[],people:[]};
   if(Object.hasOwn(obj,'relations')&&!Array.isArray(obj.relations))return {ok:false,error:'relations must be an array',events:[],people:[]};
-  return { ok: true, events, people, ...(Array.isArray(obj.relations)?{relations:obj.relations}:{}), ...(Array.isArray(obj.observations) ? {observations:obj.observations} : {}), ...(Array.isArray(obj.discoveries) ? {discoveries:obj.discoveries} : {}) };
+  return { ok: true, events, people, ...(Array.isArray(obj.sceneCulture)?{sceneCulture:obj.sceneCulture}:{}), ...(Array.isArray(obj.relations)?{relations:obj.relations}:{}), ...(Array.isArray(obj.observations) ? {observations:obj.observations} : {}), ...(Array.isArray(obj.discoveries) ? {discoveries:obj.discoveries} : {}) };
 }
 
 // ── 落库：事件 ───────────────────────────────────────────────────────────
@@ -1405,6 +1409,7 @@ async function runConsolidateOnce(deps = {}, opts = {}) {
     events: 0,
     slots: 0,
     skippedPeople: 0,
+    rejectedDiscoveries: 0,
     failedWindows: 0,
     skippedWindows: 0,      // 连续失败达上限、被认输跳过的窗口（不是静默丢弃，见 `noteWindowFailure`）
     salvagedWindows: 0,     // 输出被截断、靠抢救解析挽回的窗口
@@ -1503,6 +1508,13 @@ async function runConsolidateOnce(deps = {}, opts = {}) {
         msgCount: win.msgCount,
         transcript
       });
+      if (opts.sceneCulture && /^(group|channel):/.test(win.chatKey)) {
+        prompt.system += '\nFor channels, optionally add a sceneCulture array of at most four objects with kind (meme, term, topic or rule), text and evidenceIds. Record recurring local usage or explicit rules. Do not infer personal relationships, copy private details or treat a question or joke as a rule. Cite same-window user messages only.';
+        prompt.user += '\nChannel evidence:\n' + win.rows.filter(r => !r.self && (!r.role || r.role === 'user'))
+          .map(r => JSON.stringify({id:String(r.id), text:String(r.text || '').slice(0, 1000)})).join('\n');
+        const existing = opts.sceneCulture.context(win.chatKey);
+        if (existing.length) prompt.user += '\nExisting channel entries (for deduplication only): ' + JSON.stringify(existing);
+      }
       if (isCanonicalSource(sourceRoot)) {
         prompt.system = prompt.system.replaceAll('QQ 号','主体 ID').replaceAll('号码','主体 ID').replaceAll('qq 必须','actorId 必须').replaceAll('\"qq\"','\"actorId\"');
         prompt.system += '\n主体标识可以是任意字符串。people 使用 actorId，必须逐字复制下方允许的 actorId；不得猜测新身份。';
@@ -1586,7 +1598,16 @@ async function runConsolidateOnce(deps = {}, opts = {}) {
           resolveReporter:id=>resolveSpeaker(normalizer,id)?.label || null,
           normalize:text=>normalizer.normalize(String(text||''),{context:'subject-observation',register:false})?.text || String(text||'')}) : [];
         if (parsed.discoveries?.length && !(settings.thingDiscoveryEnabled === true || isCanonicalSource(sourceRoot) && settings.thingDiscoveryEnabled !== false)) throw new Error('Thing discovery is not enabled');
-        const discoveryRequests = parsed.discoveries?.length ? prepareDiscoveries({win,windowId:eventIdOf(win),scope:normalizer.scopeLabel(win.chatKey),discoveries:parsed.discoveries,normalize:text=>normalizer.normalize(String(text||''),{context:'thing-discovery',register:false})?.text || String(text||'')}) : [];
+        const discoveryPreparation = parsed.discoveries?.length ? prepareModelDiscoveries({win,windowId:eventIdOf(win),scope:normalizer.scopeLabel(win.chatKey),discoveries:parsed.discoveries,normalize:text=>normalizer.normalize(String(text||''),{context:'thing-discovery',register:false})?.text || String(text||'')}, {reject:entry=>{
+          const quarantine=new DurableLog(path.join(libDir,'consolidate','rejected-model-candidates.jsonl'),()=>{});
+          const data={windowId:eventIdOf(win),chatKey:win.chatKey,fromTs:win.fromTs,toTs:win.toTs,...entry};
+          const operationId='discovery-rejection:'+digest(data);
+          if(!quarantine.replay(operationId,data))quarantine.append(operationId,data,data,{ok:true});
+        }}) : {requests:[],candidates:[],rejected:0};
+        const discoveryRequests=discoveryPreparation.requests;
+        if(parsed.discoveries)parsed.discoveries=discoveryPreparation.candidates;
+        result.rejectedDiscoveries+=discoveryPreparation.rejected;
+        if(discoveryPreparation.rejected)say('warn',`已隔离 ${discoveryPreparation.rejected} 条不合规新事物候选，未写入记忆；原候选保留供审查`);
         pending[win.chatKey] = { win: { ...win, rows: win.rows.map(r => ({ id: r.id })) }, parsed, observationRequests, discoveryRequests, now };
         savePending(libDir, pending);
       }
@@ -1604,6 +1625,9 @@ async function runConsolidateOnce(deps = {}, opts = {}) {
         const relationRows=resume?evidence.rows.filter(r=>frozenIds.has(String(r.id))):win.rows;
         if(resume&&relationRows.length!==frozenIds.size)throw new Error('Frozen relationship evidence is unavailable');
         openRelationshipGraph(sourceRoot).extract(parsed.relations,{rows:relationRows,entities:canonicalEntities(sourceRoot),windowId:eventIdOf(win)});
+      }
+      if (opts.sceneCulture && parsed.sceneCulture?.length && /^(group|channel):/.test(win.chatKey)) {
+        await opts.sceneCulture.apply(win, parsed.sceneCulture, eventIdOf(win));
       }
       advanceCursor({ libDir, state, chatKey: win.chatKey, toTs: win.toTs });
       delete pending[win.chatKey];
@@ -1713,6 +1737,10 @@ async function applyWindow({ win, parsed, normalizer, factStore, store, settings
   //   · `summary` = **这一件事**的正文（`title：detail`），归一化闸门照旧逐条过
   //   · `items` 保留单元素数组（面板/旧读者按 items 渲染仍能显示这一条）
   const windowId = eventIdOf(win);
+  // [by:WorkBuddy] 票 07：同一条记录内的派生回指（窗口 rows 的消息 id）。
+  // 只取 id、去重、限 40、全字符串，绝不复制正文；值与事实槽 :1829 同源但独立派生，
+  // 不改动事实槽写入语义、不改事件账本文件名。
+  const evidenceIds = deriveEvidenceIds(win);
   out.eventId = windowId;
   if (windowId && parsed.events.length) {
     const existing = readEventRows({ libDir, strict: true });
@@ -1746,6 +1774,9 @@ async function applyWindow({ win, parsed, normalizer, factStore, store, settings
         detail,
         who: item.who,
         summary,
+        // [by:WorkBuddy] 票 07：窗口内消息 id 的回指（派生字段，不含正文、不新增实体类型）。
+        // 老账本没有这个字段 ⇒ eventRefsOf 自动退回 window 级引用，向后兼容。
+        evidenceIds,
         items: [item],                  // 单元素：旧读者不炸
         // 短期层的两个运行时字段（`ADR-0048`）：
         //   hits       —— 真的进了 `/inject` 最终 lines 的次数（排练次数）

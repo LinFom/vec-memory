@@ -1,7 +1,7 @@
 {
   "id": "memory-vec",
   "name": "向量记忆库",
-  "version": "0.32.2",
+  "version": "0.34.0",
   "apiVersion": 1,
   "category": "utility",
   "description": "通过独立记忆服务保存人物档案、新事物与场景记忆，提供有来源的召回和采用确认；兼容旧本机协议。实体假名化可减少已知身份暴露，不能保证未知别名或语境无法识别。默认不运行自动模型任务。",
@@ -51,6 +51,16 @@
     "withKeywords": true,
     "withSummary": true,
     "topK": 8,
+    "recallPolicyMode": "off",
+    "recallPolicyWeights": "",
+    "recallExposureWindow": 3,
+    "recallExposureDecay": 0.6,
+    "rerankEnabled": false,
+    "rerankBaseURL": "",
+    "rerankApiKey": "",
+    "rerankModel": "",
+    "rerankTimeoutMs": 400,
+    "rerankTopN": 0,
     "queryInstruction": "",
     "suspectMinCount": 8,
     "suspectMaxSpread": 0.35,
@@ -86,6 +96,74 @@
     "managementOrigins": []
   },
   "configSchema": {
+    "recallPolicyMode": {
+      "type": "string",
+      "enum": [
+        "off",
+        "shadow",
+        "enabled"
+      ],
+      "label": "检索重排模式（默认关）",
+      "description": "off = 完全不调用策略层、响应与历史基线逐字可比（fail-closed，也是 kill switch）；shadow = 只算各信号分量写进响应诊断、hits 顺序原样不动；enabled = 分量参与定序。改这个键不需要重启服务，也不产生任何文档向量，不会触发整库重嵌。"
+    },
+    "recallPolicyWeights": {
+      "type": "string",
+      "label": "重排权重 JSON（留空 = 免调权 RRF）",
+      "description": "留空用 Reciprocal Rank Fusion 名次融合，无超参、不受余弦与话题重合度量纲差异影响。填 JSON 对象（键只能是 base/entity/recency/frequency/context）则切换为加权和，内部先做 min-max 归一化并自动归一化权重和；解析失败会显式退回 RRF 并回报 POLICY_CONFIG_INVALID，不静默。"
+    },
+    "recallExposureWindow": {
+      "type": "number",
+      "min": 1,
+      "max": 16,
+      "step": 1,
+      "label": "曝光降权窗口（轮）",
+      "description": "最近 N 轮被 /search 返回过的条目让位，不排除。注意这是「检索级曝光」，不是「真正进过 prompt 的注入级曝光」。状态是纯内存有界派生量，重启归零、不落盘、不进备份。"
+    },
+    "recallExposureDecay": {
+      "type": "number",
+      "min": 0.01,
+      "max": 1,
+      "step": 0.05,
+      "label": "曝光降权系数",
+      "description": "每被曝光一次乘一次该系数（如 0.6）。取值下限 0.01 而不是 0，避免降权退化成静默排除。"
+    },
+    "rerankEnabled": {
+      "type": "boolean",
+      "label": "启用外部 cross-encoder 精排（默认关）",
+      "description": "票 04：把票 03 重排后的同类候选送到一个独立外部 rerank 服务逐对打分。默认关 = fail-closed，零外部请求、响应与历史基线逐字可比。仅在检索重排模式为 shadow 或 enabled 时才生效（off 时连函数都不调用）。"
+    },
+    "rerankBaseURL": {
+      "type": "string",
+      "label": "精排服务地址",
+      "description": "外部 rerank 服务根地址，形如 http://127.0.0.1:8080；实际请求 POST {baseURL}/rerank。开启精排时必填，须为 http(s) URL。"
+    },
+    "rerankApiKey": {
+      "type": "string",
+      "secret": true,
+      "label": "精排 API Key",
+      "description": "留空则不发送 Authorization 头（本机推理服务通常无需 Key）。"
+    },
+    "rerankModel": {
+      "type": "string",
+      "label": "精排模型名称",
+      "description": "随请求 body 的 model 字段透传给外部服务；开启精排时必填。不内嵌模型、不产生文档向量。"
+    },
+    "rerankTimeoutMs": {
+      "type": "number",
+      "min": 1,
+      "max": 800,
+      "step": 50,
+      "label": "精排单次超时（毫秒）",
+      "description": "默认 400ms、硬上限 800ms（/search 总预算 1500ms，需给回退留余量）。在线热路径 retries=0。连续 3 次降级会进程内内存自动跳过精排，重启归零，不落盘、不改配置。"
+    },
+    "rerankTopN": {
+      "type": "number",
+      "min": 0,
+      "max": 200,
+      "step": 1,
+      "label": "精排候选上限（0=全部）",
+      "description": "最多送多少条候选去打分；0 = 送全部票 03 放大召回后的候选。超出上限的尾部候选按原序保留（只重排、不增不删）。"
+    },
     "llmEndpointKind": {
       "type": "string",
       "enum": [

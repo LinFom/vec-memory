@@ -107,6 +107,9 @@ function mvCfg() {
 let v1Bridge = null;
 let v1Timer = null;
 let v1Store = null;
+const hostCtx={};
+const liveStore={listChats:(...args)=>hostCtx.store?.listChats?.(...args)||[],recent:(...args)=>hostCtx.store?.recent?.(...args)||[]};
+function adoptHost(ctx={}){for(const key of ['store','onebot','dataDir','cfg','config'])if(ctx[key]!=null)hostCtx[key]=ctx[key];if(hostCtx.store)v1Store=hostCtx.store;}
 const v1TriggerEvidence = new Map();
 function protocolV1() { return mvCfg().protocolV1 === true; }
 export const providers = {
@@ -116,7 +119,63 @@ export const providers = {
     hint: '向量记忆库：面板在「设置 → 向量记忆库」。数据面是外接的独立服务'
       + '（从 vec-memory 仓的「启动-向量记忆库服务.bat」启动，地址见设置里的 serviceBaseURL）。'
       + '服务没起时面板会提示，不会显示空表。'
-  })
+  }),
+  'memory.search': async (args = {}) => {
+    const query = String(args?.query ?? '').trim();
+    if (!query && !args?.observations) return { ok: false, hits: [], error: '缺少检索关键词' };
+    const chatKey = String(args?.chatKey ?? '').trim();
+    let scope;
+    try { scope = scopeOf(chatKey); } catch {
+      return { ok: false, hits: [], error: '向量记忆按场景（会话）隔离，需要在具体会话里检索' };
+    }
+    if (!v1Bridge) return { ok: false, hits: [], error: '记忆协议层未启动（检查 serviceBaseURL / spaceId / serviceToken）' };
+    const started=performance.now();
+    try {
+      if(args.observations && !await v1Bridge.supports('observations')) {
+        return {ok:false,hits:[],error:'当前记忆服务未提供事项查询'};
+      }
+      const limit = Math.min(12, Math.max(1, Number(args?.limit) || 3));
+      const p = await v1Bridge.request('recall', {
+        query, agentView:true, conversationId: chatKey, scope, purpose: 'query', limit,
+        ...(args.observations ? { observations: args.observations } : {})
+      }, 'POST', 8000);
+      if (args.observations) {
+        if (p?.mode !== 'observations') return { ok: false, hits: [], error: '当前记忆服务未提供事项查询' };
+        diag({ at: 'v1-observation-query', operation: p.operation, matches: p.matches, ms:performance.now()-started });
+        return { ok: true, observations: p };
+      }
+      const items = Array.isArray(p?.items) ? p.items : [];
+      // 形状对齐宿主 memory-recall 的期望：`hits` 是数组，元素原样给它序列化。
+      // 服务端没给结构化条目时退回整块文本，至少别让模型拿到空数组。
+      const hits = items.length
+        ? items.map((it) => ({ id: it?.id ?? null, text: it?.text ?? it?.statement ?? it?.label ?? '', ...(it && typeof it === 'object' ? it : {}) }))
+        : (p?.block ? [{ id: null, text: String(p.block) }] : []);
+      diag({at:'v1-memory-query',items:hits.length,ms:performance.now()-started});
+      return { ok: true, hits, mode: 'vector', block: typeof p?.block === 'string' ? p.block : '' };
+    } catch (error) {
+      return { ok: false, hits: [], error: String(error?.message ?? error) };
+    }
+  },
+
+  /** 宿主的 `memory_status` 工具：服务可达性 + 同步队列。全部只读，不触发任何写。 */
+  'memory.status': async () => {
+    const out = {
+      ok: true,
+      engine: 'memory-vec',
+      service: { base: baseURLOf(mvCfg()), reachable: false, status: null, error: '' },
+      sync: v1Bridge?.status() ?? null,
+      enabled: mvCfg().enabled !== false,
+      injectEnabled: mvCfg().injectEnabled !== false
+    };
+    try {
+      const r = await fetch(`${out.service.base}/health`, { signal: AbortSignal.timeout(2000) });
+      out.service.reachable = r.ok === true;
+      out.service.status = r.status;
+    } catch (error) {
+      out.service.error = String(error?.message ?? error);
+    }
+    return out;
+  }
 };
 
 export function available() {
@@ -809,10 +868,15 @@ function normDir(p) {
 // The host console is a fallback for QQ builds without a native group directory.
 // Verify the instance before reading names: the configured port can be reassigned.
 async function readConsoleChannelNames(hostCtx) {
-  const port = consolePortOf(hostCtx);
+  // The current host activates plugins without its config/dataDir context.
+  // Use only its explicit data root and the port declared in that root, then
+  // verify /api/instances before reading any account metadata.
+  const dataDir=hostCtx?.dataDir||process.env.QQ_AGENT_DATA_DIR;
+  const mine = normDir(dataDir);
+  if (!mine) return null;
+  let port = consolePortOf(hostCtx)||validPort(process.env.QQ_AGENT_PORT);
+  if(!port)try {port=validPort(JSON.parse(fs.readFileSync(path.join(dataDir,'config.json'),'utf8'))?.server?.port);}catch{}
   if (!port) return null;                                   // ② 没有可信端口就不猜
-  const mine = normDir(hostCtx?.dataDir);
-  if (!mine) return null;                                   // ④ 没有自己的目录就无法自证
   const base = `http://${LOCAL_HOST}:${port}`;            // ② 只有本机
   const getJson = async (route) => {
     const r = await fetch(base + route, {
@@ -845,7 +909,16 @@ async function readHostChannelNames(hostCtx) {
     const store = hostCtx?.store ?? null;
     if (typeof store?.listChats !== 'function') return null;   // 纪律①：没有观察集就不猜
     const observed = new Set();
-    for (const chat of store.listChats() || []) observed.add(String(chat));
+    // ⚠️ [by:WorkBuddy] 2026-11-12：上游新库的 `listChats()` 返**对象数组**
+    //    （`{chatKey,lastActive,lastText,unread,count}`，见 `skills/manager.js` 的会话视图）。
+    //    原来这里直接 `String(chat)` ⇒ 全部变成 `'[object Object]'` ⇒ 下面
+    //    `observed.has('group:'+id)` 恒 false ⇒ **所有群都被跳过、一个名字也同步不出去**，
+    //    而且不报错（只是场景显示名永远是 id）。protocol-v1.mjs 的 `chatKeysOf()`
+    //    早就两种形状都认，这里必须同口径。
+    for (const chat of store.listChats() || []) {
+      const key = typeof chat === 'string' ? chat : String(chat?.chatKey ?? chat?.key ?? '').trim();
+      if (key) observed.add(key);
+    }
 
     // 纪律②：现场取，不缓存。纪律④：原生优先，有它就绝不到兜底。
     const onebot = hostCtx?.onebot ?? null;
@@ -853,6 +926,10 @@ async function readHostChannelNames(hostCtx) {
     if (onebot && typeof onebot.getGroupList === 'function') {
       if (onebot.connected === false) return null;            // 纪律④：断线不撞 RPC，也不外溢到兜底
       list = await onebot.getGroupList();
+    } else if(onebot && typeof onebot.call==='function') {
+      if(onebot.connected===false)return null;
+      const response=await onebot.call('get_group_list');
+      list=Array.isArray(response)?response:response?.data;
     } else {
       list = await readConsoleChannelNames(hostCtx);          // 兼容层恒 null ⇒ 本机控制台兜底
     }
@@ -860,8 +937,8 @@ async function readHostChannelNames(hostCtx) {
     if (!Array.isArray(list)) return null;
     const out = [];
     for (const g of list) {
-      const id = String(g?.id ?? '').trim();
-      const name = String(g?.name ?? '').trim();
+      const id = String(g?.id ?? g?.group_id ?? '').trim();
+      const name = String(g?.name ?? g?.group_name ?? '').trim();
       if (!id || !name) continue;                             // 没名字就别占位
       if (name === id || name === 'group:' + id) continue;    // 纪律⑥：ID 形状的占位名不是名字
       if (!observed.has('group:' + id)) continue;             // 纪律①：没聊过的群不建场景
@@ -875,9 +952,10 @@ async function readHostChannelNames(hostCtx) {
 }
 
 export function activate(ctx = {}) {
+  adoptHost(ctx);
   if (protocolV1()) {
     deactivate();
-    v1Store = ctx.store;
+    v1Store = hostCtx.store;
     // Bridge import carries a version query `?v=channel-names-20261105-3`: the host hot-reload
     // only busts the ENTRY (`index.js` + `?t=`, `plugin-loader.js:812`), but
     // `./protocol-v1.mjs?v=...` is a DIFFERENT module URL => the bridge is re-evaluated too,
@@ -886,11 +964,11 @@ export function activate(ctx = {}) {
     v1Bridge = createProtocolBridge({
       config: mvCfg,
       dataDir: ctx.dataDir || hostDataDir(),
-      store: v1Store,
+      store: liveStore,
       // 通道名同步的来源：宿主只读的群列表。名字只做场景显示名，与身份无关；
       // 回执没有 nameSyncSupported 就什么都不落：把旧服务的"收下了"当成功，等于永久记下
       // 服务从没采用过的名字 —— 之后连"名字改了"都判不出来。
-      getChannelNames: () => readHostChannelNames(ctx)
+      getChannelNames: () => readHostChannelNames(hostCtx)
     });
     const sync=async()=>{await autostartService();await v1Bridge?.sync();};
     sync().catch(e=>diag({at:'v1-sync-error',error:String(e.message)}));
@@ -1434,11 +1512,15 @@ async function injectV1(ctx) {
   if(ctx.messages.some(m=>contentToText(m.content).includes('<!--mv-v1-->')))return;
   const bridge=v1Bridge;
   try {
-    const p=await bridge.request('recall',{query:extractPeopleAndTopic(ctx.messages).topic,conversationId:ctx.chatKey,scope:scopeOf(ctx.chatKey),purpose:'automatic'});
+    const natural=await bridge.supports('natural-recall');
     if(bridge!==v1Bridge || !protocolV1())return;
-    if(!p.block)return;
-    appendToLastSystem(ctx.messages,`<!--mv-v1-->\n${p.block}`);
-    if(p.receiptId)bridge.request('adoptions',{receiptId:p.receiptId,itemIds:(p.items||[]).map(x=>x.id)}).catch(()=>{});
+    const p=await bridge.request('recall',{agentView:true,limit:1,query:extractPeopleAndTopic(ctx.messages).topic,conversationId:ctx.chatKey,scope:scopeOf(ctx.chatKey),purpose:'automatic',...(natural?{natural:true}:{})});
+    if(bridge!==v1Bridge || !protocolV1())return;
+    const lead=(p.items||[]).find(item=>item.layer==='observation')||p.items?.[0];
+    const text=lead?.text||p.block;
+    if(!text)return;
+    appendToLastSystem(ctx.messages,`<!--mv-v1-->\n${String(text).slice(0,180)}`);
+    if(p.receiptId&&lead?.id)bridge.request('adoptions',{receiptId:p.receiptId,itemIds:[lead.id]}).catch(()=>{});
   }catch(e){diag({at:'v1-recall-error',error:String(e.message)});}
 }
 function resolveV1Evidence(ctx, explicit) {
@@ -1462,7 +1544,7 @@ async function toolV1(kind,ctx,args) {
     const conversationId=String(ctx.chatKey||'');const scope=scopeOf(conversationId);
     if(kind==='search') {
       if(args.chatKey && args.chatKey!==conversationId)throw Error('独立协议只搜索当前场合，请在目标会话中查询。');
-      const p=await v1Bridge.request('recall',{query:String(args.q||args.query||''),conversationId,scope,purpose:'query',...(args.userId?{actorIds:[String(args.userId)]}:{}),limit:Math.min(12,Math.max(1,Number(args.k)||5))});
+      const p=await v1Bridge.request('recall',{agentView:true,query:String(args.q||args.query||''),conversationId,scope,purpose:'query',...(args.userId?{actorIds:[String(args.userId)]}:{}),limit:Math.min(8,Math.max(1,Number(args.k)||3))});
       return {content:p.block||'未找到相关记忆。',isError:false};
     }
     if(kind==='scene-query'){const p=await v1Bridge.request('workspace',{action:args.sceneId?'query':'scenes',scope,sceneId:args.sceneId});return {content:JSON.stringify(p),isError:false};}
@@ -1486,6 +1568,7 @@ async function toolV1(kind,ctx,args) {
 }
 
 export const hooks = {
+  onMessage:async(ctx={})=>{adoptHost(ctx);},
 
   /**
    * 收集本轮触发批（在场的人 + 话题），供下一个钩子精确筛候选。
@@ -1497,6 +1580,7 @@ export const hooks = {
    * 旧形状（`senderId/senderName`）由 `personOf()` 兼容。
    */
   'before-context': async (ctx = {}) => {
+    adoptHost(ctx);
     if(protocolV1()) { const entries=ctx.triggerEntries??ctx.evidence;v1TriggerEvidence.set(String(ctx.chatKey||''),Array.isArray(entries)?entries:[]);if(v1TriggerEvidence.size>200)v1TriggerEvidence.delete(v1TriggerEvidence.keys().next().value);v1Bridge?.sync().catch(e=>diag({at:'v1-sync-error',error:String(e.message)})); return; }
     try {
       const key = pendingKey(ctx);

@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>记忆 · 向量记忆库</title>
+<link rel="stylesheet" href="/styles.css">
+<style>
+  /* 本页是**双栏查阅**页（左列表 + 右详情），不是全屏画布 —— 覆盖 styles.css 里
+     为星图页定的 body 布局。面板色沿用同一套 CSS 变量 ⇒ 与其它页同色、切主题一起变。 */
+  html { height: auto; }
+  body { display: block; height: auto; overflow: auto; }
+  header.top { position: sticky; top: 0; z-index: 6; }
+  main { padding: 14px 16px 18px; display: grid; gap: 14px;
+    grid-template-columns: minmax(220px, 300px) 1fr; align-content: start; }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+
+  .pane { border: 1px solid var(--line); border-radius: 12px; background: var(--panel); }
+  .pane > h2 { margin: 0; padding: 10px 13px 8px; font-size: 13px; font-weight: 650;
+    border-bottom: 1px solid var(--line); display: flex; align-items: baseline; gap: 8px; }
+  .pane > h2 .cnt { color: var(--fg-dim2); font-weight: 400; font-size: 11.5px; }
+
+  /* 概览：四个大数字 */
+  .counts { display: flex; gap: 6px; flex-wrap: wrap; padding: 9px 10px 4px; }
+  .counts .k { flex: 1 1 60px; border: 1px solid var(--line-2); border-radius: 9px;
+    padding: 6px 8px; background: var(--bg-2); }
+  .counts .k b { display: block; font-size: 17px; font-variant-numeric: tabular-nums; line-height: 1.2; }
+  .counts .k span { font-size: 10.5px; color: var(--fg-dim2); }
+  .counts .k.hot b { color: var(--warn); }
+  .counts .k.promoted b { color: var(--ok); }
+  .counts .k.dimmed b { color: var(--warn); opacity: .75; }
+  .counts .k.retired b { color: var(--fg-dim2); }
+
+  /* 队列筛选条 */
+  .chips { display: flex; gap: 5px; flex-wrap: wrap; padding: 4px 10px 9px; border-bottom: 1px solid var(--line); }
+  .chipbtn { font-size: 11px; padding: 3px 9px; border-radius: 999px; border: 1px solid var(--line-2);
+    background: transparent; color: var(--fg-dim); cursor: pointer; }
+  .chipbtn:hover { border-color: var(--accent); }
+  .chipbtn.on { border-color: var(--accent); color: var(--accent); font-weight: 600; }
+
+  /* 左栏：会话列表 */
+  .list { max-height: calc(100vh - 260px); overflow: auto; }
+  .list .row { display: block; padding: 8px 13px; cursor: pointer; border-left: 2px solid transparent; }
+  .list .row:hover { background: var(--bg-2); }
+  .list .row.on { border-left-color: var(--accent); background: var(--bg-2); }
+  .list .row .nm { font-size: 12.5px; font-weight: 600; display: flex; align-items: baseline; gap: 6px; }
+  .list .row .n { margin-left: auto; font-size: 10.5px; color: var(--fg-dim2); font-variant-numeric: tabular-nums; }
+  .list .row .sub { font-size: 11px; color: var(--fg-dim2); margin-top: 2px; line-height: 1.5;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .list .empty { padding: 14px 13px; color: var(--fg-dim2); font-size: 12px; line-height: 1.7; }
+
+  /* 右栏：事件流 */
+  .detail { padding: 12px 14px; }
+  .detail .head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin-bottom: 6px; }
+  .detail .head h3 { margin: 0; font-size: 13px; font-weight: 650; }
+  .detail .head .sub { font-size: 11px; color: var(--fg-dim2); }
+  .ev { border: 1px solid var(--line); border-radius: 10px; padding: 8px 11px; margin-top: 8px; }
+  .ev .hd { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+  .ev .t { font-size: 12.5px; font-weight: 600; }
+  .ev .meta { font-size: 10.5px; color: var(--fg-dim2); font-variant-numeric: tabular-nums; }
+  .ev .sum { font-size: 11.5px; color: var(--fg-dim); margin-top: 4px; line-height: 1.6; word-break: break-word; }
+  .ev.dim .t, .ev.dim .sum { color: var(--fg-dim2); }
+  .ev .chat { font-size: 10.5px; color: var(--fg-dim2); margin-top: 3px; }
+  .bar { height: 3px; border-radius: 2px; background: var(--line-2); margin-top: 6px; overflow: hidden; }
+  .bar i { display: block; height: 100%; }
+  .more { text-align: center; margin-top: 10px; }
+  .empty-hint { padding: 26px 0; text-align: center; color: var(--fg-dim2); font-size: 12px; }
+
+  .boot { position: fixed; }
+  footer.bottom { position: static; }
+</style>
+</head>
+<body>
+<header class="top">
+  <div class="brand">
+    <span class="dot" id="health-dot" title="本页所在服务"></span>
+    <h1>记忆</h1>
+    <p class="sub">短期层的事，按会话翻。左边选会话，右边按时间倒序看最近发生了什么。</p>
+  </div>
+  <div class="tools">
+    <input type="search" id="q" placeholder="搜事件标题 / 摘要…" autocomplete="off">
+    <button type="button" id="btn-reload">刷新</button>
+  </div>
+<nav class="page-nav" aria-label="记忆库页面"><a class="nav" href="/manage.html" id="manage-entry">记忆管理</a><a class="nav" href="/">关系星图</a><a class="nav" href="/person.html">人物卡</a><a class="nav" href="/memory.html" aria-current="page">会话记忆</a><a class="nav" href="/working.html">短期体检</a><a class="nav" href="/instances.html">多实例</a></nav>
+</header>
+
+<main>
+  <section class="pane" id="listpane">
+    <h2>会话 <span class="cnt" id="listcnt"></span></h2>
+    <div class="counts" id="counts"></div>
+    <div class="chips" id="chips"></div>
+    <div class="list" id="list"><div class="empty">正在读短期层…</div></div>
+  </section>
+  <section class="pane" id="detailpane">
+    <h2>发生了什么 <span class="cnt" id="detailcnt"></span></h2>
+    <div class="detail" id="detail"><div class="empty-hint">左边点一个会话，或者直接搜。</div></div>
+  </section>
+</main>
+
+<div class="boot" id="boot"><span class="spin"></span> 正在读短期层…</div>
+
+<footer class="bottom">
+  <div class="stats" id="stats"></div>
+  <div class="fine" id="fine"></div>
+</footer>
+
+<script type="module" src="/memory.js"></script>
+</body>
+</html>

@@ -818,6 +818,31 @@
         }
       }
     },
+    "/api/v1/spaces/{spaceId}/readiness": {
+      "get": {
+        "summary": "Check space worker and continuity storage readiness without loading the message journal",
+        "tags": ["Memory"],
+        "parameters": [{"name": "spaceId", "in": "path", "required": true, "schema": {"type": "string"}}],
+        "responses": {
+          "200": {
+            "description": "The worker and continuity journals are available. Cold message journals have not been verified.",
+            "content": {"application/json": {"schema": {
+              "type": "object",
+              "required": ["ok", "ready", "messageJournal"],
+              "properties": {
+                "ok": {"const": true},
+                "ready": {"const": true},
+                "messageJournal": {"enum": ["cold", "ready"]}
+              }
+            }}}
+          },
+          "default": {
+            "description": "Failure with a stable code, including 503 for a failed worker, unavailable storage or maintenance.",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}
+          }
+        }
+      }
+    },
     "/api/v1/spaces/{spaceId}/status": {
       "get": {
         "summary": "Space engine state",
@@ -904,7 +929,14 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RecallResult"
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/RecallResult"
+                    },
+                    {
+                      "$ref": "#/components/schemas/ObservationQueryResult"
+                    }
+                  ]
                 }
               }
             }
@@ -976,6 +1008,25 @@
                       "query"
                     ],
                     "description": "automatic returns at most two keyword-matched person impression/profile fields across all selected spaces; other layers keep their limits. query performs deliberate retrieval. Omission keeps compatible behavior. Does not grant access."
+                  },
+                  "observations": {
+                    "$ref": "#/components/schemas/ObservationQuery"
+                  },
+                  "natural": {
+                    "type": "boolean"
+                  },
+                  "suppressReminder": {
+                    "type": "boolean"
+                  },
+                  "naturalLimit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 3,
+                    "description": "For automatic natural recall, total selected-space cap; default 1. limit is accepted as fallback."
+                  },
+                  "agentView": {
+                    "type": "boolean",
+                    "description": "Render display names and concise excerpts for the trusted local agent."
                   }
                 },
                 "required": [
@@ -1108,6 +1159,10 @@
                   },
                   "operationId": {
                     "type": "string"
+                  },
+                  "reembedEvents": {
+                    "type": "boolean",
+                    "description": "Explicit index job option: re-embed blocked event vectors from original event records in the staging generation before publication. Default false."
                   }
                 },
                 "required": [
@@ -2742,6 +2797,101 @@
           }
         }
       }
+    },
+    "/api/v1/spaces/{spaceId}/observations": {
+      "post": {
+        "summary": "Record a scoped, evidence-backed observation revision",
+        "tags": [
+          "Memory"
+        ],
+        "parameters": [
+          {
+            "name": "spaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ObservationWrite"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Stored revision or replay",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "const": true
+                    },
+                    "key": {
+                      "type": "object",
+                      "properties": {
+                        "namespace": {
+                          "type": "string"
+                        },
+                        "id": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "namespace",
+                        "id"
+                      ]
+                    },
+                    "revision": {
+                      "type": "integer"
+                    },
+                    "recordedAt": {
+                      "oneOf": [
+                        {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        {
+                          "type": "string",
+                          "format": "date-time"
+                        }
+                      ]
+                    },
+                    "replayed": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "ok",
+                    "key",
+                    "revision",
+                    "recordedAt"
+                  ]
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Failure with a stable code. HTTP status may be 400, 401, 403, 404, 409, 413, 415, 500 or 503.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -3899,6 +4049,439 @@
           }
         },
         "additionalProperties": true
+      },
+      "ObservationWrite": {
+        "type": "object",
+        "properties": {
+          "operationId": {
+            "type": "string"
+          },
+          "scope": {
+            "$ref": "#/components/schemas/Scope"
+          },
+          "record": {
+            "type": "object",
+            "properties": {
+              "protocol": {
+                "const": "vec-memory/record@1"
+              },
+              "kind": {
+                "const": "vec-memory.observation"
+              },
+              "schemaVersion": {
+                "enum": [
+                  1,
+                  2
+                ]
+              },
+              "operation": {
+                "const": "put"
+              },
+              "key": {
+                "type": "object",
+                "properties": {
+                  "namespace": {
+                    "type": "string"
+                  },
+                  "id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "namespace",
+                  "id"
+                ]
+              },
+              "revision": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "references": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 20,
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "key": {
+                      "type": "object",
+                      "properties": {
+                        "namespace": {
+                          "type": "string"
+                        },
+                        "id": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "namespace",
+                        "id"
+                      ]
+                    },
+                    "revision": {
+                      "const": 1
+                    },
+                    "relation": {
+                      "const": "vec-memory.evidence"
+                    }
+                  },
+                  "required": [
+                    "key",
+                    "revision",
+                    "relation"
+                  ]
+                }
+              },
+              "payload": {
+                "type": "object",
+                "properties": {
+                  "subject": {
+                    "type": "string"
+                  },
+                  "predicate": {
+                    "type": "string"
+                  },
+                  "status": {
+                    "type": "string",
+                    "enum": [
+                      "observed",
+                      "planned",
+                      "completed",
+                      "cancelled"
+                    ]
+                  },
+                  "occurredAt": {
+                    "oneOf": [
+                      {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      {
+                        "type": "string",
+                        "format": "date-time"
+                      }
+                    ]
+                  },
+                  "dueAt": {
+                    "oneOf": [
+                      {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      {
+                        "type": "string",
+                        "format": "date-time"
+                      }
+                    ]
+                  },
+                  "effectiveFrom": {
+                    "oneOf": [
+                      {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      {
+                        "type": "string",
+                        "format": "date-time"
+                      }
+                    ]
+                  },
+                  "effectiveUntil": {
+                    "oneOf": [
+                      {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      {
+                        "type": "string",
+                        "format": "date-time"
+                      }
+                    ]
+                  },
+                  "amount": {
+                    "type": "object",
+                    "properties": {
+                      "value": {
+                        "type": "integer"
+                      },
+                      "unit": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "value",
+                      "unit"
+                    ]
+                  },
+                  "reminder": {
+                    "type": "object",
+                    "properties": {
+                      "enabled": {
+                        "type": "boolean"
+                      },
+                      "label": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 160
+                      }
+                    },
+                    "required": [
+                      "enabled",
+                      "label"
+                    ]
+                  }
+                },
+                "required": [
+                  "subject",
+                  "predicate",
+                  "status"
+                ]
+              }
+            },
+            "required": [
+              "protocol",
+              "kind",
+              "schemaVersion",
+              "operation",
+              "key",
+              "revision",
+              "references",
+              "payload"
+            ]
+          }
+        },
+        "required": [
+          "operationId",
+          "scope",
+          "record"
+        ]
+      },
+      "ObservationQuery": {
+        "type": "object",
+        "properties": {
+          "asOf": {
+            "oneOf": [
+              {
+                "type": "integer",
+                "minimum": 0
+              },
+              {
+                "type": "string",
+                "format": "date-time"
+              }
+            ]
+          },
+          "effectiveAt": {
+            "oneOf": [
+              {
+                "type": "integer",
+                "minimum": 0
+              },
+              {
+                "type": "string",
+                "format": "date-time"
+              }
+            ]
+          },
+          "occurred": {
+            "type": "object",
+            "properties": {
+              "from": {
+                "oneOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  {
+                    "type": "string",
+                    "format": "date-time"
+                  }
+                ]
+              },
+              "to": {
+                "oneOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  {
+                    "type": "string",
+                    "format": "date-time"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "from",
+              "to"
+            ]
+          },
+          "due": {
+            "type": "object",
+            "properties": {
+              "from": {
+                "oneOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  {
+                    "type": "string",
+                    "format": "date-time"
+                  }
+                ]
+              },
+              "to": {
+                "oneOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  {
+                    "type": "string",
+                    "format": "date-time"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "from",
+              "to"
+            ]
+          },
+          "subject": {
+            "type": "string"
+          },
+          "predicate": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "observed",
+              "planned",
+              "completed",
+              "cancelled"
+            ]
+          },
+          "operation": {
+            "type": "string",
+            "enum": [
+              "list",
+              "count",
+              "sum"
+            ]
+          },
+          "unit": {
+            "type": "string"
+          },
+          "order": {
+            "type": "string",
+            "enum": [
+              "occurredAt",
+              "dueAt",
+              "effectiveFrom"
+            ]
+          },
+          "direction": {
+            "type": "string",
+            "enum": [
+              "asc",
+              "desc"
+            ]
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 50
+          }
+        }
+      },
+      "ObservationQueryResult": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "const": true
+          },
+          "mode": {
+            "const": "observations"
+          },
+          "coverage": {
+            "const": "recorded-observations"
+          },
+          "asOf": {
+            "oneOf": [
+              {
+                "type": "integer",
+                "minimum": 0
+              },
+              {
+                "type": "string",
+                "format": "date-time"
+              }
+            ]
+          },
+          "effectiveAt": {
+            "oneOf": [
+              {
+                "type": "integer",
+                "minimum": 0
+              },
+              {
+                "type": "string",
+                "format": "date-time"
+              }
+            ]
+          },
+          "operation": {
+            "type": "string"
+          },
+          "aggregate": {
+            "type": [
+              "integer",
+              "string",
+              "null"
+            ]
+          },
+          "unit": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "matches": {
+            "type": "integer"
+          },
+          "missingEvidence": {
+            "type": "integer"
+          },
+          "invalidAmounts": {
+            "type": "integer"
+          },
+          "records": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "nextOffset": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "ok",
+          "mode",
+          "coverage",
+          "operation",
+          "records"
+        ]
       }
     }
   }

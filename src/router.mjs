@@ -45,6 +45,10 @@ import {
 import { embedDocuments } from './core/embed.mjs';
 import { distribution, judge, summarize } from './core/stats.mjs';
 import { RANK_VERSION } from './core/rank.mjs';
+import { parsePolicy, rerankHits, recallTopN, trimToK, makeInjectionExposureFactor } from './core/recall-policy.mjs';
+// 票 04：可选 cross-encoder 精排后端（独立外部 HTTP 服务，只做客户端）[by:WorkBuddy]
+import { parseRerankConfig, rerankCandidates, RERANK_DEGRADED } from './core/rerank-backend.mjs';
+import { createExposureState, channelKey } from './core/exposure.mjs';
 import {
   chunksDir,
   DEFAULT_SETTINGS,
@@ -85,12 +89,13 @@ import { evidenceView } from './core/provenance.mjs';
 // ── HTTP 入口（由 src/app.js 的 routes 缝调用）────────────────────────────
 const injectionReceipts = new Map();
 const RECEIPT_TTL_MS = 60_000;
-function issueReceipt(dir, chatKey, ids) {
+function issueReceipt(dir, chatKey, ids, extra = {}) {
   const now = Date.now();
   for (const [key, receipt] of injectionReceipts) if (receipt.expires <= now) injectionReceipts.delete(key);
   if (injectionReceipts.size >= 2048) injectionReceipts.delete(injectionReceipts.keys().next().value);
   const token = randomUUID();
-  injectionReceipts.set(token, { dir, chatKey, ids: [...new Set(ids)], expires: now + RECEIPT_TTL_MS });
+  // `extra` 只承载可丢弃的读侧派生量（票 03 注入级曝光）；不写真值、不延长 TTL。
+  injectionReceipts.set(token, { dir, chatKey, ids: [...new Set(ids)], expires: now + RECEIPT_TTL_MS, ...extra });
   return token;
 }
 const MAX_BODY = 1024 * 1024;
@@ -121,6 +126,90 @@ async function readJsonBody(req) {
 //     把重试改成 0 只会让一次抖动留下一批永久缺口。
 const QUERY_EMBED_BUDGET_MS = 1500;
 const INJECT_EMBED_BUDGET_MS = 1800;
+
+// ── 读侧召回策略（票 03 / docs/cost-and-mitigations-20261106.md）[by:WorkBuddy] ──
+// 默认 `off` ⇒ 连策略函数都不调用、响应不多一个字段，与历史基线逐字可比。
+// 三态就是 feature flag：off(fail-closed) / shadow(只算不排、零副作用) / enabled(参与定序)。
+// 任何配置非法或运行抛错 ⇒ 原顺序 + 稳定码，禁止静默放行。
+// 曝光状态是纯内存有界派生量（exposure.mjs），不落盘、不进备份、不进编码身份。
+// 票 04：可选 cross-encoder 精排后端（外部 HTTP，异步）[by:WorkBuddy] 2026-11-07
+// 因为精排要发一次网络请求，本函数改为 async，四条召回路径的调用点全部 `await`
+// （漏一个就会把 Promise 当 hits 用，静默出错 —— 有源码级断言锁住「恰好 4 处」）。
+const RECALL_EXPOSURE = createExposureState();
+const idOfHit = (h, i) => String((h && h.id) ?? (h && h.meta && h.meta.id) ?? `idx-${i}`);
+export async function applyRecallPolicy(rt, hits, { query, chatKey, k, now = Date.now(), cfg: givenCfg }) {
+  const cfg = givenCfg || parsePolicy(rt.settings || {});
+  // 所有分支都必须截回 k：配置非法 / 运行抛错时 store 可能已按放大后的 k 召回，
+  // 不截就会把 4k 条候选悄悄返回给调用方 —— 又是一次「失败但看起来正常」。
+  const trim = (arr) => trimToK(arr, k);
+  if (!cfg.ok) {
+    return { hits: trim(hits), policy: { mode: cfg.mode, applied: false,
+      degraded: { code: cfg.reason, reason: cfg.detail } } };
+  }
+  // off：连精排配置都不解析、连精排函数都不调用 —— 响应零新增字段、零外部请求。
+  if (cfg.mode === 'off') return { hits, policy: null };
+  try {
+    const spaceKey = String(rt.dir || 'default');
+    const exKey = channelKey(spaceKey, 'search', chatKey);
+    const out = rerankHits({ hits, query, chatKey, spaceKey, channel: 'search', cfg,
+      exposure: RECALL_EXPOSURE, now, k });
+    if (out.degraded) return { hits: trim(hits), policy: { mode: cfg.mode, applied: false, degraded: out.degraded } };
+
+    // ── 票 04 精排接入：rerankHits() 之后、trim() 之前 [by:WorkBuddy] ──────────
+    // 只有策略非 off 且显式 rerankEnabled 才接；默认关闭时 diagnostics 不带 rerank 字段
+    // （与票 03 基线逐字可比）。失败一律回落 out.hits（票 03 产物，**不是** store 原始 hits）、
+    // 带稳定码、不抛 5xx、绝不退回关键词支路（语义不同，别照抄 embed 的 auto 降级）。
+    // 连续 3 次 degraded ⇒ 进程内内存标志自动跳过精排（rerank-backend.mjs 内熔断）。
+    let finalHits = out.hits;
+    let diagnostics = out.diagnostics;
+    let recordIds = out.recordIds;
+    const rc = parseRerankConfig(rt.settings || {});
+    if (rc.enabled && cfg.mode !== 'off' && Array.isArray(out.hits) && out.hits.length >= 2) {
+      const rr = rc.ok
+        ? await rerankCandidates({ hits: out.hits, query, cfg: rc, now })
+        : { ok: false, degraded: RERANK_DEGRADED.FAILED, detail: rc.detail,
+            autoDisabled: false, order: null, count: out.hits.length };
+      if (rr.ok && Array.isArray(rr.order)) {
+        const ordered = rr.order.map((i) => out.hits[i]);
+        const applied = cfg.mode === 'enabled';
+        if (applied) {
+          finalHits = ordered;
+          // 精排成功 ⇒ 曝光改记「精排后」前 k 条 id，否则计数与用户实际看到的顺序脱节。
+          recordIds = ordered.slice(0, Math.max(1, Number(k) || 8)).map((h, i) => idOfHit(h, i));
+        }
+        // shadow：finalHits 仍是 out.hits 的同一引用、顺序不变，只把 proposedOrder 写进 diagnostics。
+        diagnostics = { ...(out.diagnostics || {}),
+          rerank: {
+            applied,
+            model: rc.model,
+            scoreSource: 'cross-encoder',
+            proposedOrder: ordered.map((h, i) => idOfHit(h, i)),
+            count: rr.count,
+            degraded: null,
+            autoDisabled: !!rr.autoDisabled
+          } };
+      } else {
+        diagnostics = { ...(out.diagnostics || {}),
+          rerank: {
+            applied: false,
+            model: rc.model,
+            scoreSource: 'cross-encoder',
+            proposedOrder: null,
+            degraded: rr.degraded || RERANK_DEGRADED.FAILED,
+            detail: rr.detail || null,
+            autoDisabled: !!rr.autoDisabled
+          } };
+      }
+    }
+    if (recordIds.length) RECALL_EXPOSURE.record(exKey, recordIds, now);
+    // 放大召回后必须截回请求 k：响应里的 k、配额、注入预算都按请求值解释，
+    // 多捞的候选只是给重排看的，绝不能悄悄流到调用方。失败分支同样截（见上文）。
+    return { hits: trim(finalHits), policy: diagnostics };
+  } catch (e) {
+    return { hits: trim(hits), policy: { mode: cfg.mode, applied: false,
+      degraded: { code: 'POLICY_FAILED', reason: String(e?.message || e).slice(0, 200) } } };
+  }
+}
 
 /**
  * 造一份"主动查询用"的嵌入端点：一条总预算 + 不重试。
@@ -1483,6 +1572,10 @@ export async function handleMemoryVec(req, res, pathname, helpers) {
         return true;
       }
       const k = Number(body.k) || Number(rt.settings.topK) || 8;
+      // 票 03 收尾：策略非 off 时先多捞候选再重排，最后截回 k。
+      // `k`（响应契约）与 `storeK`（内部召回量）严格分开，别混用。
+      const polCfg = parsePolicy(rt.settings || {});
+      const storeK = recallTopN(k, polCfg);
       const chatKey = body.chatKey || '';
       const kind = body.kind || '';
       // ⚠️ 这里的 `kind` 是**文档类型**（块文件名里的 `hour` / `day` / `ep`，以及 `event`），
@@ -1581,13 +1674,16 @@ export async function handleMemoryVec(req, res, pathname, helpers) {
             normalizer: rt.normalizer,
             instruction: rt.settings.queryInstruction || DEFAULT_QUERY_INSTRUCTION
           }));
-          const r = rt.store.search({ ...queryIdentity, vector: vectors[0], k, chatKey, kind: 'event' });
+          // 第四条召回路径（票 03 收尾）：kind=event 的向量支路同样是「同类 hits 内部」，
+          // 之前 C7 断言只数了块层三条，把这里漏了 —— 静默不接比不接更危险。
+          const r = rt.store.search({ ...queryIdentity, vector: vectors[0], k: storeK, chatKey, kind: 'event' });
+          const pol = await applyRecallPolicy(rt, r.hits, { query: qEvent, chatKey, k, cfg: polCfg });
           json(res, 200, {
             ...base, mode: 'vector', scoredBy: 'cosine', degraded: null,
             scanned: r.scanned,
             // 零命中要说清是哪一种空：库里没有事件向量 vs 有向量但没匹配上
             reason: r.hits.length ? null : (eventVectors ? 'no-match' : 'no-event-vectors'),
-            hits: r.hits.map((h) => ({
+            hits: pol.hits.map((h) => ({
               source: 'event',
               id: h.id,
               score: Number(h.score.toFixed(6)),
@@ -1596,6 +1692,7 @@ export async function handleMemoryVec(req, res, pathname, helpers) {
               when: h.meta.when,
               text: h.meta.text
             })),
+            ...(pol.policy ? { policy: pol.policy } : {}),
             note: '向量路：只有升过长期的事件在库里，余弦与块层可比（同一空间）；'
               + '但覆盖率不如事件层 —— 完整的事件候选看 events 容器。'
           });
@@ -1669,7 +1766,8 @@ export async function handleMemoryVec(req, res, pathname, helpers) {
           });
           return true;
         }
-        const r = rt.store.searchText({ text: qNormalized, k, chatKey, kind });
+        const r = rt.store.searchText({ text: qNormalized, k: storeK, chatKey, kind });
+        const pol = await applyRecallPolicy(rt, r.hits, { query: qNormalized, chatKey, k, cfg: polCfg });
         json(res, 200, {
           ok: true,
           q: text,
@@ -1693,7 +1791,7 @@ export async function handleMemoryVec(req, res, pathname, helpers) {
             + '并列按命中词数、再按时间新近排序。换个说法可能搜不到 —— 这就是要向量路的理由。'
             + '事件在独立的 events 容器里（分数不可比，不混排）。',
           events: eventSidecar(qNormalized),
-          hits: r.hits.map((h) => ({
+          hits: pol.hits.map((h) => ({
             source: docSourceOf(h.meta),
             id: h.id,
             score: h.score,
@@ -1702,7 +1800,8 @@ export async function handleMemoryVec(req, res, pathname, helpers) {
             title: h.meta.title,
             when: h.meta.when,
             text: h.meta.text
-          }))
+          })),
+          ...(pol.policy ? { policy: pol.policy } : {})
         });
         return true;
       }
@@ -1723,13 +1822,14 @@ export async function handleMemoryVec(req, res, pathname, helpers) {
           normalizer: rt.normalizer,
           instruction: rt.settings.queryInstruction || DEFAULT_QUERY_INSTRUCTION
         }));
-        result = rt.store.search({ ...queryIdentity, vector: vectors[0], k, chatKey, kind });
+        result = rt.store.search({ ...queryIdentity, vector: vectors[0], k: storeK, chatKey, kind });
       } catch (e) {
         // `auto` 下"刚才探活通过、真发时失败"必须**也**降级 —— 只按探活判断会漏掉
         // 端点半死不活（探活是浅检查）的情形，那时用户看到的是 500，而关键词路本来是能用的。
         const fail = embedFailureOf(e);
         if (reqMode === 'auto') {
-          const r = rt.store.searchText({ text: qNormalized, k, chatKey, kind });
+          const r = rt.store.searchText({ text: qNormalized, k: storeK, chatKey, kind });
+          const pol = await applyRecallPolicy(rt, r.hits, { query: qNormalized, chatKey, k, cfg: polCfg });
           json(res, 200, {
             ok: true, q: text, qNormalized, requested: reqMode, mode: 'exact',
             scoredBy: 'token-overlap',
@@ -1741,11 +1841,12 @@ export async function handleMemoryVec(req, res, pathname, helpers) {
             note: '关键词路：score = 话题重合度（0~2，含跳字 bigram），不是语义相似度。'
               + '事件在独立的 events 容器里（分数不可比，不混排）。',
             events: eventSidecar(qNormalized),
-            hits: r.hits.map((h) => ({
+            hits: pol.hits.map((h) => ({
               source: docSourceOf(h.meta),
               id: h.id, score: h.score, matched: h.matched,
               chatKey: h.meta.chatKey, title: h.meta.title, when: h.meta.when, text: h.meta.text
-            }))
+            })),
+            ...(pol.policy ? { policy: pol.policy } : {})
           });
           return true;
         }
@@ -1758,8 +1859,12 @@ export async function handleMemoryVec(req, res, pathname, helpers) {
         });
         return true;
       }
-      const scores = result.hits.map((h) => h.score);
+      // 诊断分布按**请求 k 的前 k 条**原始分数算：放大召回后 result.hits 可能有 4k 条，
+      // 若拿全量算分布会被稀释成另一个口径，而 `distribution/judgment` 是按 top-k 校准的。
+      const scores = result.hits.slice(0, Math.max(1, k)).map((h) => h.score);
       const dist = distribution(scores, { topK: Math.min(5, k) });
+      // 策略不改 result.hits 本身，只返回新数组；顺序仍以原始召回为准。
+      const pol = await applyRecallPolicy(rt, result.hits, { query: qNormalized, chatKey, k, cfg: polCfg });
       json(res, 200, {
         ok: true,
         q: text,
@@ -1775,7 +1880,7 @@ export async function handleMemoryVec(req, res, pathname, helpers) {
         distribution: { ...dist, sorted: undefined, buckets: undefined },
         judgment: judge(dist, { topK: Math.min(5, k) }),
         events: eventSidecar(qNormalized),
-        hits: result.hits.map((h) => ({
+        hits: pol.hits.map((h) => ({
           source: docSourceOf(h.meta),
           id: h.id,
           score: Number(h.score.toFixed(6)),
@@ -1783,7 +1888,8 @@ export async function handleMemoryVec(req, res, pathname, helpers) {
           title: h.meta.title,
           when: h.meta.when,
           text: h.meta.text
-        }))
+        })),
+        ...(pol.policy ? { policy: pol.policy } : {})
       });
       return true;
     }
@@ -1807,6 +1913,11 @@ export async function handleMemoryVec(req, res, pathname, helpers) {
       }
       const rehearsal = bumpEventHits({ libDir: rt.dir, ids: receipt.ids, now: Date.now() });
       injectionReceipts.delete(token);
+      // 票 03 收尾：deferred 路径的曝光要等宿主确认真用了才算（60s 收据语义）。
+      // 立即 rehearsal 路径没有收据，改在 /inject 返回时记，两条路只记一次。
+      if (receipt.exposureKey && Array.isArray(receipt.exposureIds) && receipt.exposureIds.length) {
+        RECALL_EXPOSURE.record(receipt.exposureKey, receipt.exposureIds, Date.now());
+      }
       json(res, 200, { ok: true, accepted: true, rehearsal });
       return true;
     }
@@ -1855,6 +1966,21 @@ export async function handleMemoryVec(req, res, pathname, helpers) {
       const profilePolicy = resolveProfilePolicy({ request: body, settings: s, existing: rt.policyBaseline?.existing !== false });
       const profileCrossScope = profilePolicy.id !== 'same-scope';
 
+      // ── 注入级曝光（票 03 收尾）[by:WorkBuddy] ──────────────────────────
+      // 「上一轮真进过 prompt 的属性/档案行，这轮同档内让位」。与 /search 的文档 id
+      // 通道物理隔离（channelKey），否则两套 id 空间混用只会「永远查不到」还不报错。
+      // off ⇒ 连因子都不造，selectInjectLines 走原路径，响应不多一个字段。
+      const injCfg = parsePolicy(s);
+      const injExposure = makeInjectionExposureFactor({
+        exposure: RECALL_EXPOSURE, spaceKey: String(rt.dir || 'default'),
+        chatKey, cfg: injCfg, now: Date.now()
+      });
+      // 读侧派生量出错不能拖垮热路径：单条 lookup 抛错就当没曝光（因子 1）。
+      const injFactor = injExposure
+        ? Object.assign((id) => { try { return injExposure(id); } catch { return 1; } },
+          { report: injExposure.report, key: injExposure.key, mode: injExposure.mode })
+        : null;
+
       const candidates = buildInjectCandidates({
         winners: store.slots.values(),
         people,
@@ -1899,9 +2025,30 @@ export async function handleMemoryVec(req, res, pathname, helpers) {
           const health = checkEndpoint(ep);
           if (health.ok) {
             const qv = (await embedQueries([topicNorm], { ...ep, normalizer: rt.normalizer, lineage, instruction: s.queryInstruction || DEFAULT_QUERY_INSTRUCTION })).vectors[0];
-            // 属性行本来就是归一化后的文本（exemplar 出自归一化簇）—— 走文档侧编码。
-            const dv = (await embedDocuments(candidates.map((c) => c.line), { ...ep, normalizer: rt.normalizer })).vectors;
-            sims = dv.map((v) => cosine(qv, v));
+            // [by:WorkBuddy] 2026-11-10：这里原来假设「属性行本来就是归一化后的文本」——
+            // 实测**不成立**（`consolidate` 落盘的事实是原文），于是原文撞上出境闸门的
+            // 词表命中 ⇒ `embed-failed` ⇒ 整条检索路退化为关键字。改成逐行归一化后再编码。
+            // 同时只对**词面分前 40** 条做向量精排：候选池是按 scope 的全量事实行（实测单群
+            // 3126 条），整池现场编码既超时又费钱。
+            const RERANK_TOP_K = 20;
+            const preKw = tokenOverlapSims(candidates.map((c) => c.line), topicNorm);
+            const order = preKw
+              .map((sc, i) => ({ sc, i }))
+              .sort((a, b) => b.sc - a.sc)
+              .slice(0, Math.min(RERANK_TOP_K, candidates.length))
+              .map((x) => x.i);
+            const docTexts = [], docIndex = [];
+            for (const i of order) {
+              try {
+                docTexts.push(rt.normalizer.normalize(candidates[i].line, { context: 'document', register: false }).text);
+                docIndex.push(i);
+              } catch { /* 这一行不进向量路，仍保留关键词兜底 */ }
+            }
+            if (!docTexts.length) throw new Error('all candidates failed to normalize');
+            const dv = (await embedDocuments(docTexts, { ...ep, normalizer: rt.normalizer })).vectors;
+            const dvx = new Array(candidates.length).fill(0);
+            dv.forEach((v, k) => { dvx[docIndex[k]] = cosine(qv, v); });
+            sims = dvx;
             simNote = 'ok';
             simMetric = 'cosine';
             minScoreCaliber = 'cosine';
@@ -1939,7 +2086,8 @@ export async function handleMemoryVec(req, res, pathname, helpers) {
       const effMode = sims ? mode : 'boost';
 
       const { lines, droppedByThreshold } = selectInjectLines({
-        candidates, sims, minScore: usedMinScore, mode: effMode, perPerson, total
+        candidates, sims, minScore: usedMinScore, mode: effMode, perPerson, total,
+        ...(injFactor ? { exposureFactor: injFactor } : {})
       });
 
       // ── 档案段（`ADR-0031`）：`trait` 槽 → **常驻**档案行 ──────────────────
@@ -1973,7 +2121,8 @@ export async function handleMemoryVec(req, res, pathname, helpers) {
         sims: null,          // 常驻信息不需要话题相关性 ⇒ 也不触发 hard→boost 降级判断
         mode: 'boost',
         perPerson: 1,        // 一个人的档案**合并成一行**（`k=v / k=v`），故每人至多 1 行
-        total: profileTotal
+        total: profileTotal,
+        ...(injFactor ? { exposureFactor: injFactor } : {})
       });
 
       if(body.purpose==='automatic') {
@@ -2133,11 +2282,44 @@ export async function handleMemoryVec(req, res, pathname, helpers) {
       events.rehearsalSkipped = rehearsal.skipped;
       if (rehearsal.reason) events.rehearsalReason = rehearsal.reason;
 
-      const receipt = !body.dry && body.rehearsal === 'deferred' && !disconnected.signal.aborted && eventIdsForHit.length
-        ? issueReceipt(rt.dir, chatKey, eventIdsForHit) : null;
+      // 注入级曝光：只记「最终 lines 里真有的」属性/档案行。`purpose=automatic` 会把
+      // lines 换成 keywordImpressions 的结果，所以必须在 splice 之后取，不能早取。
+      // 事件段 / 跨会话 / 主体观察有各自的衰减与闸门，不在本策略的曝光口径内。
+      const injectLineId = (l) => `${String(l?.who ?? '')}|${String(l?.line ?? '')}`;
+      const injectIds = injCfg.ok && injCfg.mode !== 'off'
+        ? [...lines, ...profileLines].map(injectLineId) : [];
+      const injectExKey = channelKey(String(rt.dir || 'default'), 'inject', chatKey);
+      let injectExposureRecorded = 0;
+      const exposureActive = injCfg.ok && injCfg.mode === 'enabled' && !body.dry
+        && !disconnected.signal.aborted && injectIds.length > 0;
+      if (exposureActive && body.rehearsal !== 'deferred') {
+        RECALL_EXPOSURE.record(injectExKey, injectIds, Date.now());
+        injectExposureRecorded = injectIds.length;
+      }
+      // deferred ⇒ 等 inject/ack 确认，避免「算了但没真用」污染曝光；
+      // shadow/off 都不得写曝光状态，也不能借收据绕过这条例外。
+      const deferExposure = exposureActive && body.rehearsal === 'deferred';
+      const receipt = !body.dry && body.rehearsal === 'deferred' && !disconnected.signal.aborted
+        && (eventIdsForHit.length || deferExposure)
+        ? issueReceipt(rt.dir, chatKey, eventIdsForHit,
+          deferExposure ? { exposureKey: injectExKey, exposureIds: injectIds } : {})
+        : null;
+      // 只在非 off 时多一个字段；off 态响应与历史基线逐字可比。
+      const injPolicy = injFactor ? {
+        mode: injCfg.mode,
+        channel: 'inject',
+        applied: injCfg.mode === 'enabled',
+        scope: 'attribute + profile lines only (events / crossChat / subjects excluded)',
+        exposureWindow: injCfg.exposureWindow,
+        exposureDecay: injCfg.exposureDecay,
+        recorded: injectExposureRecorded,
+        deferred: deferExposure,
+        ...injFactor.report()
+      } : null;
       json(res, 200, {
         ok: true,
         receipt,
+        ...(injPolicy ? { policy: injPolicy } : {}),
         rehearsalMode: body.dry ? 'dry' : body.rehearsal === 'deferred' ? 'adopted' : 'legacy-rendered',
         injected: lines.length > 0 || profileLines.length > 0 || crossChatLines.length > 0 || eventLines.length > 0 || subjectData.subjectLines.length > 0,
         mode: effMode,

@@ -1,6 +1,7 @@
 import path from 'node:path';
 import { initialize } from '../src/standalone/service.mjs';
 import { createStandaloneServer, isLoopbackHost } from '../src/standalone/server.mjs';
+import { watchAgentOwners } from '../src/standalone/agent-owners.mjs';
 const args = process.argv.slice(2), action = args.shift();
 function option(name, fallback) { const i = args.indexOf(name); return i < 0 ? fallback : args[i + 1]; }
 const root = option('--root');
@@ -14,14 +15,23 @@ else {
   // 要恢复"必须给凭据"，用 --require-auth（access.json 与既有凭据一直保留，随时可切回）。
   const requireAuth = args.includes('--require-auth');
   const localAdmin = !requireAuth;
+  const agentManaged = args.includes('--agent-managed') && isLoopbackHost(host);
   if (localAdmin && !isLoopbackHost(host)) { console.error('[vec-memory] default no-auth mode requires a loopback --host (or pass --require-auth)'); process.exitCode = 1; }
   else {
     const runtime = createStandaloneServer({ root, embedOrigins, localAdmin });
+    let stopWatching, stopping;
+    const stop = () => {
+      stopWatching?.();
+      return stopping ??= runtime.close().catch(error => {
+        console.error('[vec-memory] 关闭失败：', error.message);
+        process.exitCode = 1;
+      });
+    };
     runtime.server.listen(port, host, () => {
       console.log(`[vec-memory] standalone http://${host}:${runtime.server.address().port}/standalone.html`);
       if (localAdmin) console.log('[vec-memory] 免凭据模式（默认）：仅本机回环免凭据，非回环来源仍需凭据；用 --require-auth 关闭');
+      if (agentManaged) stopWatching = watchAgentOwners(root, stop);
     });
-    const stop = async () => { await runtime.close(); process.exitCode = 0; };
     process.once('SIGINT', stop); process.once('SIGTERM', stop);
   }
 }

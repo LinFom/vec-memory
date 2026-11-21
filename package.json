@@ -1,26 +1,26 @@
 {
   "name": "vec-memory",
-  "version": "0.33.2",
+  "version": "0.34.0",
   "private": true,
   "type": "module",
-  "description": "Standalone hybrid memory service: isolated project spaces, evidence-backed memories, keyword/vector recall and adoption.",
+  "description": "Local vector knowledge base. Own storage + own HTTP surface; QQ-Agent and other projects attach through PROTOCOL.md.",
   "engines": {
     "node": ">=22.5"
   },
   "scripts": {
-    "init": "node tools/standalone-server.mjs init",
-    "start": "node tools/standalone-server.mjs serve",
-    "init:standalone": "node tools/standalone-server.mjs init",
-    "serve:standalone": "node tools/standalone-server.mjs serve",
+    "spike": "node spike/bench-store.mjs",
     "test": "node --test \"test/*.mjs\"",
-    "test:adapter": "node --test adapters/qq-agent/protocol-v1.test.mjs adapters/qq-agent/tool-contract.test.mjs adapters/qq-agent/service-start.test.mjs"
+    "test:integration": "node test/edges.mjs && node test/graph.mjs && node test/realloop.mjs",
+    "serve": "node src/server.mjs",
+    "vendor": "node tools/vendor.mjs",
+    "serve:standalone": "node tools/standalone-server.mjs serve",
+    "init:standalone": "node tools/standalone-server.mjs init",
+    "start": "node tools/standalone-server.mjs serve",
+    "init": "node tools/standalone-server.mjs init",
+    "test:adapter": "node --test adapters/moon/index.test.mjs adapters/qq-agent/protocol-v1.test.mjs"
   },
   "dependencies": {
     "sqlite-vec": "^0.1.9",
     "three": "0.180.0"
-  },
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/LinFom/vec-memory.git"
   }
 }

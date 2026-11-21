@@ -15,3 +15,16 @@ settings.json
 .scratch/
 _scratch/
 _rollback/
+
+# Local memory data, credentials, and benchmark artifacts
+.private/
+.bench-key
+/bench-root/
+/bench-admin.json
+/bench-root-init.json
+/bench-*.ps1
+/instances.json
+*.vmb
+*.sqlite
+*.sqlite3
+*.bak-*
