@@ -82,7 +82,7 @@ nav a i{width:6px;height:6px;border-radius:2px;background:currentColor;opacity:.
 nav a[aria-current] i{opacity:1}
 nav .grp{font-size:11px;color:var(--faint);padding:14px 10px 6px;letter-spacing:.08em;text-transform:uppercase}
 main{flex:1;overflow:auto;padding:20px 22px 40px;min-width:0}
-.page{max-width:1120px;margin:0 auto;display:grid;gap:16px}
+.page{max-width:1120px;margin:0 auto;display:grid;gap:16px;grid-template-columns:minmax(0,1fr)}
 .page>.head{display:flex;align-items:flex-end;gap:14px;flex-wrap:wrap}
 .page>.head p{color:var(--muted);font-size:13px;flex:1;min-width:180px}
 
@@ -97,13 +97,49 @@ main{flex:1;overflow:auto;padding:20px 22px 40px;min-width:0}
 .stat{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:14px 16px}
 .stat b{display:block;font-size:24px;font-weight:650;letter-spacing:-.02em;line-height:1.25}
 .stat small{color:var(--muted);font-size:12px}
-.split{display:grid;grid-template-columns:1.15fr .85fr;gap:16px;align-items:start}
-@media(max-width:900px){.split{grid-template-columns:1fr}nav{width:56px}nav a{justify-content:center;padding:9px 0}nav a span{display:none}nav .grp{display:none}}
+.split{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(0,.85fr);gap:16px;align-items:start}
+@media(max-width:850px){
+  .layout{flex-direction:column;min-height:0}
+  nav{display:flex;gap:4px;width:auto;padding:6px 10px;border:0;border-bottom:1px solid var(--line);overflow-x:auto}
+  nav a{flex:none;padding:8px;margin:0}
+  nav .grp,nav a i{display:none}
+  main{padding:16px 14px 32px}
+}
+@media(max-width:680px){
+  .split{grid-template-columns:minmax(0,1fr)}
+  .brand span,#hp-ver,#hp-state{display:none}
+  header{gap:8px}
+  .page>.head{display:grid;gap:4px;align-items:start}
+}
+@media(max-width:420px){
+  main{padding-inline:10px}
+  .card{padding:12px}
+  .row .ops{flex-shrink:1;justify-content:flex-end}
+}
 
 .toolbar{display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end}
 .toolbar .field{flex:1 1 160px;min-width:130px}
 .toolbar .field.narrow{flex:0 0 118px}
-.toolbar .acts{display:flex;gap:8px;flex:0 0 auto}
+.acts{display:flex;align-items:center;flex-wrap:wrap;gap:8px}
+.toolbar .acts{flex:0 1 auto}
+label.hp{white-space:normal}
+main :is(a,button,summary):focus-visible,nav a:focus-visible{outline:2px solid var(--accent-2)}
+.row[data-act],.pcard[data-act]{cursor:pointer}
+.row[data-act]:hover,.pcard[data-act]:hover,.pcard.sel{border-color:var(--accent-2)}
+.row .body .t,.pcard .nm{white-space:pre-wrap}
+.card,.stat{min-width:0;overflow-wrap:anywhere}
+.field-note,.muted{font-size:12px;color:var(--muted)}
+.lookup-result{margin-top:12px}
+.scene-filters{margin-bottom:12px}
+.entry-write{margin-top:0}
+.entry-write[open]>summary{margin-bottom:12px}
+.entry-write>summary{font-size:15px;color:var(--text)}
+#entry-editor:not([hidden])+.entry-write{margin-top:12px}
+.table-wrap{overflow-x:auto}
+.table-wrap table{width:100%;border-collapse:collapse}
+.table-wrap :is(th,td){padding:10px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line)}
+.table-wrap th{font-size:12px;color:var(--muted)}
+@media(prefers-reduced-motion:reduce){.toast{animation:none}}
 
 .chip{display:inline-flex;align-items:center;gap:5px;padding:2px 8px;border-radius:999px;background:var(--chip);color:var(--muted);font-size:11.5px;font-weight:600;white-space:nowrap}
 .chip.ok{background:var(--green-soft);color:var(--green)}
@@ -171,6 +207,10 @@ pre{margin:8px 0 0;padding:10px;background:var(--card-2);border:1px solid var(--
 .diagnostic code{flex:1;min-width:0;overflow-wrap:anywhere;word-break:break-word}
 .acceptance-note{font-size:12px;color:var(--muted);margin-top:6px}
 [hidden]{display:none!important}
+.settings-section{margin:14px 0;padding:12px;min-width:0;border:1px solid var(--line);border-radius:var(--radius-sm)}
+.settings-section legend{padding:0 6px;font-weight:600}
+.settings-section .grid{grid-template-columns:repeat(auto-fit,minmax(min(100%,220px),1fr))}
+.person-ref{color:var(--accent-2);text-decoration:underline;text-underline-offset:3px}
 </style>
 <link rel="stylesheet" href="/galaxy.css">
 </head>
@@ -220,12 +260,12 @@ pre{margin:8px 0 0;padding:10px;background:var(--card-2);border:1px solid var(--
     <button class="btn sm ghost" id="logout">退出</button>
   </header>
   <div class="layout">
-    <nav id="nav"></nav>
+    <nav id="nav" aria-label="控制台页面"></nav>
     <main id="main"></main>
   </div>
 </div>
 
-<div id="toasts"></div>
+<div id="toasts" role="status" aria-live="polite"></div>
 <div id="busybox"></div>
 
 <script>
@@ -235,16 +275,16 @@ const esc=v=>String(v==null?"":v).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;"
 function freshHistoryState(){return {job:null,submitOperationId:null,submitting:false,readError:"",pollError:"",pollTimer:null,polling:false,controller:new AbortController()};}
 const S={
   token:"", spaces:null, space:"", ws:null, status:null, ver:null,
-  page:"overview", scope:{kind:"group",id:""},spaceEpoch:0,baseAbort:null,
+  page:"overview", scope:{kind:"group",id:""},spaceEpoch:0,spaceController:new AbortController(),workspaceRequest:null,statusRequest:null,jobsRequest:null,
   person:null, personCtx:"", personSel:null, entry:null, entryPreview:null,
-  scene:"", subject:null, subjectSel:null, recall:null, jobs:null,
+  scene:"", sceneFilter:"", sceneStatus:"", sceneLimit:50, subject:null, subjectSel:null, subjectSearch:null, recall:null, jobs:null,
   settings:null, backupPreview:null, restoreResult:null, busy:0, job:null, jobTimer:null, bpass:"", backupMode:"evidence",
   history:freshHistoryState(),scrollHistory:false
 };
-const LS_THEME="memory-console-theme", LS_TOKEN="memory-console-token";
+const LS_THEME="memory-console-theme", LS_TOKEN="memory-console-token", LS_SPACE="memory-console-space";
 const NAV=[
   ["概览","overview"],["人物记忆","people"],["场景记忆","scene"],["关系星图","star"],
-  ["记忆检索","recall"],["主体与纠正","subject"],["备份与导入","backup"],["设置","settings"]
+  ["记忆检索","recall"],["角色与约定","continuity"],["主体与纠正","subject"],["备份与导入","backup"],["设置","settings"]
 ];
 const kindName={trait:"档案",speaker_profile:"画像",event:"事件",topic:"话题",promise:"承诺",joke:"梗",preference:"偏好",grudge:"芥蒂",pattern:"模式",impression:"印象",rule:"规矩",meme:"梗",term:"术语",opinion:"意见",fact:"事实"};
 const scopeName={group:"群",private:"私聊",game:"游戏",channel:"频道",work:"作品",project:"项目"};
@@ -335,9 +375,8 @@ function startJobPolling(){
         try{
           // 维护窗口里 boot 拿不到空间表（见 boot 的 MAINTENANCE 分支），这里就地补上。
           if(!Object.keys(S.spaces?.spaces||{}).length){S.spaces=await api("admin/spaces");applySpaces();}
-          await refreshBase();
+          refreshAfterMaintenance();
         }catch{}
-        render();
       },250);
     }
   },JOB_POLL_MS);
@@ -392,11 +431,13 @@ function applyTheme(){
   const dark=v==="dark"||(v!=="light"&&matchMedia("(prefers-color-scheme: dark)").matches);
   document.documentElement.dataset.theme=dark?"dark":"light";
 }
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change",()=>{
+  if($("#theme").value==="auto")applyTheme();
+});
 function initTheme(){
   const saved=localStorage.getItem(LS_THEME)||"auto";
   $("#theme").value=saved; applyTheme();
-  $("#theme").onchange=()=>{localStorage.setItem(LS_THEME,$("#theme").value);applyTheme();renderStar();};
-  matchMedia("(prefers-color-scheme: dark)").addEventListener("change",()=>{if($("#theme").value==="auto"){applyTheme();renderStar();}});
+  $("#theme").onchange=()=>{localStorage.setItem(LS_THEME,$("#theme").value);applyTheme();};
 }
 
 /* ---------------- gate ---------------- */
@@ -427,11 +468,9 @@ async function enter(){
     const out=$("#logout"); if(out)out.hidden=true;
   }
   applySpaces();
-  await refreshBase();
   render();
-  // 刷新页面/重进工作台时，后台可能还在跑备份：直接接回进度，而不是让用户以为卡住了。
+  void loadVersion();
   void resumeJobIfAny();
-  resumeHistoryJobIfAny();
 }
 // 空间下拉单独抽出来：维护窗口里 boot 拿不到空间表，进度结束后要能就地补上。
 function applySpaces(){
@@ -440,96 +479,166 @@ function applySpaces(){
   sel.innerHTML=spaces.length
     ? spaces.map(k=>`<option value="${esc(k)}">${esc(k)}${S.spaces.spaces[k]?.owner&&S.spaces.spaces[k].owner!==k?" · "+esc(S.spaces.spaces[k].owner):""}</option>`).join("")
     : '<option value="">（没有已登记的空间）</option>';
-  if(!spaces.includes(S.space))S.space=spaces[0]||"";
+  const linkedSpace=location.hash.startsWith("#/people/card?") && new URLSearchParams(location.hash.split("?")[1]).get("space");
+  const requestedSpace=new URLSearchParams(location.search).get("space");
+  if(!spaces.includes(S.space)){
+    let remembered;
+    try{remembered=localStorage.getItem(LS_SPACE);}catch{}
+    S.space=[linkedSpace,requestedSpace,remembered,spaces[0]].find(key=>spaces.includes(key))||"";
+  }
+  sel.disabled=!spaces.length;
   sel.value=S.space;
   sel.onchange=()=>switchSpace(sel.value);
 }
 async function switchSpace(space){
   if(space===S.space)return;
   // 代次 + AbortController 双保险：旧空间的慢响应既会被取消，也无法在取消不及时时落进新状态。
-  S.spaceEpoch++;S.baseAbort?.abort();stopHistoryPolling(true);
-  S.space=space;S.ws=null;S.status=null;S.scene="";S.person=null;S.personSel=null;S.entry=null;S.entryPreview=null;
-  S.subject=null;S.subjectSel=null;S.recall=null;S.jobs=null;S.settings=null;S.backupPreview=null;S.restoreResult=null;
+  resetSpaceRequests();stopHistoryPolling(true);
+  S.space=space;
+  const url=new URL(location.href);
+  url.searchParams.set("space",space);
+  history.replaceState(null,"",url);
+  try{localStorage.setItem(LS_SPACE,space);}catch{}
+  S.scope={kind:"group",id:""};
+  S.ws=null;S.status=null;selectScene("");
+  S.person=null;S.personSel=null;S.personPreview=null;
+  S.subject=null;S.subjectSel=null;S.subjectSearch=null;S.recall=null;S.recallScope=null;S.lastQuery="";
+  S.jobs=null;S.settings=null;S.backupPreview=null;S.restoreResult=null;
   S.history=freshHistoryState();S.degraded="";
   render();
-  await refreshBase();render();resumeHistoryJobIfAny();
+}
+function resetSpaceRequests(){
+  S.spaceEpoch++;
+  S.spaceController.abort();
+  S.spaceController=new AbortController();
+  S.workspaceRequest=null;
+  S.statusRequest=null;
+  S.jobsRequest=null;
+}
+async function loadVersion(){
+  try{
+    S.ver=await api("version","GET",undefined,{quiet:true});
+    $("#hp-ver").textContent="v"+(S.ver.implementationVersion||"?");
+    const details=$("#overview-version");
+    if(details)details.textContent=versionLabel();
+  }catch{}
+}
+function versionLabel(){
+  return (S.ver?.protocolVersion??"—")+" · 实现 "+(S.ver?.implementationVersion??"—");
 }
 function buildNav(){
   $("#nav").innerHTML='<div class="grp">日常</div>'+
     NAV.slice(0,5).map(([l,id])=>`<a href="#/${id}" data-page="${id}"><i></i><span>${l}</span></a>`).join("")+
     '<div class="grp">管理</div>'+
     NAV.slice(5).map(([l,id])=>`<a href="#/${id}" data-page="${id}"><i></i><span>${l}</span></a>`).join("");
-  addEventListener("hashchange",()=>render());
+  window.onhashchange=()=>{if(!$("#app").hidden)render();};
 }
-async function refreshBase(){
-  if(!S.space){S.ws=null;S.status=null;return;}
-  const space=S.space,epoch=S.spaceEpoch,controller=new AbortController();
-  S.baseAbort?.abort();S.baseAbort=controller;
-  const spaceId=encodeURIComponent(space),options={signal:controller.signal};
-  // 服务刚重启时会有几秒冷启动（要读整库索引），这时打过去会全部失败。
-  // 不重试的后果是页面静默显示成一屏 0 —— 所以这里重试一次，仍失败就明确报出来。
-  const attempt=async(fn)=>{
-    try{return {ok:true,value:await fn()};}
-    catch(e){
-      if(e.name==="AbortError"||epoch!==S.spaceEpoch)return {ok:false,error:e};
-      // 维护态是「服务此刻只读」，不是它慢：重试只会把 503 刷成一串红字。
-      if(e.code==="MAINTENANCE")return {ok:false,error:e};
-      if(e.status&&e.status<500&&e.status!==429)return {ok:false,error:e};
-      await new Promise(r=>setTimeout(r,1200));
-      if(epoch!==S.spaceEpoch)return {ok:false,error:e};
-      try{return {ok:true,value:await fn()};}catch(e2){return {ok:false,error:e2};}
+function spaceReadOptions(){
+  return {signal:AbortSignal.any([S.spaceController.signal,AbortSignal.timeout(30000)]),quiet:true};
+}
+function readWorkspace({refresh=false}={}){
+  if(!S.space)return Promise.resolve(null);
+  if(S.workspaceRequest)return S.workspaceRequest;
+  if(S.ws&&!refresh)return Promise.resolve(S.ws);
+  const epoch=S.spaceEpoch;
+  const promise=api("spaces/"+sid()+"/workspace","POST",{action:"state"},spaceReadOptions()).then(state=>{
+    if(epoch!==S.spaceEpoch)return null;
+    S.ws=state;
+    if(!Object.hasOwn(state.scenes||{},S.scene)){
+      selectScene(Object.values(state.scenes||{})[0]?.sceneId||"");
     }
-  };
-  const [wsR,stR,verR]=await Promise.all([
-    attempt(()=>api("spaces/"+spaceId+"/workspace","POST",{action:"state"},options)),
-    attempt(()=>api("spaces/"+spaceId+"/status","GET",undefined,options)),
-    attempt(()=>api("version","GET",undefined,options))
-  ]);
-  if(epoch!==S.spaceEpoch||space!==S.space)return;
-  if(wsR.ok)S.ws=wsR.value;
-  if(stR.ok){S.status=stR.value;S.history.readError="";}
-  else S.history.readError=String(stR.error?.message||"索引状态读取失败");
-  if(verR.ok)S.ver=verR.value;
-  const failed=[wsR,stR].filter(r=>!r.ok);
-  // 备份/恢复窗口内服务按设计只读（503 MAINTENANCE）。这不是故障，不该弹红；直接把
-  // 进度条接回来看住它，恢复完成后再自动刷新一次。
-  if(failed.some(r=>r.error?.status===503&&/MAINTENANCE/.test(String(r.error?.message||"")))){
-    S.degraded="";
-    void resumeJobIfAny();
-    return;
-  }
-  S.degraded=failed.length?String(failed[0].error?.message||"读取失败"):"";
-  if(S.degraded)toast("读取失败："+S.degraded+"（可点概览里的重试）","err");
-  if(S.ver)$("#hp-ver").textContent="v"+(S.ver.implementationVersion||"?");
-  if(!S.scene){
-    const first=Object.values(S.ws?.scenes||{})[0];
-    if(first)S.scene=first.sceneId;
-  }
-  if(S.scene&&S.ws?.scenes?.[S.scene]){
-    const b=S.ws.scenes[S.scene].bindings?.[0];
-    if(b&&!S.scope.id){S.scope={kind:b.kind,id:b.id};}
-  }
+    if(S.entry)S.entry=state.entries?.[S.entry.id]||null;
+    const binding=state.scenes?.[S.scene]?.bindings?.[0];
+    if(binding&&!S.scope.id)S.scope={kind:binding.kind,id:binding.id};
+    return state;
+  }).finally(()=>{
+    if(S.workspaceRequest===promise)S.workspaceRequest=null;
+  });
+  S.workspaceRequest=promise;
+  return promise;
 }
-
+function loadOverviewStatus({refresh=false}={}){
+  if(!S.space || (S.status&&!refresh))return Promise.resolve();
+  if(S.statusRequest)return S.statusRequest;
+  const epoch=S.spaceEpoch;
+  S.degraded="";
+  const promise=api("spaces/"+sid()+"/status","GET",undefined,spaceReadOptions()).then(status=>{
+    if(epoch!==S.spaceEpoch)return;
+    S.status=status;
+    S.history.readError="";
+    const {messages,entities}=status;
+    if(S.anonymous&&Number.isFinite(messages)&&Number.isFinite(entities)){
+      try{localStorage.setItem("overview-counts:"+S.space,JSON.stringify({messages,entities,at:Date.now()}));}catch{}
+    }
+  }).catch(error=>{
+    if(epoch!==S.spaceEpoch)return;
+    S.degraded=error.code==="MAINTENANCE"?"备份或恢复正在进行。":error.message;
+    S.history.readError=S.degraded;
+    if(error.code==="MAINTENANCE")void resumeJobIfAny();
+  }).finally(()=>{
+    if(S.statusRequest===promise)S.statusRequest=null;
+    if(epoch===S.spaceEpoch&&S.page==="overview"&&!$("#app").hidden)render();
+  });
+  S.statusRequest=promise;
+  return promise;
+}
+function savedOverviewCounts(){
+  if(!S.space||!S.anonymous)return null;
+  try{
+    const saved=JSON.parse(localStorage.getItem("overview-counts:"+S.space));
+    return saved&&[saved.messages,saved.entities,saved.at].every(Number.isFinite)?saved:null;
+  }catch{return null;}
+}
+function refreshAfterMaintenance(){
+  resetSpaceRequests();
+  stopHistoryPolling(true);
+  S.status=null;S.ws=null;S.jobs=null;S.degraded="";
+  S.entry=null;S.entryPreview=null;S.person=null;S.personSel=null;S.personPreview=null;
+  S.recall=null;S.subject=null;S.subjectSel=null;S.subjectSearch=null;
+  S.history=freshHistoryState();
+  if(!$("#app").hidden)render();
+}
 $("#logout").onclick=()=>{
-  S.spaceEpoch++;S.baseAbort?.abort();stopHistoryPolling(true);
+  resetSpaceRequests();stopHistoryPolling(true);
   localStorage.removeItem(LS_TOKEN); S.token="";
+  S.status=null;S.ws=null;S.jobs=null;S.degraded="";S.scope={kind:"group",id:""};
+  S.person=null;S.personSel=null;S.personPreview=null;S.entry=null;S.entryPreview=null;
+  S.recall=null;S.subject=null;S.subjectSel=null;S.subjectSearch=null;S.history=freshHistoryState();
   $("#app").hidden=true; $("#gate").hidden=false; $("#token").value="";
   $("#gate-msg").textContent="已退出";
 };
 
 /* ---------------- render root ---------------- */
+let renderedRoute, renderedSpace;
 function render(){
+  const resetScroll=renderedRoute!==location.hash || renderedSpace!==S.space;
+  renderedRoute=location.hash;
+  renderedSpace=S.space;
+  if(resetScroll)$("#main").scrollTop=0;
   galaxyGeneration++;galaxyPage?.dispose();galaxyPage=null;
-  const page=(location.hash.slice(2)||"overview").split("/")[0]||"overview";
+  const page=(location.hash.slice(2)||"overview").split(/[/?]/)[0]||"overview";
   S.page=NAV.some(n=>n[1]===page)?page:"overview";
   if(S.page!=="backup")stopHistoryPolling(true);
   $$("#nav a").forEach(a=>{
     if(a.dataset.page===S.page)a.setAttribute("aria-current","page"); else a.removeAttribute("aria-current");
   });
-  const view={overview:viewOverview,people:viewPeople,scene:viewScene,star:viewStar,recall:viewRecall,subject:viewSubject,backup:viewBackup,settings:viewSettings}[S.page];
+  if(resetScroll && matchMedia("(max-width:850px)").matches){
+    $("#nav [aria-current=page]")?.scrollIntoView({block:"nearest",inline:"nearest"});
+  }
+  if(S.page==="scene"){
+    const linkedScene=new URLSearchParams(location.hash.split("?")[1]).get("scene");
+    if(linkedScene && Object.hasOwn(S.ws?.scenes||{},linkedScene) && (resetScroll || S.pendingSceneLink))selectScene(linkedScene);
+    S.pendingSceneLink=Boolean(linkedScene && !S.ws);
+  }
+  if(S.page==="scene"&&S.space&&!S.ws){
+    $("#main").innerHTML=`<div class="page">${head("场景记忆","")}<div class="card" id="scene-load" role="status">正在加载场景…</div></div>`;
+    void loadScenePage($("#scene-load"));
+    return;
+  }
+  if(location.hash.startsWith("#/people/card?")){void showPersonCard(location.hash);return;}
+  const view={overview:viewOverview,people:viewPeople,scene:viewScene,star:viewStar,recall:viewRecall,continuity:()=>'<div id="continuity-page"></div>',subject:viewSubject,backup:viewBackup,settings:viewSettings}[S.page];
   $("#main").innerHTML=`<div class="page">${view()}</div>`;
-  $("#main").scrollTop=0;
+  if(resetScroll)$("#main").scrollTop=0;
   // 每次 render 都会重建表单，密码框必须回填 —— 否则「备份完成后接着点预览」必然报
   // INVALID_BACKUP（密码被清空），而且提示写的是「文件损坏」，完全误导。
   if(S.page==="backup"){
@@ -537,9 +646,48 @@ function render(){
     resumeHistoryJobIfAny();
     if(S.scrollHistory){S.scrollHistory=false;requestAnimationFrame(()=>$("#index-recovery")?.scrollIntoView({block:"start"}));}
   }
-  if(S.page==="overview")loadOverviewExtra();
-  if(S.page==="scene"&&S.ws)bindSceneSelect();
+  if(S.page==="overview"&&S.space){
+    if(!S.status&&!S.degraded)void loadOverviewStatus();
+    void loadOverviewExtra();
+  }
+  if(S.page==="people"&&S.space&&!S.ws)void loadPeopleDirectory($("#actor"));
+  if(S.page==="backup"&&S.space&&!S.status)void readHistoryStatus({quiet:true});
   if(S.page==="star")renderStar();
+  if(S.page==="continuity"){
+    const target=$("#continuity-page"),space=S.space;
+    import('/continuity-page.js').then(({mountContinuity})=>{
+      if(target.isConnected&&space===S.space){
+        mountContinuity(target,{space,scope:S.scope,scopes:scopeOptions(),api,esc,toast});
+        $("#continuity-filter",target)?.insertAdjacentHTML("beforeend",scopeLookupButton("continuity-scopes"));
+      }
+    }).catch(error=>{if(target.isConnected)target.textContent="角色记录加载失败："+error.message;});
+  }
+}
+async function loadScenePage(slot){
+  try{
+    await readWorkspace();
+    if(slot.isConnected)render();
+  }catch(error){
+    if(!slot.isConnected)return;
+    slot.innerHTML=`<p class="field-note">场景读取失败：${esc(error.message)}</p><button class="btn lookup-result" data-act="workspace-retry">重试</button>`;
+    if(error.code==="MAINTENANCE")void resumeJobIfAny();
+  }
+}
+async function loadPeopleDirectory(actor){
+  if(!actor)return;
+  const status=$("#accounts-status");
+  try{
+    await readWorkspace();
+    if(!actor.isConnected)return;
+    $("#accounts").innerHTML=accountOptions(actor.value);
+    const scopes=$("#scopes");
+    if(scopes)scopes.innerHTML=personScopeOptions();
+    const shortcuts=$("#account-shortcuts");
+    if(shortcuts)shortcuts.innerHTML=accountShortcuts();
+    status.textContent="";
+  }catch(error){
+    if(actor.isConnected)status.innerHTML=`<span>昵称列表读取失败。可以直接输入账号。</span> <button class="btn sm" data-act="people-retry">重试</button>`;
+  }
 }
 function head(title,desc,right=""){
   return `<div class="head"><h1>${esc(title)}</h1><p>${esc(desc)}</p>${right}</div>`;
@@ -550,8 +698,84 @@ function scopeOptions(){
   if(S.scope.id)seen.set(S.scope.kind+":"+S.scope.id,S.scope);
   return Array.from(seen.values());
 }
-function accountOptions(){
-  return (S.ws?.accounts||[]).map(a=>`<option value="${esc(a.id)}">${esc(a.displayName||a.id)}</option>`).join("");
+function knownScopeOptions(kinds){
+  const choices=new Map();
+  for(const scene of Object.values(S.ws?.scenes||{})){
+    for(const b of scene.bindings||[]){
+      if(kinds.includes(b.kind)&&b.id){
+        choices.set(JSON.stringify([b.kind,b.id]),sceneLabel(scene)+" · "+scopeName[b.kind]+" "+b.id);
+      }
+    }
+  }
+  if(kinds.includes(S.scope.kind)&&S.scope.id){
+    const key=JSON.stringify([S.scope.kind,S.scope.id]);
+    if(!choices.has(key))choices.set(key,scopeName[S.scope.kind]+" "+S.scope.id);
+  }
+  return Array.from(choices,([value,label])=>`<option value="${esc(value)}">${esc(label)}</option>`).join("");
+}
+let lastDirectory, peopleByLabel, speakersByName;
+function personText(text, scope=S.scope){
+  if(lastDirectory!==S.ws || !peopleByLabel){
+    lastDirectory=S.ws;
+    peopleByLabel=new Map();
+    speakersByName=new Map();
+    for(const p of S.ws?.people||[]){
+      peopleByLabel.set(p.label,p);
+      speakersByName.set(p.name,speakersByName.has(p.name)?null:p);
+      speakersByName.set(p.id,p);
+    }
+  }
+  function link(person){
+    const q=new URLSearchParams({space:S.space,id:person.id,kind:scope.kind,scope:scope.id||""});
+    return `<a class="person-ref" href="#/people/card?${esc(q.toString())}" title="${esc(person.id)}">${esc(person.name)}</a>`;
+  }
+  return String(text??"").split(/(〔P\d+〕|(?<![A-Za-z0-9_])P\d+(?=[：:]))/g).map((part,i)=>{
+    if(i%2===0){
+      // A resolved speaker field can also arrive as “nickname：text” or “qq:id：text”.
+      const split=i===0?part.indexOf("："):-1;
+      const speaker=split>0 && speakersByName.get(part.slice(0,split));
+      return speaker ? link(speaker)+esc(part.slice(split)) : esc(part);
+    }
+    const label=part.replace(/[〔〕]/g,""),person=peopleByLabel.get(label);
+    return person ? link(person) : esc("未识别成员（"+label+"）");
+  }).join("");
+}
+async function showPersonCard(route){
+  const q=new URLSearchParams(route.split("?")[1]), actorId=q.get("id"), space=S.space;
+  const host=$("#main"), heading=()=>S.ws?.people?.find(p=>p.id===actorId)?.name||actorId;
+  if(q.get("space")!==space){host.textContent="这张人物卡属于其他空间，请切换到对应空间查看。";return;}
+  const scope=q.get("scope")?{kind:q.get("kind"),id:q.get("scope")}:{kind:"private",id:actorId};
+  host.textContent="正在读取人物卡…";
+  try{
+    const p=await api("spaces/"+sid()+"/people","POST",{actorId,scope,allScopes:!q.get("scope")});
+    if(location.hash!==route || S.space!==space)return;
+    S.person=p; S.personSel={actorId,scope,allScopes:!q.get("scope"),item:null}; S.personPreview=null;
+    S.scope=scope;
+    const section=(title,items)=>`<section class="card"><h2>${title}</h2>${items.length?items.map(i=>`<p>${i.hidden?"［已撤回］":""}${personText(i.value,q.get("scope")?scope:{kind:"private",id:""})}</p>`).join(""):'<p class="empty">暂无记录</p>'}</section>`;
+    host.innerHTML=`<div class="page">${head(heading(),"人物卡 · "+actorId+" · "+(q.get("scope")?scope.id:"本空间全部场合"))}<div class="acts"><a class="btn" href="#/people">查看与整理人物记忆</a></div>${section("档案",p.profiles)}${section("印象",p.impressions)}</div>`;
+  }catch(e){if(location.hash===route && S.space===space)host.textContent="人物卡读取失败："+e.message;}
+}
+function accountOptions(query=""){
+  const term=query.trim().toLocaleLowerCase();
+  const options=[];
+  for(const account of S.ws?.accounts||[]){
+    if(term && ![account.id,account.displayName].some(value=>String(value||"").toLocaleLowerCase().includes(term)))continue;
+    options.push(`<option value="${esc(account.id)}">${esc(account.displayName||account.id)}</option>`);
+    if(options.length===40)break;
+  }
+  return options.join("");
+}
+function scopeLookupButton(target){
+  return S.space&&!S.ws?`<div class="acts lookup-result">
+    <button class="btn sm" type="button" data-act="load-scope-list" data-target="${target}">加载已知会话</button>
+    <span class="field-note" role="status"></span>
+  </div>`:"";
+}
+function personScopeOptions(){
+  return scopeOptions().map(b=>`<option value="${esc(b.id)}">${esc(scopeName[b.kind]||b.kind)} ${esc(b.id)}</option>`).join("");
+}
+function accountShortcuts(){
+  return (S.ws?.accounts||[]).slice(0,12).map(a=>`<button class="btn" data-act="person-load" data-account="${esc(a.id)}">${esc(a.displayName||a.id)}${a.displayName?" · "+esc(a.id):""}</button>`).join("");
 }
 /** 场景显示名：库里的 name 常常就等于 id，直接铺出来会一屏 "group:1051103978"。
  *  有真名用真名，否则去掉渠道前缀、只留可读部分；副标题在两者相同时省略。 */
@@ -568,27 +792,32 @@ function sceneSub(s){
 
 /* ---------------- overview ---------------- */
 function viewOverview(){
-  const st=S.status||{},ws=S.ws||{};
-  const scenes=Object.keys(ws.scenes||{}).length, entries=Object.keys(ws.entries||{}).length;
+  const st=S.status||{},ws=S.ws||{},cached=S.status?null:savedOverviewCounts();
+  const scenes=Object.values(ws.scenes||{});
+  const entryCounts=new Map();
+  for(const entry of Object.values(ws.entries||{}))entryCounts.set(entry.sceneId,(entryCounts.get(entry.sceneId)||0)+1);
+  const entries=Object.keys(ws.entries||{}).length;
   const stat=(n,l)=>`<div class="stat"><b>${n}</b><small>${l}</small></div>`;
-  return head("概览","当前空间的规模、模型接入与后台任务。数据来自服务的 v1 协议实时读取。")+
+  return head("概览",S.space?"当前空间 · "+S.space:"请在设置里登记一个空间。")+
   (S.degraded?`<div class="card alert"><h2>读取失败</h2>
     <p style="font-size:13px">${esc(S.degraded)}</p>
-    <p style="font-size:12px;color:var(--muted);margin-top:6px">服务可能正在启动（冷启动要读整库索引，约数秒）。下面的数字不代表真实规模。</p>
+    <p class="field-note">可以稍后重试。未读到的数据以「—」显示。</p>
     <div class="acts" style="margin-top:10px"><button class="btn primary" data-act="refresh">重试</button></div></div>`:"")+
-  `<div class="grid stats">
-    ${stat(st.messages??"—","消息")}
-    ${stat(st.entities??"—","实体")}
-    ${stat(scenes,"场景")}
-    ${stat(entries,"场景条目")}
+  `<div class="toolbar"><a class="btn primary" href="#/recall">检索记忆</a><a class="btn" href="#/people">查人物档案</a><a class="btn" href="#/backup">备份与恢复</a></div>
+  <div class="grid stats">
+    ${stat(st.messages??cached?.messages??"—","消息")}
+    ${stat(st.entities??cached?.entities??"—","实体")}
+    ${stat(S.ws?scenes.length:"—","场景")}
+    ${stat(S.ws?entries:"—","场景条目")}
   </div>
+  ${cached?`<p class="field-note">上次统计 · ${esc(new Date(cached.at).toLocaleString())}</p>`:""}
   <div class="split">
     <div class="card">
       <h2>服务与模型<span class="hint">${esc(S.space||"未选空间")}</span></h2>
       <dl class="kv">
-        <dt>协议版本</dt><dd>${esc(S.ver?.protocolVersion??"?")} · 实现 ${esc(S.ver?.implementationVersion??"?")}</dd>
-        <dt>向量模型</dt><dd>${st.embeddingConfigured?'<span class="chip ok">已配置</span>':'<span class="chip warn">未配置</span>'} 索引任务需要它</dd>
-        <dt>整理模型</dt><dd>${st.llmConfigured?'<span class="chip ok">已配置</span>':'<span class="chip warn">未配置</span>'} 自动整理需要它</dd>
+        <dt>协议版本</dt><dd id="overview-version">${esc(versionLabel())}</dd>
+        <dt>向量模型</dt><dd>${!S.status?"—":st.embeddingConfigured?'<span class="chip ok">已配置</span>':'<span class="chip warn">未配置</span>'} 索引任务需要它</dd>
+        <dt>整理模型</dt><dd>${!S.status?"—":st.llmConfigured?'<span class="chip ok">已配置</span>':'<span class="chip warn">未配置</span>'} 自动整理需要它</dd>
         <dt>数据目录</dt><dd class="mono">${esc(st.dataRoot||"—")}</dd>
         <dt>来源目录</dt><dd class="mono">${esc(st.sourceRoot||"—")}</dd>
         <dt>后台任务</dt><dd id="bg">读取中…</dd>
@@ -604,13 +833,14 @@ function viewOverview(){
       <div id="jobbox"></div>
     </div>
     <div class="card">
-      <h2>场景速览<span class="hint">${scenes} 个</span></h2>
-      ${scenes? `<div class="rows">${Object.values(ws.scenes).slice(0,12).map(s=>{
-        const n=Object.values(ws.entries||{}).filter(e=>e.sceneId===s.sceneId).length;
-        return `<div class="row"><div class="body"><div class="t">${esc(sceneLabel(s))}</div>
+      <h2>场景速览<span class="hint">${S.ws?scenes.length+" 个":""}</span></h2>
+      ${scenes.length? `<div class="rows">${scenes.slice(0,8).map(s=>`
+        <a class="row" href="#/scene?scene=${encodeURIComponent(s.sceneId)}"><div class="body"><div class="t">${esc(sceneLabel(s))}</div>
           ${sceneSub(s)?`<div class="m mono">${esc(sceneSub(s))}</div>`:""}</div>
-          <div class="ops"><span class="chip">${n} 条</span></div></div>`;
-      }).join("")}</div>`: '<div class="empty">这个空间还没有场景。到「场景记忆」新建。</div>'}
+          <div class="ops"><span class="chip">${entryCounts.get(s.sceneId)||0} 条</span></div></a>`).join("")}</div>
+        ${scenes.length>8?'<a class="btn sm" style="margin-top:10px" href="#/scene">查看全部场景</a>':""}`
+        : S.ws?'<div class="empty">暂无场景。<a href="#/scene">打开场景记忆</a></div>'
+        : '<div class="acts"><a class="btn" href="#/scene">打开场景记忆</a><button class="btn ghost" data-act="overview-scenes">加载场景速览</button></div>'}
     </div>
   </div>
   <div class="card">
@@ -619,58 +849,73 @@ function viewOverview(){
     <div class="toolbar" style="margin-top:12px"><div class="acts"><button class="btn" data-act="open-history">前往「索引与恢复」</button></div></div>
   </div>`;
 }
+function paintOverviewJobs(){
+  const bg=$("#bg"), box=$("#jobbox");
+  if(!bg||!box)return;
+  const st=S.status;
+  const parts=[];
+  if(st?.background?.lastConsolidateAt)parts.push("整理 "+new Date(st.background.lastConsolidateAt).toLocaleString());
+  if(st?.background?.lastIndexAt)parts.push("索引 "+new Date(st.background.lastIndexAt).toLocaleString());
+  bg.innerHTML=esc(parts.join(" · ")||(st?"尚未运行":S.degraded?"状态暂不可用":"读取中…"))+
+    (st?.background?.lastError?` <span class="chip bad">最近失败：${esc(st.background.lastError.code||"")}</span>`:"");
+  if(!S.jobs)return;
+  const rows=S.jobs.jobs||S.jobs.items||[];
+  box.innerHTML=rows.length
+    ? `<div class="rows lookup-result">${rows.slice(-6).reverse().map(j=>`<div class="row"><div class="body"><div class="t">${esc(j.type||"任务")} <span class="chip">${esc(j.status||j.state||"")}</span></div><div class="m">${esc(j.startedAt?new Date(j.startedAt).toLocaleString():"")} ${j.error?"· "+esc(j.error):""}</div></div></div>`).join("")}</div>`
+    : "";
+}
 async function loadOverviewExtra(){
-  const space=S.space,epoch=S.spaceEpoch;
+  paintOverviewJobs();
+  if(S.jobs||S.jobsRequest)return;
+  const epoch=S.spaceEpoch;
+  const request=api("spaces/"+sid()+"/jobs","GET",undefined,spaceReadOptions());
+  S.jobsRequest=request;
   try{
-    const jobs=await api("spaces/"+encodeURIComponent(space)+"/jobs");
-    if(space!==S.space||epoch!==S.spaceEpoch||S.page!=="overview")return;
+    const jobs=await request;
+    if(epoch!==S.spaceEpoch)return;
     S.jobs=jobs;
-    const st=S.status||{};
-    const bg=$("#bg");
-    if(bg){
-      const parts=[];
-      if(st.background?.lastConsolidateAt)parts.push("整理 "+new Date(st.background.lastConsolidateAt).toLocaleString());
-      if(st.background?.lastIndexAt)parts.push("索引 "+new Date(st.background.lastIndexAt).toLocaleString());
-      if(!parts.length)parts.push("尚未运行");
-      bg.innerHTML=esc(parts.join(" · "))+(st.background?.lastError?` <span class="chip bad">最近失败：${esc(st.background.lastError.code||"")}</span>`:"");
-    }
+    if(S.page==="overview")paintOverviewJobs();
+  }catch(error){
     const box=$("#jobbox");
-    if(box&&jobs){
-      const rows=[].concat(jobs.jobs||jobs.items||[]);
-      box.innerHTML=rows.length
-        ? `<div class="rows" style="margin-top:12px">${rows.slice(-6).reverse().map(j=>`<div class="row"><div class="body"><div class="t">${esc(j.type||"任务")} <span class="chip">${esc(j.status||j.state||"")}</span></div><div class="m">${esc(j.startedAt?new Date(j.startedAt).toLocaleString():"")} ${j.error?"· "+esc(j.error):""}</div></div></div>`).join("")}</div>`
-        : "";
-    }
-  }catch(e){if(space!==S.space||epoch!==S.spaceEpoch)return;const bg=$("#bg");if(bg)bg.innerHTML=`<span class="chip bad">${esc(e.message)}</span>`;}
+    if(epoch===S.spaceEpoch&&S.page==="overview"&&box)box.textContent="任务列表读取失败："+error.message;
+  }finally{
+    if(S.jobsRequest===request)S.jobsRequest=null;
+  }
 }
 
 /* ---------------- people ---------------- */
 function viewPeople(){
-  const sc=scopeOptions();
-  const p=S.person;
-  return head("人物记忆","按账号读取人物档案与动态印象。档案是稳定项，印象随场合变化；纠正会保留历史。")+
+  const p=S.person, scope=S.personSel?.scope||S.scope, selected=S.personSel?.item;
+  const isSelected=i=>i.key===selected?.key&&i.itemKey===selected?.itemKey;
+  const actor=S.personSel?.actorId;
+  const actorName=(S.ws?.accounts||[]).find(a=>a.id===actor)?.displayName;
+  return head("人物记忆","按昵称或账号查找档案和印象。")+
   `<div class="card">
     <div class="toolbar">
       <div class="field"><label for="actor">账号</label>
-        <input class="inp" id="actor" list="accounts" placeholder="qq:123456" value="${esc(S.personSel&&S.personSel.actorId||"")}">
-        <datalist id="accounts">${accountOptions()}</datalist></div>
+        <input class="inp" id="actor" list="accounts" placeholder="昵称或 QQ 账号" value="${esc(S.personSel&&S.personSel.actorId||"")}">
+        <datalist id="accounts">${accountOptions(actor)}</datalist></div>
       <div class="field narrow"><label for="skind">场合</label>
-        <select class="inp" id="skind">${Object.entries(scopeName).map(([k,v])=>`<option value="${k}" ${S.scope.kind===k?"selected":""}>${v}</option>`).join("")}</select></div>
+        <select class="inp" id="skind">${Object.entries(scopeName).map(([k,v])=>`<option value="${k}" ${scope.kind===k?"selected":""}>${v}</option>`).join("")}</select></div>
       <div class="field"><label for="sid2">场合 ID</label>
-        <input class="inp" id="sid2" list="scopes" placeholder="群号 / 频道 / 房间" value="${esc(S.scope.id)}">
-        <datalist id="scopes">${sc.map(b=>`<option value="${esc(b.id)}">${esc(scopeName[b.kind]||b.kind)} ${esc(b.id)}</option>`).join("")}</datalist></div>
+        <input class="inp" id="sid2" list="scopes" placeholder="群号 / 频道 / 房间" value="${esc(scope.id)}">
+        <datalist id="scopes">${personScopeOptions()}</datalist></div>
       <label class="hp" style="padding-bottom:9px"><input type="checkbox" id="allsc" ${S.personSel?.allScopes?"checked":""}> 汇总本空间各场合</label>
       <div class="acts"><button class="btn primary" data-act="person-load">读取</button></div>
     </div>
+    <p id="accounts-status" class="field-note" role="status">${!S.ws&&S.space?"正在加载昵称列表。可以先输入账号。":""}</p>
   </div>`+
-  (!p? `<div class="card"><div class="empty">填账号后点「读取」。账号可从右上「关系星图」或场景里的发言人复制。</div></div>`
-  : `<div class="card">
+  (!p? `<div class="card"><div class="empty">输入账号可查档案，也可以直接选本空间已知的人物。</div>
+    <div class="toolbar" id="account-shortcuts">${accountShortcuts()}</div></div>`
+  : `<div class="card tight"><h2 style="margin-bottom:4px">${esc(actorName||actor)}<span class="hint">${esc(actorName?actor:"")}</span></h2>
+      <p class="field-note">${S.personSel.allScopes?"本空间全部场合":esc([scopeName[scope.kind],scope.id].filter(Boolean).join(" "))}</p></div>
+    <div class="card">
       <h2>档案<span class="hint">${p.profiles.length} 项</span></h2>
       ${p.profiles.length? `<div class="plist">${p.profiles.map(i=>`
-        <div class="pcard ${i.hidden?"hidden":""}" data-act="pick-person" data-key="${esc(i.key)}" data-item="${esc(i.itemKey)}">
+        <div class="pcard ${i.hidden?"hidden":""} ${isSelected(i)?"sel":""}" data-act="pick-person" data-key="${esc(i.key)}" data-item="${esc(i.itemKey)}">
           <div class="av">${esc((kindName[i.itemKey]||i.itemKey||"档").slice(0,1))}</div>
           <div style="min-width:0">
-            <div class="nm">${esc(i.value)}</div>
+            <div class="nm">${personText(i.value,scope)}</div>
             <div class="meta">${esc(kindName[i.itemKey]||i.itemKey)} · ${esc(i.accountId||"")}${i.hidden?" · 已撤回":""}</div>
           </div>
         </div>`).join("")}</div>`: '<div class="empty">没有档案项。</div>'}
@@ -678,14 +923,14 @@ function viewPeople(){
     <div class="card">
       <h2>印象<span class="hint">${p.impressions.length} 项</span></h2>
       ${p.impressions.length? `<div class="rows">${p.impressions.map(i=>`
-        <div class="row ${i.hidden?"hidden":""}" data-act="pick-person" data-key="${esc(i.key)}" data-item="${esc(i.itemKey)}">
+        <div class="row ${i.hidden?"hidden":""} ${isSelected(i)?"sel":""}" data-act="pick-person" data-key="${esc(i.key)}" data-item="${esc(i.itemKey)}">
           <span class="chip">${esc(kindName[i.kind]||i.kind)}</span>
-          <div class="body"><div class="t">${esc(i.value)}</div>
+          <div class="body"><div class="t">${personText(i.value,scope)}</div>
           <div class="m">${esc(i.itemKey||i.kind)} · ${esc(i.accountId||"")}${i.hidden?" · 已撤回":""}</div></div>
         </div>`).join("")}</div>`: '<div class="empty">没有印象项。</div>'}
     </div>
     <div class="card">
-      <h2>纠正此人物</h2>
+      <h2>整理人物记忆</h2>
       <div id="pedit">${personEditor()}</div>
     </div>`);
 }
@@ -695,12 +940,13 @@ function personEditor(){
   const sel=S.personSel?.item;
   const item=all.find(i=>i.itemKey===sel?.itemKey&&i.key===sel?.key);
   return `<div class="toolbar">
-      <div class="field" style="flex:1 1 260px"><label>选择要修改的项</label>
-        <select class="inp" id="pitem" data-change="pick-item">
+      <div class="field" style="flex:1 1 260px"><label for="pitem">选择要修改的项</label>
+        <select class="inp" id="pitem" data-change="pick-item" ${all.length?"":"disabled"}>
+          <option value="">${all.length?"选择一项":"暂无可整理的记忆"}</option>
           ${all.map(i=>`<option value="${esc(i.key)}||${esc(i.itemKey)}" ${item&&item.key===i.key&&item.itemKey===i.itemKey?"selected":""}>${i.hidden?"【已撤回】":""}${esc(i.itemKey||i.kind)}：${esc(String(i.value).slice(0,40))}</option>`).join("")}
         </select></div>
-      <div class="field" style="flex:1 1 220px"><label>改为</label><input class="inp" id="pvalue" placeholder="留空表示只撤回/恢复" value="${esc(item?item.value:"")}"></div>
-      <div class="field" style="flex:1 1 180px"><label>原因</label><input class="inp" id="preason" placeholder="管理员修订"></div>
+      <div class="field" style="flex:1 1 220px"><label for="pvalue">改为</label><input class="inp" id="pvalue" placeholder="输入纠正后的内容" value="${esc(item?item.value:"")}"></div>
+      <div class="field" style="flex:1 1 180px"><label for="preason">原因</label><input class="inp" id="preason" placeholder="管理员修订"></div>
     </div>
     <div class="toolbar" style="margin-top:10px"><div class="acts">
       <button class="btn" data-act="person-preview" ${item?"":"disabled"}>预览关联影响</button>
@@ -719,41 +965,43 @@ function viewScene(){
      ${sceneCreateForm()}</div>`;
   const scene=ws.scenes[S.scene]||scenes[0];
   const entries=Object.values(ws.entries||{}).filter(e=>e.sceneId===scene.sceneId);
-  const chips=(st)=>{
-    const t=String(st||"");
-    if(/candidate|pending|suspected/.test(t))return `<span class="chip warn">待确认</span>`;
-    if(/retract|removed|tombstone/.test(t))return `<span class="chip bad">已撤回</span>`;
-    return `<span class="chip ok">已生效</span>`;
-  };
   return head("场景记忆","条目都挂在具体场合上；候选需要原话支持才能确认，撤回保留墓碑。",
     `<div class="acts"><button class="btn" data-act="scene-new">＋ 新建场景</button></div>`)+
   `<div class="card tight">
     <div class="toolbar">
-      <div class="field" style="flex:2 1 260px"><label>场景</label>
+      <div class="field" style="flex:2 1 260px"><label for="scenesel">场景</label>
         <select class="inp" id="scenesel" data-change="scene-pick">
           ${scenes.map(s=>`<option value="${esc(s.sceneId)}" ${s.sceneId===scene.sceneId?"selected":""}>${esc(sceneLabel(s))}</option>`).join("")}
         </select></div>
       <div class="field"><label>绑定场合</label>
-        <input class="inp" value="${esc((scene.bindings||[]).map(b=>(scopeName[b.kind]||b.kind)+":"+b.id).join("  ")||"—")}" readonly></div>
-      <div class="field narrow"><label>条目</label><input class="inp" value="${entries.length}" readonly></div>
+        <input class="inp" aria-label="绑定场合" value="${esc((scene.bindings||[]).map(b=>(scopeName[b.kind]||b.kind)+":"+b.id).join("  ")||"—")}" readonly></div>
+      ${(scene.bindings||[]).some(b=>recallKinds.includes(b.kind)&&b.id)?'<div class="acts"><button class="btn" data-act="scene-recall">检索此场景</button></div>':""}
     </div>
   </div>
   <div class="split">
     <div class="card">
       <h2>条目<span class="hint">${entries.length} 条</span></h2>
-      ${entries.length?`<div class="rows">${entries.map(e=>`
-        <div class="row ${S.entry&&S.entry.id===e.id?"sel":""}" data-act="pick-entry" data-id="${esc(e.id)}">
-          ${chips(e.status)}
-          <div class="body"><div class="t">${esc(e.text)}</div>
-            <div class="m">${esc(kindName[e.kind]||e.kind)}${e.evidence?.length?" · "+e.evidence.length+" 条原话证据":""}${e.shareable?" · 可跨渠道":""}</div></div>
-        </div>`).join("")}</div>`:'<div class="empty">这个场景还没有条目。</div>'}
+      ${entries.length?`<div class="toolbar scene-filters">
+        <div class="field"><label for="entry-search">筛选内容</label><input class="inp" type="search" id="entry-search" placeholder="内容或类型" value="${esc(S.sceneFilter)}"></div>
+        <div class="field narrow"><label for="entry-status">状态</label><select class="inp" id="entry-status">
+          ${[["","全部"],...Object.entries(entryStates).map(([key,info])=>[key,info.label])].map(([key,label])=>`<option value="${key}"${key===S.sceneStatus?" selected":""}>${label}</option>`).join("")}
+        </select></div>
+      </div>`:""}
+      <div id="entry-list">${sceneEntries(entries)}</div>
+      <span class="sr-only" id="entry-list-status" role="status"></span>
     </div>
-    <div class="card">
-      <h2>写条目</h2>
+    <div>
+    <div class="card" id="entry-editor" ${S.entry?"":"hidden"}>
+      <h2>条目详情</h2>
+      <div id="edetail">${entryDetail()}</div>
+    </div>
+    <details class="card entry-write" ${S.entry?"":"open"}>
+      <summary>写条目</summary>
       <div class="grid" style="gap:10px">
-        <div class="field"><label>类型</label>
-          <input class="inp" id="ekind" placeholder="rule / meme / term / topic" value="rule"></div>
-        <div class="field"><label>内容</label>
+        <div class="field"><label for="ekind">类型</label>
+          <input class="inp" id="ekind" list="entry-kinds" value="rule">
+          <datalist id="entry-kinds"><option value="rule">规矩</option><option value="meme">梗</option><option value="term">术语</option><option value="topic">话题</option></datalist></div>
+        <div class="field"><label for="etext">内容</label>
           <textarea class="inp" id="etext" placeholder="这个场合的定位、规矩、梗或约定"></textarea></div>
         <label class="hp"><input type="checkbox" id="eshare"> 允许跨渠道使用（只开放摘要，原话仍限本场合）</label>
         <div class="acts">
@@ -761,41 +1009,76 @@ function viewScene(){
           <button class="btn primary" data-act="entry-add" data-confirm="1">直接确认</button>
         </div>
       </div>
-      <div class="hr"></div>
-      <div id="edetail">${entryDetail()}</div>
+    </details>
     </div>
   </div>`;
+}
+const entryStates={active:{label:"已生效",style:"ok"},pending:{label:"待确认",style:"warn"},removed:{label:"已撤回",style:"bad"}};
+function entryState(status){
+  if(/candidate|pending|suspected/.test(status||""))return "pending";
+  if(/retract|removed|tombstone/.test(status||""))return "removed";
+  return "active";
+}
+function sceneEntries(entries){
+  const query=S.sceneFilter.trim().toLocaleLowerCase();
+  const matches=entries.filter(e=>(!S.sceneStatus||entryState(e.status)===S.sceneStatus) &&
+    (!query||[e.text,e.kind,kindName[e.kind]].some(value=>String(value||"").toLocaleLowerCase().includes(query))));
+  const count=matches.length;
+  if(!count)return `<p class="empty">${entries.length?"没有符合筛选条件的条目。":"这个场景还没有条目。"}</p>`;
+  return `<div class="rows">${matches.slice(0,S.sceneLimit).map(e=>{
+    const {label,style}=entryStates[entryState(e.status)];
+    const selected=S.entry?.id===e.id;
+    return `<div class="row ${selected?"sel":""}" data-act="pick-entry" data-id="${esc(e.id)}">
+      <span class="chip ${style}">${label}</span>
+      <div class="body"><div class="t">${personText(e.text,sceneScope(e))}</div>
+        <div class="m">${esc(kindName[e.kind]||e.kind)}${e.evidence?.length?" · "+e.evidence.length+" 条原话证据":""}${e.shareable?" · 可跨渠道":""}</div></div>
+      <div class="ops"><button class="btn sm ghost" type="button" aria-pressed="${selected}">详情</button></div>
+    </div>`;
+  }).join("")}</div>
+    <div class="acts lookup-result"><span class="field-note" data-entry-count>${Math.min(count,S.sceneLimit)} / ${count} 条</span>
+    ${count>S.sceneLimit?'<button class="btn sm" data-act="entry-more">显示更多</button>':""}</div>`;
+}
+function selectScene(id){
+  S.scene=id;S.entry=null;S.entryPreview=null;S.sceneFilter="";S.sceneStatus="";S.sceneLimit=50;
+}
+function updateSceneList(){
+  const entries=Object.values(S.ws?.entries||{}).filter(e=>e.sceneId===S.scene);
+  $("#entry-list").innerHTML=sceneEntries(entries);
+  $("#entry-list-status").textContent=$("[data-entry-count]")?.textContent||$("#entry-list").textContent.trim();
 }
 function sceneCreateForm(){
   return `<div class="hr"></div>
   <div class="toolbar">
-    <div class="field"><label>场景 ID</label><input class="inp" id="nscene" placeholder="从当前场合自动生成可留空"></div>
-    <div class="field"><label>名称</label><input class="inp" id="nname" placeholder="群名 / 房间名"></div>
-    <div class="field narrow"><label>类型</label><select class="inp" id="nkind">${Object.entries(scopeName).map(([k,v])=>`<option value="${k}" ${S.scope.kind===k?"selected":""}>${v}</option>`).join("")}</select></div>
-    <div class="field"><label>场合 ID</label><input class="inp" id="nbid" placeholder="群号 / 频道 / 房间" value="${esc(S.scope.id)}"></div>
+    <div class="field"><label for="nscene">场景 ID</label><input class="inp" id="nscene" placeholder="从当前场合自动生成可留空"></div>
+    <div class="field"><label for="nname">名称</label><input class="inp" id="nname" placeholder="群名 / 房间名"></div>
+    <div class="field narrow"><label for="nkind">类型</label><select class="inp" id="nkind">${Object.entries(scopeName).map(([k,v])=>`<option value="${k}" ${S.scope.kind===k?"selected":""}>${v}</option>`).join("")}</select></div>
+    <div class="field"><label for="nbid">场合 ID</label><input class="inp" id="nbid" placeholder="群号 / 频道 / 房间" value="${esc(S.scope.id)}"></div>
     <div class="acts"><button class="btn primary" data-act="scene-create">新建并绑定</button></div>
   </div>`;
 }
+function sceneScope(entry){
+  const bindings=S.ws?.scenes?.[entry.sceneId]?.bindings||[];
+  return bindings.find(b=>b.kind===S.scope.kind && b.id===S.scope.id)||bindings[0]||{kind:"private",id:""};
+}
 function entryDetail(){
   const e=S.entry; if(!e)return '<div class="empty">左侧选一条条目查看来源与操作。</div>';
-  return `<h3>${esc(e.text)}</h3>
+  return `<h3>${personText(e.text,sceneScope(e))}</h3>
     <div class="m" style="font-size:11.5px;color:var(--faint);margin-top:4px">${esc(kindName[e.kind]||e.kind)} · rev ${esc(e.rev??"?")} · ${esc(e.status||"")}</div>
     <div class="toolbar" style="margin-top:10px"><div class="acts">
       <button class="btn" data-act="entry-preview">预览影响</button>
       <button class="btn" data-act="entry-correct">按预览纠正</button>
       <button class="btn danger" data-act="entry-retract">撤回</button>
     </div></div>
-    <div class="field" style="margin-top:10px"><label>纠正后的内容 / 撤回原因</label>
+    <div class="field" style="margin-top:10px"><label for="efix">纠正后的内容</label>
       <textarea class="inp" id="efix" placeholder="纠正内容放到这里；只撤回可留空">${esc(e.text)}</textarea></div>
-    <div class="field" style="margin-top:8px"><label>原因</label><input class="inp" id="ereason" placeholder="管理员纠正"></div>
+    <div class="field" style="margin-top:8px"><label for="ereason">原因</label><input class="inp" id="ereason" placeholder="管理员纠正"></div>
     <div id="eimpact"></div>
-    <details><summary>来源与历史</summary><pre>${esc(JSON.stringify(e,null,2))}</pre></details>`;
+    <details data-json="entry"><summary>来源与历史</summary><pre></pre></details>`;
 }
-function bindSceneSelect(){}
 
 /* ---------------- star map ---------------- */
 function viewStar(){
-  return head("关系星图","人物与渠道构成真实三维星海。点击点亮关系，双击进入局部。")+'<div id="galaxy-host"></div>';
+  return head("关系星图","点击星点查看关系，双击进入局部。")+'<div id="galaxy-host" class="card tight">正在加载星图…</div>';
 }
 let galaxyPage=null,galaxyGeneration=0;
 async function renderStar(){
@@ -803,61 +1086,78 @@ async function renderStar(){
   const generation=++galaxyGeneration;
   galaxyPage?.dispose();galaxyPage=null;
   try{const {mountGalaxy}=await import('/galaxy-page.mjs');if(generation!==galaxyGeneration||!host.isConnected)return;
+    host.classList.remove("card","tight");
     const mounted=await mountGalaxy(host,{api,spaceId:S.space,spaces:S.spaces?.spaces||{}});
     if(generation!==galaxyGeneration||!host.isConnected)mounted.dispose();else galaxyPage=mounted;
   }catch(e){host.textContent='星图加载失败：'+e.message;}
 }
 
 /* ---------------- recall ---------------- */
+const recallKinds=["group","private","game","channel"];
 function viewRecall(){
-  const r=S.recall;
-  const list=r?(r.results||r.hits||[]):null;
-  return head("记忆检索","走完整检索路径：向量＋关键词＋结构化事实，结果按相关度排序。")+
-  `<div class="card">
-    <div class="toolbar">
-      <div class="field" style="flex:3 1 320px"><label>查询</label><input class="inp" id="q" placeholder="她喜欢喝什么？" value="${esc(S.lastQuery||"")}"></div>
-      <div class="field narrow"><label>场合</label><select class="inp" id="rk">${Object.entries(scopeName).map(([k,v])=>`<option value="${k}" ${S.scope.kind===k?"selected":""}>${v}</option>`).join("")}</select></div>
-      <div class="field"><label>场合 ID</label><input class="inp" id="ri" placeholder="可留空" value="${esc(S.scope.id)}"></div>
-      <div class="acts"><button class="btn primary" data-act="recall">检索</button></div>
+  const scope=recallKinds.includes(S.scope.kind)?S.scope:{kind:"group",id:""};
+  const known=knownScopeOptions(recallKinds);
+  return head("记忆检索","在指定会话里查找原话和相关记忆。")+
+  `<form class="card" data-lookup="recall">
+    <div class="field"><label for="q">查询内容</label><input class="inp" id="q" required placeholder="例如：上次约好什么时候见面？" value="${esc(S.lastQuery||"")}"></div>
+    <div class="toolbar lookup-result">
+      <div class="field" ${known?"":"hidden"}><label for="recall-saved">已知会话</label><select class="inp" id="recall-saved" data-change="recall-scope"><option value="">选择会话</option>${known}</select></div>
+      <div class="field narrow"><label for="rk">类型</label><select class="inp" id="rk">${recallKinds.map(k=>`<option value="${k}" ${scope.kind===k?"selected":""}>${scopeName[k]}</option>`).join("")}</select></div>
+      <div class="field"><label for="ri">会话 ID</label><input class="inp" id="ri" required placeholder="群号、QQ 号或房间 ID" value="${esc(scope.id)}"></div>
+      <div class="acts">
+        <button class="btn primary" type="submit">检索</button>
+        ${!S.ws&&S.space?'<button class="btn ghost" type="button" data-act="recall-scopes">加载已知会话</button>':""}
+      </div>
     </div>
-  </div>`+
-  (!list?`<div class="card"><div class="empty">输入查询后回车或点检索。</div></div>`
+    <div id="recall-scopes-status" class="field-note" role="status"></div>
+    <div id="recall-status" class="field-note" role="status"></div>
+  </form><div id="recall-results">${recallResults()}</div>`;
+}
+function recallResults(){
+  const r=S.recall;
+  const list=r?(r.items||r.results||r.hits||[]):null;
+  return   (!list?`<div class="card"><div class="empty">输入查询后回车或点检索。</div></div>`
   :`<div class="card"><h2>结果<span class="hint">${list.length} 条</span></h2>
+    <p class="field-note" style="margin-bottom:10px">${esc(scopeName[S.recallScope.kind])} ${esc(S.recallScope.id)} · ${esc(S.recallQuery)}</p>
     ${list.length?`<div class="rows">${list.map(h=>`
       <div class="row"><div class="body">
-        <div class="t">${esc(h.text||h.content||h.statement||h.quote||"")}</div>
+        <div class="t">${personText(h.text||h.content||h.statement||h.quote||"",S.recallScope||S.scope)}</div>
         <div class="m">${h.matchMethod==="history-lexical"?'<span class="chip acc">历史词法命中原话</span> ':''}${esc(h.kind||h.layer||h.source||"")}${h.score!=null?" · 得分 "+Number(h.score).toFixed(3):""}${h.actor?" · "+esc(h.actor):""}${h.at?" · "+esc(String(h.at).slice(0,10)):""}</div>
         ${h.sourceRefs?.length?`<div class="m">来源：${h.sourceRefs.map(ref=>esc(typeof ref==="object"?(ref.messageId||ref.id||ref.sourceId||JSON.stringify(ref)):ref)).join(" · ")}</div>`:""}
       </div></div>`).join("")}</div>`:'<div class="empty">没有命中。</div>'}
-    <details><summary>原始响应</summary><pre>${esc(JSON.stringify(r,null,2))}</pre></details>
+    <details data-json="recall"><summary>原始响应</summary><pre></pre></details>
   </div>`);
 }
 
 /* ---------------- subject ---------------- */
 function viewSubject(){
-  const sc=scopeOptions(), s=S.subject;
-  const obs=s?(s.observations||[]):[];
+  const s=S.subject;
+  const obs=(s?.observations||[]).filter(o=>o.status==="active");
+  const search=S.subjectSearch;
+  const scope=search?.scope||S.scope;
   return head("主体与纠正","人物／事物的来源观察与人工声明。纠正与撤回都留历史，可疑项不会被写成肯定事实。")+
   `<div class="card">
     <div class="toolbar">
-      <div class="field narrow"><label>场合</label><select class="inp" id="kscope">${Object.entries(scopeName).map(([k,v])=>`<option value="${k}" ${S.scope.kind===k?"selected":""}>${v}</option>`).join("")}</select></div>
-      <div class="field"><label>场合 ID</label><input class="inp" id="iscope" list="scopes2" value="${esc(S.scope.id)}"><datalist id="scopes2">${sc.map(b=>`<option value="${esc(b.id)}">${esc(b.id)}</option>`).join("")}</datalist></div>
-      <div class="field" style="flex:2 1 180px"><label>名称或别名</label><input class="inp" id="sq" placeholder="输入姓名查找条目"></div>
+      <div class="field narrow"><label for="kscope">场合</label><select class="inp" id="kscope">${Object.entries(scopeName).map(([k,v])=>`<option value="${k}" ${scope.kind===k?"selected":""}>${v}</option>`).join("")}</select></div>
+      <div class="field"><label for="iscope">场合 ID</label><input class="inp" id="iscope" list="scopes2" value="${esc(scope.id)}"><datalist id="scopes2">${personScopeOptions()}</datalist></div>
+      <div class="field" style="flex:2 1 180px"><label for="sq">名称或别名</label><input class="inp" id="sq" placeholder="输入名称查找条目" value="${esc(search?.query||"")}"></div>
       <div class="acts"><button class="btn primary" data-act="subjects">查找</button></div>
     </div>
-    <div id="slist"></div>
+    ${scopeLookupButton("scopes2")}
+    <div id="slist" class="lookup-result">${subjectResults()}</div>
   </div>`+
-  (s?`<div class="split">
-    <div class="card"><h2>来源观察<span class="hint">${obs.length} 条</span></h2>
-      ${obs.length?`<div class="rows">${obs.filter(o=>o.status==="active").map(o=>`
+  (s?`<div class="split" id="subject-detail">
+    <div class="card"><h2>${esc(s.subject?.label||"来源观察")}<span class="hint">${obs.length} 条</span></h2>
+      ${obs.length?`<div class="rows">${obs.map(o=>`
         <div class="row ${S.subjectSel&&S.subjectSel.id===o.id?"sel":""}" data-act="pick-obs" data-id="${esc(o.id)}">
           <span class="chip ${o.authority==="manual"?"acc":o.knowledgeStatus==="candidate"?"warn":""}">${o.authority==="manual"?"人工":o.knowledgeStatus==="candidate"?"待确认":"来源"}</span>
-          <div class="body"><div class="t">${esc(o.statement)}</div><div class="m">${esc(o.aspect||"")} · rev ${esc(o.rev??"?")}</div></div>
+          <div class="body"><div class="t">${personText(o.statement,scope)}</div><div class="m">${esc(o.aspect||"")} · rev ${esc(o.rev??"?")}</div></div>
+          <div class="ops"><button class="btn sm ghost" type="button">选择</button></div>
         </div>`).join("")}</div>`:'<div class="empty">没有生效中的观察。</div>'}
     </div>
     <div class="card"><h2>人工纠正</h2>
-      <div class="field"><label>纠正后的内容</label><textarea class="inp" id="sfix" placeholder="选择左侧观察后填写">${esc(S.subjectSel?.statement||"")}</textarea></div>
-      <div class="field" style="margin-top:8px"><label>原因</label><input class="inp" id="sreason" placeholder="管理员纠正"></div>
+      <div class="field"><label for="sfix">纠正后的内容</label><textarea class="inp" id="sfix" placeholder="选择左侧观察后填写">${esc(S.subjectSel?.statement||"")}</textarea></div>
+      <div class="field" style="margin-top:8px"><label for="sreason">原因</label><input class="inp" id="sreason" placeholder="管理员纠正"></div>
       <div class="toolbar" style="margin-top:10px"><div class="acts">
         <button class="btn primary" data-act="subject-rev" data-mode="correct" ${S.subjectSel?"":"disabled"}>保存纠正</button>
         <button class="btn danger" data-act="subject-rev" data-mode="retract" ${S.subjectSel?"":"disabled"}>撤回该观察</button>
@@ -865,6 +1165,20 @@ function viewSubject(){
       <details><summary>条目原始信息</summary><pre>${esc(JSON.stringify(s,null,2))}</pre></details>
     </div>
   </div>`:"");
+}
+
+function subjectResults(){
+  if(!S.subjectSearch)return "";
+  const {items,query,scope}=S.subjectSearch;
+  return `<p class="field-note">${esc(query||"全部")} · ${esc(scopeName[scope.kind]||scope.kind)} ${esc(scope.id)} · ${items.length} 项</p>`+
+    (items.length?`<div class="rows lookup-result">${items.map(s=>{
+      const selected=s.id===S.subject?.subject?.id;
+      return `<div class="row ${selected?"sel":""}" data-act="pick-subject" data-id="${esc(s.id)}">
+        <span class="chip ${s.knowledgeStatus==="candidate"?"warn":"ok"}">${s.knowledgeStatus==="candidate"?"待确认":"已建档"}</span>
+        <div class="body"><div class="t">${esc(s.label)}</div><div class="m mono">${esc(s.id)}</div></div>
+        <div class="ops"><button class="btn sm ghost" type="button" aria-pressed="${selected}">查看</button></div>
+      </div>`;
+    }).join("")}</div>`:'<p class="empty">没有匹配的条目。</p>');
 }
 
 /* ---------------- 历史索引与恢复验收 ---------------- */
@@ -956,7 +1270,7 @@ function acceptanceRow(label,passed,detail){
 function recoveryAcceptanceHtml(){
   const p=S.backupPreview||S.restoreResult?.archivePreview,r=S.restoreResult;
   const archivePassed=!!p?.checksum;
-  const sidePassed=!!(r?.validated===true&&r?.destination&&!r.rollback);
+  const sidePassed=!!(r?.validated===true&&r?.destination);
   const semanticPassed=!!(r?.semanticComparison?.passed===true||r?.acceptance?.semanticComparison?.passed===true||r?.acceptance?.semanticComparison==="passed");
   const rollbackPassed=!!(r?.rollbackDrill?.passed===true||r?.acceptance?.rollbackDrill?.passed===true||r?.acceptance?.rollbackDrill==="passed");
   const evidence=p&&(p.mode==="evidence"||p.evidenceOnly);
@@ -985,14 +1299,19 @@ async function copyText(text){
 async function readHistoryStatus(options={}){
   const space=S.space,epoch=S.spaceEpoch,h=S.history;if(!space)return;
   if(h.controller.signal.aborted)h.controller=new AbortController();
+  const controller=h.controller;
+  if(h.reading===controller)return;
+  h.reading=controller;
   try{
-    const status=await api("spaces/"+encodeURIComponent(space)+"/status","GET",undefined,{...options,signal:h.controller.signal});
-    if(space!==S.space||epoch!==S.spaceEpoch||h!==S.history)return;
+    const status=await api("spaces/"+encodeURIComponent(space)+"/status","GET",undefined,{
+      ...options,signal:AbortSignal.any([controller.signal,AbortSignal.timeout(30000)])
+    });
+    if(space!==S.space||epoch!==S.spaceEpoch||h!==S.history||controller.signal.aborted)return;
     S.status=status;h.readError="";paintHistory();resumeHistoryJobIfAny();
   }catch(err){
-    if(space!==S.space||epoch!==S.spaceEpoch||h!==S.history||err.name==="AbortError")return;
+    if(space!==S.space||epoch!==S.spaceEpoch||h!==S.history||controller.signal.aborted||err.name==="AbortError")return;
     h.readError=err.message;paintHistory();if(!options.quiet)toast("索引状态读取失败："+err.message,"err");
-  }
+  }finally{if(h.reading===controller)h.reading=null;}
 }
 function resumeHistoryJobIfAny(){
   if(S.page!=="backup"||!S.space||S.history.polling)return;
@@ -1075,15 +1394,7 @@ function viewBackup(){
     :"";
   return head("备份与导入","默认导出「证据级」：只带记忆块与支撑它的原文片段，不含全量原始聊天。要连原始记录一起带走，选完整镜像。恢复前必须预览校验和。")+
   `<div id="jobslot">${jobHtml()}</div>`+pwHint+
-  `<section class="card" id="index-recovery" aria-labelledby="index-recovery-title">
-    <div class="section-title"><h2 id="index-recovery-title">索引与恢复</h2><span class="space">当前空间：<b>${esc(S.space||"未选择")}</b></span></div>
-    <div class="split">
-      <div><h3 style="margin-bottom:10px">历史检索</h3><div id="history-index">${historyIndexHtml()}</div></div>
-      <div><h3 style="margin-bottom:10px">恢复验收</h3>${recoveryAcceptanceHtml()}</div>
-    </div>
-    <div id="history-live" class="sr-only" aria-live="polite" aria-atomic="true"></div>
-  </section>
-  <div class="split">
+  `  <div class="split">
     <div class="card">
       <h2>导出</h2>
       <div class="field"><label>备份内容</label>
@@ -1091,13 +1402,13 @@ function viewBackup(){
         <label class="hp" style="display:block;margin-top:4px"><input type="radio" name="bmode" value="full" ${S.backupMode==="full"?"checked":""}> 完整镜像 · 连 <span class="mono">input/messages.jsonl</span> 一起带走，体积大一个数量级</label>
         <p class="acceptance-note">全量备份包含原始日志，可用来重建历史索引；证据级备份不含完整原料。</p>
       </div>
-      <div class="field"><label>备份密码（服务级备份至少 8 位；空间导出可留空）</label><input class="inp" id="bpass" type="password" autocomplete="new-password"></div>
+      <div class="field"><label for="bpass">备份密码（服务级备份至少 8 位；空间导出可留空）</label><input class="inp" id="bpass" type="password" autocomplete="new-password"></div>
       <div class="toolbar" style="margin-top:10px"><div class="acts">
         <button class="btn" data-act="backup-full">导出整个服务</button>
         <button class="btn" data-act="backup-space">导出当前空间</button>
       </div></div>
       <div class="hr"></div>
-      <div class="field"><label>备份 ID</label><input class="inp" id="bid" value="${esc(S.backupId||"")}" placeholder="生成或待恢复的备份 ID"></div>
+      <div class="field"><label for="bid">备份 ID</label><input class="inp" id="bid" value="${esc(S.backupId||"")}" placeholder="生成或待恢复的备份 ID"></div>
       <div class="toolbar" style="margin-top:10px"><div class="acts">
         <button class="btn" data-act="backup-download">下载</button>
         <button class="btn primary" data-act="backup-preview">检查并预览</button>
@@ -1105,12 +1416,12 @@ function viewBackup(){
     </div>
     <div class="card">
       <h2>导入 / 恢复</h2>
-      <div class="field"><label>本地备份文件（.vmb）</label><input class="inp" id="bfile" type="file" accept=".vmb"></div>
+      <div class="field"><label for="bfile">本地备份文件（.vmb）</label><input class="inp" id="bfile" type="file" accept=".vmb"></div>
       <div class="toolbar" style="margin-top:10px"><div class="acts"><button class="btn" data-act="backup-upload">上传到服务</button></div></div>
       <div class="hr"></div>
       <div class="toolbar">
-        <div class="field"><label>导入为新空间 ID</label><input class="inp" id="bnew" placeholder="留空则按完整恢复"></div>
-        <div class="field"><label>所属项目</label><input class="inp" id="bowner" placeholder="qq-main"></div>
+        <div class="field"><label for="bnew">导入为新空间 ID</label><input class="inp" id="bnew" placeholder="留空则按完整恢复"></div>
+        <div class="field"><label for="bowner">所属项目</label><input class="inp" id="bowner" placeholder="qq-main"></div>
       </div>
       <label class="hp" style="margin-top:8px"><input type="checkbox" id="breplace"> 替换同名空间（保留回退目录）</label>
       <div class="toolbar" style="margin-top:10px"><div class="acts">
@@ -1126,32 +1437,49 @@ function viewBackup(){
       </dl>${p.mode==="evidence"||p.evidenceOnly?`<p class="sub" style="margin-top:8px;color:var(--orange)">这份备份不含全量原始消息：恢复后可读、可召回，但<b>无法恢复全量历史检索</b>（重建需要 input/messages.jsonl）。</p>`:`<p class="acceptance-note">这份全量备份包含原始日志，可用来重建历史索引。</p>`}`:""}
       <p class="sub" style="font-size:12px;color:var(--muted);margin-top:12px">恢复会短暂停写（请求返回 503 MAINTENANCE），聊天可继续、稍后重试；完整恢复生成新目录，需用新目录启动。</p>
     </div>
-  </div>`;
+  </div>
+  <section class="card" id="index-recovery" aria-labelledby="index-recovery-title">
+    <div class="section-title"><h2 id="index-recovery-title">索引与恢复</h2><span class="space">当前空间：<b>${esc(S.space||"未选择")}</b></span></div>
+    <div class="split">
+      <div><h3 style="margin-bottom:10px">历史检索</h3><div id="history-index">${historyIndexHtml()}</div></div>
+      <div><h3 style="margin-bottom:10px">恢复验收</h3>${recoveryAcceptanceHtml()}</div>
+    </div>
+    <div id="history-live" class="sr-only" aria-live="polite" aria-atomic="true"></div>
+  </section>`;
 }
 
 /* ---------------- settings ---------------- */
-const SETTING_FIELDS=[
+const SETTING_GROUPS={
+  "向量检索":[
   ["embedBaseURL","向量服务地址","text"],["embedModel","向量模型","text"],["embedApiKey","向量密钥（留空不改）","password"],
   ["embedBatchSize","批大小","number"],["embedTimeoutMs","超时(ms)","number"],["topK","检索条数","number"],
+  ],
+  "整理模型":[
   ["llmBaseURL","整理服务地址","text"],["llmModel","整理模型","text"],["llmApiKey","整理密钥（留空不改）","password"],
+  ],
+  "后台任务":[
   ["consolidateEnabled","自动整理","bool"],["consolidateIntervalMin","整理间隔(分)","number"],
   ["autoIndexEnabled","自动索引","bool"],["autoIndexIntervalMin","索引间隔(分)","number"],
-  ["injectEnabled","自动注入","bool"],["rememberEnabled","允许写入","bool"],["profileCrossScope","跨渠道人物档案","bool"]
-];
+  ],
+  "记忆读写":[
+  ["injectEnabled","自动注入","bool"],["rememberEnabled","允许写入","bool"],["profileCrossScope","跨渠道人物档案","bool"],
+  ["reminderTimeZone","提醒时区（IANA，如 Asia/Hong_Kong）","text"]
+  ]
+};
 function viewSettings(){
   const s=S.settings, vals=s?.values||{}, sec=s?.secrets||{};
   return head("设置","模型接入、后台任务节奏与空间授权。密钥只显示是否已设置，不会回传明文。")+
   `<div class="card">
     <h2>模型与任务<span class="hint">${esc(S.space||"")}</span></h2>
-    ${s?`<div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(230px,1fr))">
-      ${SETTING_FIELDS.map(([k,label,type])=>{
+    ${s?`${Object.entries(SETTING_GROUPS).map(([title,fields])=>`<fieldset class="settings-section"><legend>${title}</legend><div class="grid">
+      ${fields.map(([k,label,type])=>{
         const v=vals[k];
         if(type==="bool")return `<label class="hp" style="padding:6px 0"><input type="checkbox" data-setting="${k}" ${v?"checked":""}> ${esc(label)}</label>`;
         const hint=type==="password"?(sec[k]?"已设置":""):"";
         return `<div class="field"><label for="st-${k}">${esc(label)} ${hint?`<span class="chip">${hint}</span>`:""}</label>
           <input class="inp" id="st-${k}" data-setting="${k}" type="${type==="number"?"number":type==="password"?"password":"text"}" value="${esc(v??"")}" placeholder="${type==="password"?"留空表示不修改":""}"></div>`;
       }).join("")}
-    </div>
+    </div></fieldset>`).join("")}
     <div class="toolbar" style="margin-top:14px"><div class="acts">
       <button class="btn primary" data-act="settings-save">保存改动</button>
       <button class="btn ghost" data-act="settings-load">重新读取</button>
@@ -1162,16 +1490,16 @@ function viewSettings(){
   <div class="card">
     <h2>空间与授权<span class="hint">${Object.keys(S.spaces?.spaces||{}).length} 个空间 · ${(S.spaces?.projects||[]).length} 个项目</span></h2>
     <div class="toolbar">
-      <div class="field"><label>新项目 ID</label><input class="inp" id="nproj" placeholder="qq-third"></div>
+      <div class="field"><label for="nproj">新项目 ID</label><input class="inp" id="nproj" placeholder="qq-third"></div>
       <div class="acts"><button class="btn" data-act="project-create">创建项目</button></div>
     </div>
     <div class="toolbar" style="margin-top:10px">
-      <div class="field"><label>新空间 ID</label><input class="inp" id="nspace" placeholder="space-x"></div>
-      <div class="field"><label>所属项目</label><input class="inp" id="nowner" list="projs" placeholder="qq-main"><datalist id="projs">${(S.spaces?.projects||[]).map(p=>`<option value="${esc(p)}">`).join("")}</datalist></div>
+      <div class="field"><label for="nspace">新空间 ID</label><input class="inp" id="nspace" placeholder="space-x"></div>
+      <div class="field"><label for="nowner">所属项目</label><input class="inp" id="nowner" list="projs" placeholder="qq-main"><datalist id="projs">${(S.spaces?.projects||[]).map(p=>`<option value="${esc(p)}">`).join("")}</datalist></div>
       <div class="acts"><button class="btn" data-act="space-create">创建空间</button></div>
     </div>
     <div class="hr"></div>
-    <div class="field"><label>允许读取「${esc(S.space||"")}」的项目（逗号分隔，留空撤销全部）</label>
+    <div class="field"><label for="readers">允许读取「${esc(S.space||"")}」的项目（逗号分隔，留空撤销全部）</label>
       <input class="inp" id="readers" value="${esc((S.spaces?.spaces?.[S.space]?.readers||[]).join(","))}"></div>
     <div class="acts" style="margin-top:10px"><button class="btn" data-act="readers-save">保存共享授权</button></div>
     <details><summary>空间清单原始响应</summary><pre>${esc(JSON.stringify(S.spaces,null,2))}</pre></details>
@@ -1180,10 +1508,67 @@ function viewSettings(){
 
 /* ---------------- actions ---------------- */
 $("#main").addEventListener("click",async e=>{
+  if(e.target.closest(".person-ref"))return;
   const el=e.target.closest("[data-act]"); if(!el||el.disabled)return;
-  const act=el.dataset.act;
+  const act=el.dataset.act, epoch=S.spaceEpoch, route=location.hash;
+  const isCurrent=()=>epoch===S.spaceEpoch&&route===location.hash&&el.isConnected;
+  const pending=["person-load","person-preview","person-op","subjects","pick-subject","subject-rev","entry-preview",
+    "entry-correct","entry-retract","entry-add","scene-create","job","refresh"].includes(act);
+  const panel=pending?el.closest(".page"):null;
+  if(el.closest(".page")?.getAttribute("aria-busy")==="true")return;
+  if(panel)panel.setAttribute("aria-busy","true");
+  const button=pending?el.closest("button")||$("button",el):null;
+  if(button)button.disabled=true;
   try{
-    if(act==="refresh"){await refreshBase();render();toast("已刷新","ok");}
+    if(act==="refresh"){
+      S.jobs=null;
+      void loadOverviewExtra();
+      await loadOverviewStatus({refresh:true});
+      if(epoch===S.spaceEpoch&&S.page==="overview"&&!S.degraded)toast("已刷新","ok");
+    }
+    else if(act==="overview-scenes"){
+      el.disabled=true;
+      try{
+        await readWorkspace();
+        if(epoch===S.spaceEpoch&&S.page==="overview")render();
+      }finally{el.disabled=false;}
+    }
+    else if(act==="workspace-retry"){render();}
+    else if(act==="load-scope-list"){
+      const status=el.nextElementSibling;
+      el.disabled=true;
+      status.textContent="正在加载会话…";
+      try{
+        await readWorkspace();
+        if(!isCurrent())return;
+        document.getElementById(el.dataset.target).innerHTML=personScopeOptions();
+        status.textContent=scopeOptions().length?"可从会话 ID 的建议中选择。":"暂无已知会话，可以手填会话 ID。";
+        el.remove();
+      }catch(error){
+        if(isCurrent())status.textContent="会话读取失败："+error.message;
+      }finally{el.disabled=false;}
+    }
+    else if(act==="recall-scopes"){
+      const status=$("#recall-scopes-status");
+      el.disabled=true;
+      status.textContent="正在加载会话…";
+      try{
+        await readWorkspace();
+        if(!isCurrent())return;
+        const choices=$("#recall-saved"),known=knownScopeOptions(recallKinds);
+        choices.innerHTML='<option value="">选择会话</option>'+known;
+        choices.closest(".field").hidden=!known;
+        status.textContent=known?"":"暂无已知会话，可以手填会话 ID。";
+        el.remove();
+        if(known)choices.focus({preventScroll:true});
+      }catch(error){
+        if(isCurrent())status.textContent="会话读取失败："+error.message;
+      }finally{el.disabled=false;}
+    }
+    else if(act==="people-retry"){
+      el.disabled=true;
+      await loadPeopleDirectory($("#actor"));
+    }
     else if(act==="open-history"){
       S.scrollHistory=true;
       if(S.page==="backup")render();else location.hash="#/backup";
@@ -1197,23 +1582,40 @@ $("#main").addEventListener("click",async e=>{
     else if(act==="job"){
       const type=el.dataset.type;
       const r=await api("spaces/"+sid()+"/jobs","POST",{type});
+      if(!isCurrent())return;
       toast("任务已提交："+type,"ok");
       const box=$("#jobbox"); if(box)box.innerHTML=`<pre>${esc(JSON.stringify(r,null,2))}</pre>`;
     }
     else if(act==="person-load"){
-      const actorId=$("#actor").value.trim(), kind=$("#skind").value, idv=$("#sid2").value.trim(), allScopes=$("#allsc").checked;
-      if(!actorId)throw new Error("先填账号");
-      S.scope={kind,id:idv}; S.personSel={actorId,allScopes,item:null};
-      S.person=await api("spaces/"+sid()+"/people","POST",{actorId,scope:S.scope,allScopes});
+      const input=$("#actor");
+      if(el.dataset.account)input.value=el.dataset.account;
+      const name=input.value.trim();
+      if(!name){input.focus();throw new Error("请输入昵称或账号");}
+      if(!S.ws&&!/^(?:qq:)?\d+$/i.test(name)){
+        try{await readWorkspace();}catch{}
+        if(!isCurrent())return;
+      }
+      const accounts=S.ws?.accounts||[];
+      const matches=accounts.filter(a=>a.displayName===name);
+      if(!accounts.some(a=>a.id===name)&&matches.length>1)throw new Error("有多个相同昵称，请从输入框建议中选择账号");
+      const actorId=accounts.find(a=>a.id===name)?.id||matches[0]?.id||name;
+      const scope={kind:$("#skind").value,id:$("#sid2").value.trim()}, allScopes=$("#allsc").checked;
+      const person=await api("spaces/"+sid()+"/people","POST",{actorId,scope,allScopes});
+      if(!isCurrent())return;
+      S.scope=scope; S.personSel={actorId,scope,allScopes,item:null};
+      S.person=person; S.personPreview=null;
       render(); toast("已读取 "+actorId,"ok");
     }
     else if(act==="pick-person"){
-      S.personSel=S.personSel||{}; S.personSel.item={key:el.dataset.key,itemKey:el.dataset.item};
+      S.personSel.item={key:el.dataset.key,itemKey:el.dataset.item};S.personPreview=null;
       render();
+      $("#pitem")?.focus({preventScroll:true});
+      $("#pedit")?.scrollIntoView({block:"nearest"});
     }
     else if(act==="person-preview"){
       const item=curPersonItem(); if(!item)throw new Error("先选一项");
-      const r=await api("spaces/"+sid()+"/people","POST",{actorId:S.personSel.actorId,scope:S.scope,allScopes:S.personSel.allScopes,action:"preview",target:{key:item.key,itemKey:item.itemKey}});
+      const r=await api("spaces/"+sid()+"/people","POST",{actorId:S.personSel.actorId,scope:S.personSel.scope,allScopes:S.personSel.allScopes,action:"preview",target:{key:item.key,itemKey:item.itemKey}});
+      if(!isCurrent())return;
       S.personPreview=r;
       const box=$("#pimpact"); if(box)box.innerHTML=`<details open><summary>预览：影响 ${(r.proven||[]).length} 处已确证关联</summary><pre>${esc(JSON.stringify(r,null,2))}</pre></details>`;
       toast("已预览影响","ok");
@@ -1221,32 +1623,54 @@ $("#main").addEventListener("click",async e=>{
     else if(act==="person-op"){
       const item=curPersonItem(); if(!item)throw new Error("先选一项");
       const op=el.dataset.op, value=$("#pvalue").value.trim(), reason=$("#preason").value.trim()||"管理员修订";
-      if(!S.personPreview||S.personPreview.item?.itemKey!==item.itemKey){
-        S.personPreview=await api("spaces/"+sid()+"/people","POST",{actorId:S.personSel.actorId,scope:S.scope,allScopes:S.personSel.allScopes,action:"preview",target:{key:item.key,itemKey:item.itemKey}});
-      }
-      const body={actorId:S.personSel.actorId,scope:S.scope,allScopes:S.personSel.allScopes,action:"revision",operationId:opId(),
-        target:{key:item.key,itemKey:item.itemKey},expectedEtag:item.etag,previewToken:S.personPreview.previewToken,op};
-      if(op==="replace")body.value=value;
-      if(op!=="replace"&&!reason)throw new Error("填原因");
-      body.reason=reason;
-      await api("spaces/"+sid()+"/people","POST",body);
+      if(op==="replace"&&!value){$("#pvalue").focus();throw new Error("请填写纠正后的内容");}
+      const path="spaces/"+sid()+"/people", {actorId,scope,allScopes}=S.personSel;
+      const target={key:item.key,itemKey:item.itemKey};
+      const preview=S.personPreview||await api(path,"POST",{actorId,scope,allScopes,action:"preview",target});
+      if(!isCurrent())return;
+      await api(path,"POST",{actorId,scope,allScopes,action:"revision",operationId:opId(),
+        target,expectedEtag:item.etag,previewToken:preview.previewToken,op,...(op==="replace"?{value}:{}),reason});
+      if(!isCurrent())return;
       S.personPreview=null;
-      S.person=await api("spaces/"+sid()+"/people","POST",{actorId:S.personSel.actorId,scope:S.scope,allScopes:S.personSel.allScopes});
+      const person=await api(path,"POST",{actorId,scope,allScopes});
+      if(!isCurrent())return;
+      S.person=person;
       render(); toast(op==="replace"?"已保存纠正":op==="hide"?"已撤回":"已恢复","ok");
+    }
+    else if(act==="scene-recall"){
+      const binding=(S.ws?.scenes?.[S.scene]?.bindings||[]).find(b=>recallKinds.includes(b.kind)&&b.id);
+      if(binding){S.scope={kind:binding.kind,id:binding.id};location.hash="#/recall";}
     }
     else if(act==="scene-new"){
       const box=$("#main .page");
-      if(box&&!$("#nscene"))box.insertAdjacentHTML("beforeend",`<div class="card">${sceneCreateForm()}</div>`);
+      if(box&&!$("#nscene"))box.children[0].insertAdjacentHTML("afterend",`<div class="card"><h2>新建场景</h2>${sceneCreateForm()}</div>`);
+      $("#nname")?.focus();
     }
     else if(act==="scene-create"){
       const typed=$("#nscene").value.trim(), name=$("#nname").value.trim(), kind=$("#nkind").value, idv=$("#nbid").value.trim();
       if(!idv)throw new Error("填场合 ID");
       const sceneId=typed||((kind||"group")+":"+idv);
       await wsAction("scene",{operationId:opId(),sceneId,name:name||sceneId,bindings:[{kind,id:idv}]});
-      S.scene=sceneId; await refreshBase(); render(); toast("场景已新建","ok");
+      if(!isCurrent())return;
+      selectScene(sceneId); await readWorkspace({refresh:true});
+      if(isCurrent()){render();toast("场景已新建","ok");}
     }
     else if(act==="pick-entry"){
-      S.entry=(S.ws?.entries||{})[el.dataset.id]||null; S.entryPreview=null; render();
+      if(S.entry?.id===el.dataset.id){$("#entry-editor").scrollIntoView({block:"nearest"});return;}
+      S.entry=(S.ws?.entries||{})[el.dataset.id]||null; S.entryPreview=null;
+      for(const row of $$("#entry-list [data-act=pick-entry]")){
+        const selected=row===el;
+        row.classList.toggle("sel",selected);
+        $("button",row).setAttribute("aria-pressed",selected);
+      }
+      $("#entry-editor").hidden=!S.entry;
+      $("#edetail").innerHTML=entryDetail();
+      $("#entry-editor").scrollIntoView({block:"nearest"});
+    }
+    else if(act==="entry-more"){
+      const previousLimit=S.sceneLimit;
+      S.sceneLimit+=50;updateSceneList();
+      $$("#entry-list .row button")[previousLimit]?.focus({preventScroll:true});
     }
     else if(act==="entry-add"){
       const confirm=el.dataset.confirm==="1";
@@ -1254,61 +1678,71 @@ $("#main").addEventListener("click",async e=>{
       const scope={kind:(S.ws?.scenes?.[S.scene]?.bindings?.[0]?.kind)||S.scope.kind,id:(S.ws?.scenes?.[S.scene]?.bindings?.[0]?.id)||S.scope.id};
       if(!scope.id)throw new Error("这个场景没有绑定场合，先在设置里确认");
       await wsAction("entry",{operationId:opId(),sceneId:S.scene,scope,kind:$("#ekind").value.trim()||"impression",text,shareable:$("#eshare").checked,confirm});
-      await refreshBase(); render(); toast(confirm?"已确认并生效":"已提交候选","ok");
+      if(!isCurrent())return;
+      await readWorkspace({refresh:true});
+      if(isCurrent()){render();toast(confirm?"已确认并生效":"已提交候选","ok");}
     }
     else if(act==="entry-preview"){
       if(!S.entry)throw new Error("先选条目");
-      S.entryPreview=await wsAction("preview",{entryId:S.entry.id});
-      const box=$("#eimpact"); if(box)box.innerHTML=`<details open><summary>影响：已确证 ${(S.entryPreview.proven||[]).length} · 可疑 ${(S.entryPreview.suspected||[]).length}</summary><pre>${esc(JSON.stringify(S.entryPreview,null,2))}</pre></details>`;
+      const preview=await wsAction("preview",{entryId:S.entry.id});
+      if(!isCurrent())return;
+      S.entryPreview=preview;
+      $("#eimpact").innerHTML=`<details open><summary>影响：已确证 ${(preview.proven||[]).length} · 可疑 ${(preview.suspected||[]).length}</summary><pre>${esc(JSON.stringify(preview,null,2))}</pre></details>`;
       toast("已预览","ok");
     }
-    else if(act==="entry-correct"){
-      if(!S.entry)throw new Error("先选条目");
-      if(!S.entryPreview)S.entryPreview=await wsAction("preview",{entryId:S.entry.id});
-      const scope=(S.ws?.scenes?.[S.scene]?.bindings?.[0])||S.scope;
-      await wsAction("entry",{operationId:opId(),sceneId:S.scene,scope,kind:S.entry.kind,text:$("#efix").value.trim(),shareable:!!S.entry.shareable,
-        entryId:S.entry.id,expectedRev:S.entry.rev,previewToken:S.entryPreview.previewToken,confirm:true});
-      await refreshBase(); S.entry=null;S.entryPreview=null; render(); toast("已按预览纠正","ok");
-    }
-    else if(act==="entry-retract"){
-      if(!S.entry)throw new Error("先选条目");
-      if(!S.entryPreview)S.entryPreview=await wsAction("preview",{entryId:S.entry.id});
-      await wsAction("retract",{operationId:opId(),entryId:S.entry.id,previewToken:S.entryPreview.previewToken,reason:$("#ereason").value.trim()||"管理员撤回"});
-      await refreshBase(); S.entry=null;S.entryPreview=null; render(); toast("已撤回（保留墓碑）","ok");
-    }
-    else if(act==="recall"){
-      const query=$("#q").value.trim(); if(!query)throw new Error("填查询");
-      S.lastQuery=query; S.scope={kind:$("#rk").value,id:$("#ri").value.trim()};
-      S.recall=await api("spaces/"+sid()+"/recall","POST",{query,scope:S.scope});
-      render();
+    else if(act==="entry-correct"||act==="entry-retract"){
+      const entry=S.entry,sceneId=S.scene;
+      if(!entry)throw new Error("先选条目");
+      const correcting=act==="entry-correct", text=$("#efix").value.trim(), reason=$("#ereason").value.trim()||"管理员撤回";
+      if(correcting&&!text){$("#efix").focus();throw new Error("请填写纠正后的内容");}
+      const scope=S.ws?.scenes?.[sceneId]?.bindings?.[0]||S.scope;
+      const preview=S.entryPreview||await wsAction("preview",{entryId:entry.id});
+      if(!isCurrent())return;
+      const common={operationId:opId(),entryId:entry.id,previewToken:preview.previewToken};
+      if(correcting){
+        await wsAction("entry",{...common,sceneId,scope,kind:entry.kind,text,shareable:!!entry.shareable,expectedRev:entry.rev,confirm:true});
+      }else{
+        await wsAction("retract",{...common,reason});
+      }
+      if(!isCurrent())return;
+      await readWorkspace({refresh:true});
+      if(!isCurrent())return;
+      S.entry=correcting?S.ws?.entries?.[entry.id]||null:null;S.entryPreview=null;
+      render();toast(correcting?"已保存纠正":"已撤回","ok");
     }
     else if(act==="subjects"){
-      S.scope={kind:$("#kscope").value,id:$("#iscope").value.trim()};
-      const q=$("#sq").value.trim();
-      const d=await api("spaces/"+sid()+"/subjects?"+new URLSearchParams({scopeKind:S.scope.kind,scopeId:S.scope.id,q}));
-      const subs=d.subjects||[];
-      const box=$("#slist");
-      box.innerHTML=subs.length?`<div class="rows" style="margin-top:12px">${subs.map(s=>`
-        <div class="row" data-act="pick-subject" data-id="${esc(s.id)}">
-          <span class="chip ${s.knowledgeStatus==="candidate"?"warn":"ok"}">${s.knowledgeStatus==="candidate"?"待确认":"已建档"}</span>
-          <div class="body"><div class="t">${esc(s.label)}</div><div class="m mono">${esc(s.id)}</div></div>
-        </div>`).join("")}</div>`:'<div class="empty">没有匹配的条目。</div>';
-      if(!subs.length)toast("没有匹配","err");
+      const scope={kind:$("#kscope").value,id:$("#iscope").value.trim()};
+      const query=$("#sq").value.trim();
+      const d=await api("spaces/"+sid()+"/subjects?"+new URLSearchParams({scopeKind:scope.kind,scopeId:scope.id,q:query}));
+      if(!isCurrent())return;
+      S.scope=scope;
+      S.subjectSearch={scope,query,items:d.subjects||[]};
+      S.subject=null;S.subjectSel=null;
+      render();
+      $("#sq")?.focus({preventScroll:true});
     }
     else if(act==="pick-subject"){
-      const d=await api("spaces/"+sid()+"/subjects/"+encodeURIComponent(el.dataset.id)+"?"+new URLSearchParams({scopeKind:S.scope.kind,scopeId:S.scope.id}));
-      S.subject=d; S.subjectSel=null; render();
+      const {scope}=S.subjectSearch;
+      const d=await api("spaces/"+sid()+"/subjects/"+encodeURIComponent(el.dataset.id)+"?"+new URLSearchParams({scopeKind:scope.kind,scopeId:scope.id}));
+      if(!isCurrent())return;
+      S.subject=d;S.subjectSel=null;render();
+      $("#subject-detail")?.scrollIntoView({block:"nearest"});
     }
     else if(act==="pick-obs"){
       S.subjectSel=(S.subject.observations||[]).find(o=>o.id===el.dataset.id)||null; render();
     }
     else if(act==="subject-rev"){
       if(!S.subject||!S.subjectSel)throw new Error("先选观察");
-      const mode=el.dataset.mode;
-      await api("spaces/"+sid()+"/subjects/"+encodeURIComponent(S.subject.subject.id)+"/revisions","POST",{
-        operationId:opId(),scope:S.scope,action:mode,observationId:S.subjectSel.id,expectedRev:S.subjectSel.rev,
-        statement:$("#sfix").value.trim(),reason:$("#sreason").value.trim()||"管理员纠正"});
-      const d=await api("spaces/"+sid()+"/subjects/"+encodeURIComponent(S.subject.subject.id)+"?"+new URLSearchParams({scopeKind:S.scope.kind,scopeId:S.scope.id}));
+      const mode=el.dataset.mode, {scope}=S.subjectSearch;
+      const path="spaces/"+sid()+"/subjects/"+encodeURIComponent(S.subject.subject.id);
+      const statement=$("#sfix").value.trim();
+      if(mode==="correct"&&!statement){$("#sfix").focus();throw new Error("请填写纠正后的内容");}
+      await api(path+"/revisions","POST",{
+        operationId:opId(),scope,action:mode,observationId:S.subjectSel.id,expectedRev:S.subjectSel.rev,
+        statement,reason:$("#sreason").value.trim()||"管理员纠正"});
+      if(!isCurrent())return;
+      const d=await api(path+"?"+new URLSearchParams({scopeKind:scope.kind,scopeId:scope.id}));
+      if(!isCurrent())return;
       S.subject=d;S.subjectSel=null;render(); toast(mode==="correct"?"已纠正":"已撤回","ok");
     }
     else if(act==="backup-full"||act==="backup-space"){
@@ -1366,7 +1800,7 @@ $("#main").addEventListener("click",async e=>{
         // 文件路径只保留在内存中供验收判断，不拼进任务提示，也不写浏览器日志。
         toast("恢复完成"+(r.evidenceOnly?"（证据级：可读可召回，不能重建索引）":""),"ok");
         S.backupPreview=null;
-      }finally{ await endJob(); await refreshBase(); render(); }
+      }finally{await endJob();refreshAfterMaintenance();}
     }
     else if(act==="settings-load"){
       S.settings=await api("admin/spaces/"+sid()+"/settings"); render(); toast("已读取设置","ok");
@@ -1394,7 +1828,7 @@ $("#main").addEventListener("click",async e=>{
       const spaceId=$("#nspace").value.trim(), owner=$("#nowner").value.trim();
       if(!spaceId||!owner)throw new Error("填空间 ID 与项目");
       await api("admin/spaces","POST",{spaceId,owner});
-      S.spaces=await api("admin/spaces"); render(); toast("空间已创建","ok");
+      S.spaces=await api("admin/spaces"); applySpaces(); render(); toast("空间已创建","ok");
     }
     else if(act==="readers-save"){
       const ids=$("#readers").value.split(",").map(x=>x.trim()).filter(Boolean);
@@ -1404,28 +1838,87 @@ $("#main").addEventListener("click",async e=>{
   }catch(err){
     // 维护态不是用户的错，也不该显示成一段英文错误 —— 直接把进度条接回来。
     if(err.code==="MAINTENANCE"){ await resumeJobIfAny(); toast("备份/恢复正在进行，进度见上方","err"); return; }
-    toast(err.message+(err.status?" · HTTP "+err.status:""),"err");
+    if(isCurrent())toast(err.message+(err.status?" · HTTP "+err.status:""),"err");
+  }finally{
+    panel?.removeAttribute("aria-busy");
+    if(button)button.disabled=false;
   }
 });
+$("#main").addEventListener("toggle",e=>{
+  const details=e.target;
+  const source=details.dataset.json;
+  if(!details.open||!source)return;
+  const pre=$("pre",details);
+  if(!pre.textContent)pre.textContent=JSON.stringify(S[source],null,2);
+},true);
+$("#main").addEventListener("submit",async e=>{
+  const form=e.target;
+  if(form.dataset.lookup!=="recall")return;
+  e.preventDefault();
+  const button=$('button[type="submit"]',form), status=$("#recall-status",form);
+  if(button.disabled)return;
+  const query=$("#q",form).value.trim();
+  const scope={kind:$("#rk",form).value,id:$("#ri",form).value.trim()};
+  if(!query||!scope.id){
+    status.textContent=!query?"请填写查询内容。":"请填写会话 ID。";
+    $(!query?"#q":"#ri",form).focus();
+    return;
+  }
+  S.lastQuery=query;
+  S.scope=scope;
+  button.disabled=true;
+  status.textContent="正在检索…";
+  try{
+    const reply=await api("spaces/"+sid()+"/recall","POST",{query,scope,purpose:"query"},{quiet:true});
+    if(!form.isConnected)return;
+    S.recall=reply; S.recallScope=scope; S.recallQuery=query;
+    $("#recall-results").innerHTML=recallResults();
+    status.textContent="检索完成";
+  }catch(error){
+    if(form.isConnected)status.textContent="检索失败："+error.message;
+  }finally{button.disabled=false;}
+});
 $("#main").addEventListener("change",e=>{
+  if(e.target.id==="rk"){const known=$("#recall-saved");if(known)known.value="";}
+  if(e.target.closest(".page")?.getAttribute("aria-busy")==="true"){
+    if(e.target.id==="pitem")e.target.value=S.personSel?.item?[S.personSel.item.key,S.personSel.item.itemKey].join("||"):"";
+    if(e.target.id==="scenesel")e.target.value=S.scene;
+    if(e.target.matches("#pitem,#scenesel"))return;
+  }
+  if(e.target.id==="entry-status"){S.sceneStatus=e.target.value;S.sceneLimit=50;updateSceneList();return;}
   const el=e.target.closest("[data-change]"); if(!el)return;
-  if(el.dataset.change==="scene-pick"){S.scene=el.value;S.entry=null;S.entryPreview=null;render();}
+  if(el.dataset.change==="recall-scope"&&el.value){
+    const [kind,id]=JSON.parse(el.value);
+    $("#rk").value=kind;
+    $("#ri").value=id;
+  }
+  if(el.dataset.change==="scene-pick"){
+    selectScene(el.value);
+    history.replaceState(null,"","#/scene?scene="+encodeURIComponent(el.value));
+    render();
+    $("#scenesel")?.focus({preventScroll:true});
+  }
   if(el.dataset.change==="pick-item"){
     const [key,itemKey]=String(el.value).split("||");
-    S.personSel=S.personSel||{}; S.personSel.item={key,itemKey}; S.personPreview=null; render();
+    S.personSel.item=el.value?{key,itemKey}:null; S.personPreview=null;
+    $("#pedit").innerHTML=personEditor();
+    $("#pitem").focus({preventScroll:true});
+    for(const card of $$("#main [data-act=pick-person]"))
+      card.classList.toggle("sel",card.dataset.key===key&&card.dataset.item===itemKey);
   }
 });
 $("#main").addEventListener("input",e=>{
-  const el=e.target.closest("[data-input]");
+  if(e.target.id==="actor"&&S.ws)$("#accounts").innerHTML=accountOptions(e.target.value);
+  if(e.target.id==="ri") {const known=$("#recall-saved");if(known)known.value="";}
+  if(e.target.id==="entry-search"){S.sceneFilter=e.target.value;S.sceneLimit=50;updateSceneList();}
   // 密码存在内存里跟着页面走（不写进 HTML）：备份/预览/恢复三步用的是同一个密码。
   if(e.target.id==="bpass")S.bpass=e.target.value;
   // radio 没有 data-input，单独认：模式要跨 render 保持（否则刷新一下就被重置成证据级）。
   if(e.target.name==="bmode")S.backupMode=e.target.value;
 });
 $("#main").addEventListener("keydown",e=>{
-  if(e.key!=="Enter")return;
+  if(e.key!=="Enter"||e.isComposing)return;
   const id=e.target.id;
-  if(id==="q"){e.preventDefault();$('[data-act="recall"]')?.click();}
   if(id==="actor"){e.preventDefault();$('[data-act="person-load"]')?.click();}
   if(id==="sq"){e.preventDefault();$('[data-act="subjects"]')?.click();}
 });

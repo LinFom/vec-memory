@@ -348,7 +348,18 @@ async function job(p){if(p.type==='history-lexical')return historyIndex.rebuild(
 async function status(){const rt=await getRuntime();return {ok:true,messages:canonicalMessages(input).length,entities:canonicalEntities(input).length,background:backgroundStatus,historyIndex:historyIndex.status(),embeddingConfigured:checkEndpoint(endpointOf(rt.settings)).ok,llmConfigured:!!(rt.settings.llmBaseURL&&rt.settings.llmModel),dataRoot:legacy,sourceRoot:input};}
 async function workspaceOp(p) {
  const {action,admin,...request}=p;
- if(action==='state')return {ok:true,...workspace.state(),accounts:canonicalEntities(input)};
+ if(action==='state'){
+   const rt=await getRuntime();await ensureIdentity(rt);
+   const accounts=canonicalEntities(input);
+   const displayNames=new Map(accounts.map(e=>[e.id,e.displayName]));
+   const people=[];
+   for(const [label,id] of rt.normalizer.byLabel){
+     if(!/^P\d+$/.test(label))continue;
+     const entity=rt.normalizer.entities.get(id);
+     people.push({label,id,name:displayNames.get(id)||[...(entity?.surface||[])][0]||id});
+   }
+   return {ok:true,...workspace.state(),accounts,people};
+ }
  if(action==='scenes') {const state=workspace.state(),chat=canonicalChatKey(request.scope),visible=new Set(workspace.query(request).map(e=>e.sceneId));return {ok:true,scenes:Object.values(state.scenes).filter(s=>s.bindings.some(b=>canonicalChatKey(b)===chat)||visible.has(s.sceneId)).map(s=>({sceneId:s.sceneId,name:s.name,type:s.type,nameSource:sceneNameSource(s)}))};}
   if(action==='ensureScene') {
    const sceneId=canonicalChatKey(request.scope);

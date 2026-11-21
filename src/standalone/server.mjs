@@ -33,7 +33,7 @@ export function createStandaloneServer(options) {
         return send(200, { status: 'ok', service: 'vec-memory', protocolVersion: 1 });
       }
       // Static pages live on a fixed allowlist so no arbitrary file is reachable.
-      const ASSETS=['galaxy-page.mjs','galaxy-renderer.mjs','galaxy-layout.mjs','galaxy.css','vendor/three/three.module.js','vendor/three/three.core.js','vendor/three/OrbitControls.js'];
+      const ASSETS=['continuity-page.js','galaxy-page.mjs','galaxy-renderer.mjs','galaxy-layout.mjs','galaxy.css','vendor/three/three.module.js','vendor/three/three.core.js','vendor/three/OrbitControls.js'];
       const asset=ASSETS.find(a=>url.pathname==='/'+a);
       if(asset&&req.method==='GET'){res.writeHead(200,{'content-type':asset.endsWith('.css')?'text/css; charset=utf-8':'text/javascript; charset=utf-8','cache-control':'no-cache'});res.end(fs.readFileSync(fileURLToPath(new URL('../../web/'+asset,import.meta.url))));return;}
       const PAGES = {'/': 'standalone.html', '/standalone.html': 'standalone.html', '/standalone-raw.html': 'standalone-raw.html'};
